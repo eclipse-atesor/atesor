@@ -410,54 +410,6 @@
       "sandbox": "debian-riscv64"
     },
     {
-      "name": "Auto: gogo - Remove broken local replacement for gith",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "gogo",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/tinygo\\ \\(exit\\ 1\\)\\ \\-\\ stat\\ /wor",
-      "fix": {
-        "strategy": "Remove broken local replacement for github.com/chainreactors/rem in go.mod",
-        "actions": [
-          {
-            "type": "command",
-            "command": "if [ -f go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' go.mod; fi; if [ -f v2/go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' v2/go.mod; fi"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from gogo.",
-      "id": "fixer-auto-004",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: ksubdomain - Install libpcap development headers requ",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "ksubdomain",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/ksubdomain\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ git",
-      "fix": {
-        "strategy": "Install libpcap development headers required by gopacket",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from ksubdomain.",
-      "id": "fixer-auto-005",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
       "name": "Auto: doggo - Install a newer Go toolchain (1.26.4) th",
       "tags": [
         "go",
@@ -490,7 +442,31 @@
       "sandbox": "debian-riscv64"
     },
     {
-      "name": "Auto: arc - Add a top‑level go.mod and a minimal cmd",
+      "name": "Auto: ksubdomain - Install libpcap development headers requ",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "ksubdomain",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/ksubdomain\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ git",
+      "fix": {
+        "strategy": "Install libpcap development headers required by gopacket",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ksubdomain.",
+      "id": "fixer-auto-005",
+      "source": "auto",
+      "timestamp": "2026-07-06",
+      "sandbox": "debian-riscv64"
+    },
+    {
+      "name": "Auto: arc - Add a top\u2011level go.mod and a minimal cmd",
       "tags": [
         "go",
         "auto-fix"
@@ -499,7 +475,7 @@
       "repo_name": "arc",
       "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/arc\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ cannot\\ f",
       "fix": {
-        "strategy": "Add a top‑level go.mod and a minimal cmd/arc package so that the existing build command finds a module and a main package to compile.",
+        "strategy": "Add a top\u2011level go.mod and a minimal cmd/arc package so that the existing build command finds a module and a main package to compile.",
         "actions": []
       },
       "reasoning": "Auto-learned fix from arc.",
@@ -693,6 +669,34 @@
       "source": "auto",
       "timestamp": "2026-07-07",
       "sandbox": "debian-riscv64"
+    },
+    {
+      "name": "Auto: mult - Override Go toolchain version check to a",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "mult",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ go\\.mod\\ requires\\ go\\ >=\\ 1\\.26\\.4\\ \\(r",
+      "fix": {
+        "strategy": "Override Go toolchain version check to allow building with Go 1.26.3",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cat go.mod"
+          },
+          {
+            "type": "command",
+            "command": "GOTOOLCHAIN=auto go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mult.",
+      "id": "fixer-auto-015",
+      "source": "auto",
+      "timestamp": "2026-08-05",
+      "sandbox": "alpine-riscv64"
     }
   ]
 }
