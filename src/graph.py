@@ -44,7 +44,7 @@ from .memory import (
     save_learned_example,
     save_to_recipe_cache,
 )
-from .models import create_llm
+from .models import LLM_REQUEST_TIMEOUT, create_llm
 from .scripted_ops import ScriptedOperations, quick_analysis
 from .state import (
     AgentRole,
@@ -67,6 +67,13 @@ from .tools import apply_patch, execute_command
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Caller-side wall timeout for a single LLM invocation, in seconds.
+# MUST stay strictly greater than models.LLM_REQUEST_TIMEOUT so the
+# provider's own HTTP timeout fires first and releases the socket;
+# otherwise a timed-out call orphans its worker thread and connection
+# for the remainder of the provider request (MEM-01).
+LLM_WALL_TIMEOUT = LLM_REQUEST_TIMEOUT + 15
 
 # Initialize scripted operations
 scripted_ops = ScriptedOperations()
@@ -94,10 +101,33 @@ def get_model_pool_for_role(role: AgentRole) -> List[BaseChatModel]:
     return create_llm_pool(role)
 
 
+def _is_within_repo(candidate: str, repo_path: str) -> bool:
+    """Return True when ``candidate`` resolves inside ``repo_path``.
+
+    Defence-in-depth for LLM-supplied file paths: ``os.path.join``
+    happily collapses ``../..`` back out of the repo, and
+    ``shlex.quote`` preserves the traversal intact. Resolving both
+    sides with ``realpath`` is the only reliable containment test.
+
+    Args:
+        candidate: The joined path the agent wants to write.
+        repo_path: The repository root the write must stay inside.
+
+    Returns:
+        True if the write is contained, False otherwise.
+    """
+    try:
+        root = os.path.realpath(repo_path)
+        target = os.path.realpath(candidate)
+    except OSError:
+        return False
+    return target == root or target.startswith(root + os.sep)
+
+
 def invoke_llm(
     llm: BaseChatModel,
     messages: List[BaseMessage],
-    timeout: int = 120,
+    timeout: int = LLM_WALL_TIMEOUT,
 ) -> BaseMessage:
     """Invoke an LLM with a hard timeout to prevent indefinite hangs.
 
@@ -2930,6 +2960,12 @@ def validate_fix_command(command: str) -> tuple[bool, str]:
                     f"Use 'go {pkg}' as a separate command."
                 )
 
+    from .tools import CommandValidator
+
+    single_ok, single_reason = CommandValidator().is_safe_single(command)
+    if not single_ok:
+        return False, single_reason
+
     return True, "Command is safe"
 
 
@@ -3252,10 +3288,20 @@ def _run_fixer_investigation(state: AgentState, commands: List[str]) -> str:
         if not cmd:
             continue
         first = cmd.split()[0] if cmd.split() else ""
-        if first not in _INVESTIGATE_ALLOWED or ">" in cmd:
+        from .tools import CommandValidator
+
+        segments = CommandValidator.split_segments(cmd)
+        heads = [s.split()[0] for s in segments if s.split()]
+        if (
+            first not in _INVESTIGATE_ALLOWED
+            or len(segments) != 1
+            or any(head not in _INVESTIGATE_ALLOWED for head in heads)
+            or ">" in cmd
+            or "<" in cmd
+        ):
             sections.append(
-                f"$ {cmd}\n[rejected: only read-only inspection "
-                f"commands are allowed]"
+                f"$ {cmd}\n[rejected: only a single read-only inspection "
+                f"command is allowed]"
             )
             continue
         result = execute_command(cmd, cwd=state.repo_path, use_docker=True)
@@ -3504,6 +3550,15 @@ def fixer_node(state: AgentState) -> AgentState:
 
                 full_file_path = os.path.join(state.repo_path, file_path)
 
+                if not _is_within_repo(full_file_path, state.repo_path):
+                    logger.error(
+                        f"Refusing create_file outside repo: {file_path}"
+                    )
+                    changes_made.append(
+                        f"REJECTED create_file outside repo: {file_path}"
+                    )
+                    continue
+
                 dir_path = os.path.dirname(full_file_path)
                 if dir_path:
                     mkdir_result = execute_command(
@@ -3542,6 +3597,17 @@ def fixer_node(state: AgentState) -> AgentState:
                     if file_path
                     else None
                 )
+
+                if full_file_path and not _is_within_repo(
+                    full_file_path, state.repo_path
+                ):
+                    logger.error(
+                        f"Refusing patch outside repo: {file_path}"
+                    )
+                    changes_made.append(
+                        f"REJECTED patch outside repo: {file_path}"
+                    )
+                    continue
 
                 if apply_patch(
                     patch_content,

@@ -37,8 +37,14 @@ from typing import Any, Callable, Optional
 from langchain_core.messages import HumanMessage
 
 from .llm_logger import log_llm_call
+from .models import LLM_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+# Wall timeout for a validated LLM call. Kept strictly above the
+# provider's own HTTP timeout so the socket is released before we give
+# up waiting, instead of orphaning the worker thread (MEM-01).
+LLM_WALL_TIMEOUT = LLM_REQUEST_TIMEOUT + 15
 
 
 # ----------------------------------------------------------------------------
@@ -197,7 +203,7 @@ def llm_call_with_validation(
     audit_metadata: Optional[dict] = None,
     max_retries: int = 2,  # total LLM calls = max_retries + 1
     critique_template: str = _DEFAULT_CRITIQUE,
-    timeout: int = 120,
+    timeout: int = LLM_WALL_TIMEOUT,
     fallback_llms: Optional[
         list
     ] = None,  # rotate to next model on provider errors

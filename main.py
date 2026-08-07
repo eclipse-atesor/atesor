@@ -1418,115 +1418,139 @@ def rebuild_all_sandboxes() -> bool:
     return True
 
 
+class _CleanHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Compact help layout.
+
+    Two deviations from argparse's default rendering:
+
+    * short and long options share one metavar, so an option reads
+      ``-r, --repo URL`` instead of ``-r URL, --repo URL``;
+    * help text starts in a fixed column so descriptions line up.
+
+    The epilog is still emitted verbatim (RawDescription behaviour).
+    """
+
+    def __init__(self, prog: str, **kwargs) -> None:
+        kwargs.setdefault("max_help_position", 26)
+        super().__init__(prog, **kwargs)
+
+    def _format_action_invocation(self, action: argparse.Action) -> str:
+        if not action.option_strings:
+            return super()._format_action_invocation(action)
+        joined = ", ".join(action.option_strings)
+        if action.nargs == 0:
+            return joined
+        metavar = self._format_args(
+            action, self._get_default_metavar_for_optional(action)
+        )
+        return f"{joined} {metavar}"
+
+
 def main() -> int:
     """Run the CLI entry point and return the process exit code."""
     parser = argparse.ArgumentParser(
         prog="atesor-ai",
-        description="ATESOR AI - Automated software porting agent",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,  # -h is declared in the "other" group below
+        usage=(
+            "atesor-ai --repo URL [options]\n"
+            "       atesor-ai --setup-only | --cleanup | --clean-workspace"
+        ),
+        formatter_class=_CleanHelpFormatter,
         epilog=(
-            "\n"
-            "Examples:\n"
+            "examples:\n"
+            "  atesor-ai --setup-only"
+            "                       # first-time sandbox setup\n"
             "  atesor-ai --repo https://github.com/madler/zlib\n"
-            "  atesor-ai --repo "
-            "https://github.com/sqlite/sqlite "
-            "--max-attempts 10 --verbose\n"
-            "  atesor-ai --cleanup\n"
-            "        "
+            "  atesor-ai --repo https://github.com/madler/zlib --verbose\n"
+            "  atesor-ai --repo https://github.com/sqlite/sqlite "
+            "--platform debian --package\n"
+            "\n"
+            "environment:\n"
+            "  LLM_PROVIDER   gemini | openai | openrouter, plus the "
+            "matching *_API_KEY\n"
+            "  GIT_TOKEN      token for cloning private GitHub repos\n"
+            "  ATESOR_HOME    runtime state dir "
+            "(default: ~/.local/share/atesor-ai)\n"
+            "  Full list in .env-example; a .env in the current dir or\n"
+            "  ~/.config/atesor-ai/ is loaded automatically.\n"
         ),
     )
 
-    parser.add_argument(
+    porting = parser.add_argument_group("porting")
+    porting.add_argument(
+        "-r", "--repo", metavar="URL", help="repository to port"
+    )
+    porting.add_argument(
+        "-m",
+        "--max-attempts",
+        metavar="N",
+        type=int,
+        default=5,
+        help="fix attempts before escalating (default: 5)",
+    )
+    porting.add_argument(
+        "--platform",
+        metavar="NAME",
+        choices=["alpine", "debian", "ubuntu", "auto"],
+        default="auto",
+        help="sandbox distro: alpine|debian|ubuntu|auto",
+    )
+    porting.add_argument(
+        "--package",
+        action="store_true",
+        help="zip recipe + sources on success",
+    )
+    porting.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore the recipe cache and re-run the full pipeline",
+    )
+    porting.add_argument(
+        "-v", "--verbose", action="store_true", help="show agent activity"
+    )
+
+    sandbox = parser.add_argument_group("sandbox")
+    sandbox.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="provision the build sandbox and exit",
+    )
+    sandbox.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="force a rebuild of the sandbox image before running",
+    )
+    sandbox.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="stop and remove the sandbox container, then exit",
+    )
+    sandbox.add_argument(
+        "--clean-image",
+        action="store_true",
+        help="also remove the sandbox image (implies --cleanup)",
+    )
+    sandbox.add_argument(
+        "--clean-workspace",
+        action="store_true",
+        help="reclaim disk space used by the workspace",
+    )
+
+    other = parser.add_argument_group("other")
+    other.add_argument(
+        "-h", "--help", action="help", help="show this help and exit"
+    )
+    other.add_argument(
         "--version",
         action="version",
         version=f"atesor-ai {__version__}",
+        help="show the version and exit",
     )
-
-    parser.add_argument(
-        "--repo", "-r", type=str, help="GitHub/GitLab repository URL to port"
-    )
-
-    parser.add_argument(
-        "--max-attempts",
-        "-m",
-        type=int,
-        default=5,
-        help="Maximum fix attempts before escalation (default: 5)",
-    )
-
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose output"
-    )
-
-    parser.add_argument(
-        "--cleanup",
-        action="store_true",
-        help="Clean up Docker container and exit",
-    )
-
-    parser.add_argument(
-        "--setup-only",
-        action="store_true",
-        help="Only set up the Docker environment, don't run agent",
-    )
-
-    parser.add_argument(
-        "--clean-workspace",
-        action="store_true",
-        help="Clean up workspace directory to manage size",
-    )
-
-    parser.add_argument(
-        "--clean-image",
-        action="store_true",
-        help="Remove the Docker image as well as the container",
-    )
-
-    parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help=(
-            "Force rebuild of sandbox image(s). In infra-only mode, "
-            "without --platform/--container, rebuilds both Alpine and Debian."
-        ),
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Skip recipe cache and re-run full pipeline",
-    )
-    parser.add_argument(
-        "--package",
-        action="store_true",
-        help=(
-            "On a successful build, write a zip artifact "
-            "(recipe + source tree + manifest) to "
-            "workspace/packages/. Filename format: "
-            "<repo>-<YYYYMMDD-HHMMSS>-<platform>.zip. "
-            "Has no effect on cache hits or failed builds."
-        ),
-    )
-    parser.add_argument(
-        "--platform",
-        choices=["alpine", "debian", "ubuntu", "auto"],
-        default="auto",
-        help=(
-            "Sandbox platform profile (default: auto-detect from "
-            "container's /etc/os-release)"
-        ),
-    )
-    parser.add_argument(
+    other.add_argument(
         "--container",
+        metavar="NAME",
         default=None,
-        help=(
-            "Override the sandbox container name (defaults to the "
-            "platform profile's "
-            "name, e.g. 'atesor-ai-sandbox' or "
-            "'atesor-ai-sandbox-debian'). Used by "
-            "batch_test.py to assign each worker its own container so "
-            "apt/apk locks "
-            "do not serialize across parallel runs."
-        ),
+        help="override the sandbox container name (batch runs)",
     )
 
     args = parser.parse_args()
@@ -1543,10 +1567,27 @@ def main() -> int:
     # derivation in create_initial_state exactly — the recipe cache is
     # keyed by the state's repo_name, so any divergence here makes
     # cache lookups miss forever.
-    from src.state import sanitize_repo_name
+    from src.state import is_valid_repo_url, sanitize_repo_name
 
     repo_name = ""
     if args.repo:
+        if not is_valid_repo_url(args.repo):
+            print(
+                colored(
+                    f"ERROR: unsupported or unsafe repository URL: "
+                    f"{args.repo!r}",
+                    "red",
+                )
+            )
+            print(
+                colored(
+                    "  Expected a plain http(s) URL without shell "
+                    "metacharacters, e.g.\n"
+                    "    atesor-ai --repo https://github.com/madler/zlib",
+                    "yellow",
+                )
+            )
+            return 1
         repo_name = sanitize_repo_name(
             args.repo.strip().rstrip("/").split("/")[-1].removesuffix(".git")
         )
@@ -1560,14 +1601,22 @@ def main() -> int:
 
         set_llm_log_repo(repo_name)
 
-    # Handle cleanup
+    if (args.cleanup or args.clean_image) and args.repo and not args.rebuild:
+        print(
+            colored(
+                "NOTE: --cleanup/--clean-image exit after teardown; "
+                f"the repository {args.repo!r} will NOT be ported. "
+                "Re-run without the cleanup flag to port it.",
+                "yellow",
+            )
+        )
+
     if args.cleanup:
         cleanup_container(remove_image=args.clean_image)
         if not args.rebuild:
             return 0
 
     if args.clean_image and not args.cleanup:
-        # If only --clean-image is provided, still perform cleanup
         cleanup_container(remove_image=True)
         if not args.rebuild:
             return 0

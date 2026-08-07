@@ -27,18 +27,10 @@ from .state import AgentRole
 
 logger = logging.getLogger(__name__)
 
-# Process-level cache for the OpenRouter live-model catalogue. Populated
-# by _discover_openrouter_free_models() on first use, then reused so
-# every create_llm_pool() call doesn't re-hit the /models endpoint.
-_FREE_MODELS_CACHE: "List[str] | None" = None
 
-# Default output-token cap applied to every provider. Kept intentionally
-# conservative so free-tier OpenRouter accounts (which reject calls whose
-# requested `max_tokens` exceeds their remaining credit with HTTP 402)
-# stay well within budget. Agent JSON outputs are typically <4k tokens;
-# 8k gives a healthy safety margin. Override per-role by wrapping the
-# returned LLM if a specific agent needs more.
+_FREE_MODELS_CACHE: "List[str] | None" = None
 _DEFAULT_MAX_TOKENS = int(os.getenv("ATESOR_MAX_OUTPUT_TOKENS", "8192"))
+LLM_REQUEST_TIMEOUT = int(os.getenv("ATESOR_LLM_TIMEOUT", "120"))
 
 
 class ModelProvider(str, Enum):
@@ -76,16 +68,8 @@ MODEL_CONFIG = {
             "temperature": 0.1,
         },
     },
-    # OpenRouter free-tier slugs are retired without notice (see run
-    # 28020958388 — ``google/gemini-2.0-flash-exp:free`` went dark).
+
     # NOTE: ``openrouter/free`` is now an official Free Models Router
-    # (availability- and capability-aware) and is appended to every
-    # fallback chain by ``_openrouter_fallback_ids``. We still
-    # (a) keep a currently-live coding-oriented slug as the per-role
-    # default, (b) diversify across roles so a single retirement can't
-    # blackhole every agent, and (c) let ``create_llm_pool`` refresh the
-    # fallback list dynamically from ``/models`` at pool-creation time.
-    # Override any of these via ``OPENROUTER_FALLBACK_MODELS``.
     "openrouter": {
         "supervisor": {
             "model": "qwen/qwen3-coder:free",
@@ -359,14 +343,14 @@ def _create_llm_with_model(role: AgentRole, model_name: str) -> BaseChatModel:
         return ChatOpenAI(
             model=model_name,
             temperature=temperature,
-            request_timeout=120,
+            request_timeout=LLM_REQUEST_TIMEOUT,
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
     elif provider == ModelProvider.GEMINI.value:
         return ChatGoogleGenerativeAI(
             model=model_name,
             temperature=temperature,
-            timeout=120,
+            timeout=LLM_REQUEST_TIMEOUT,
             max_output_tokens=_DEFAULT_MAX_TOKENS,
         )
     elif provider == ModelProvider.OPENROUTER.value:
@@ -394,7 +378,7 @@ def _create_llm_with_model(role: AgentRole, model_name: str) -> BaseChatModel:
             temperature=temperature,
             openai_api_key=os.getenv("OPENROUTER_API_KEY"),
             openai_api_base="https://openrouter.ai/api/v1",
-            request_timeout=120,
+            request_timeout=LLM_REQUEST_TIMEOUT,
             extra_body={"models": server_side_fallbacks},
             # OpenRouter free-tier accounts get HTTP 402 when the
             # requested `max_tokens` exceeds available credit. Agent

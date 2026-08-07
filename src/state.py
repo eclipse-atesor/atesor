@@ -29,6 +29,14 @@ from langchain_core.messages import BaseMessage
 # ============================================================================
 
 
+# Growth caps for the append-only run records (MEM-03). Both lists are
+# serialized wholesale into `<repo>_state_*.json`, so an escalated run
+# that walks the 120-step recursion limit would otherwise balloon both
+# memory and the artifact. Only the tail is ever read back.
+MAX_AUDIT_EVENTS = 2000
+MAX_ERROR_HISTORY = 200
+
+
 class BuildStatus(str, Enum):
     """Current status of the build process."""
 
@@ -358,8 +366,14 @@ class AgentState:
         self.last_updated = datetime.now()
 
     def add_error(self, error: ErrorRecord) -> None:
-        """Add an error to history and update state."""
+        """Add an error to history and update state.
+
+        History is capped at ``MAX_ERROR_HISTORY`` (MEM-03); the
+        escalation logic only inspects recent errors.
+        """
         self.error_history.append(error)
+        if len(self.error_history) > MAX_ERROR_HISTORY:
+            del self.error_history[:-MAX_ERROR_HISTORY]
         self.last_error = error.message
         self.last_error_category = error.category
         self.last_error_severity = error.severity
@@ -400,7 +414,16 @@ class AgentState:
         self.update_timestamp()
 
     def log_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Add an event to the audit trail."""
+        """Add an event to the audit trail.
+
+        The trail is capped at ``MAX_AUDIT_EVENTS``: it is appended to on
+        every scripted op (dozens per attempt) and serialized wholesale
+        by :meth:`to_dict`/``save_to_json``, so an escalated run that
+        walks the 120-step recursion limit would otherwise grow the
+        in-memory list and the state JSON without bound (MEM-03).
+        Oldest events are dropped first; the report only ever reads the
+        tail via :meth:`get_last_audit_events`.
+        """
         self.audit_trail.append(
             {
                 "timestamp": datetime.now().isoformat(),
@@ -411,6 +434,8 @@ class AgentState:
                 "data": data,
             }
         )
+        if len(self.audit_trail) > MAX_AUDIT_EVENTS:
+            del self.audit_trail[:-MAX_AUDIT_EVENTS]
         self.update_timestamp()
 
     def log_agent_decision(
@@ -535,6 +560,13 @@ def sanitize_repo_name(raw: str) -> str:
     return name or "repo"
 
 
+def is_valid_repo_url(repo_url: str) -> bool:
+    """Return True when ``repo_url`` is a plain, shell-safe http(s) URL.
+    """
+    url = (repo_url or "").strip()
+    return bool(re.fullmatch(r"https?://[A-Za-z0-9._~:/?#@!+,=%\-]+", url))
+
+
 def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
     """Create initial state for a new porting task.
 
@@ -545,9 +577,7 @@ def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
             rejected up front.
     """
     url = (repo_url or "").strip()
-    # Allowlist: scheme + URL-safe chars only. Deliberately excludes
-    # every shell metacharacter (quotes, $, ;, |, &, spaces, ...).
-    if not re.fullmatch(r"https?://[A-Za-z0-9._~:/?#@!+,=%\-]+", url):
+    if not is_valid_repo_url(url):
         raise ValueError(
             f"Unsupported or unsafe repository URL: {repo_url!r} "
             "(expected a plain http(s) URL without shell metacharacters)"
@@ -968,12 +998,6 @@ def get_next_action_recommendation(state: AgentState) -> Action:
         else:
             return Action.FIXER  # Try to fix
 
-    # Success — always go to FINISH. The builder_node does not actually run
-    # tests today: it just re-verifies artifacts. Returning BUILDER here while
-    # the supervisor is on its cost-optimized (LLM-bypassed) path creates an
-    # infinite supervisor↔builder loop after a successful build, which silently
-    # burns the 1h batch timeout (observed root cause for chisel, gum, ghorg,
-    # gickup, csvtk and ~20 other "TIMEOUT" failures on 2026-05-23).
     if state.build_status == BuildStatus.SUCCESS:
         return Action.FINISH
 
