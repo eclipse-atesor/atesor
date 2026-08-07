@@ -633,17 +633,20 @@ class ScriptedOperations:
         cmd_dir = os.path.join(root, "cmd")
         if os.path.isdir(cmd_dir):
             score += 8
-        for entry in os.scandir(root):
-            if entry.is_file() and entry.name.endswith(".go"):
-                try:
-                    with open(
-                        entry.path, "r", encoding="utf-8", errors="ignore"
-                    ) as f:
-                        if "package main" in f.read(2048):
-                            score += 5
-                            break
-                except Exception:
-                    pass
+        # `with` so the directory FD is released even though we `break`
+        # out of the loop on the first match (MEM-02).
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.endswith(".go"):
+                    try:
+                        with open(
+                            entry.path, "r", encoding="utf-8", errors="ignore"
+                        ) as f:
+                            if "package main" in f.read(2048):
+                                score += 5
+                                break
+                    except Exception:
+                        pass
         return score
 
     def detect_build_system(self, repo_path: str) -> BuildSystemInfo:
