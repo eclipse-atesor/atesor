@@ -21,6 +21,11 @@ on:
         type: string
         required: false
         default: "50"
+      llm_provider:
+        description: "LLM provider to run with (preflight gates on this)"
+        type: choice
+        default: openrouter
+        options: [openrouter, gemini, openai]
 
 permissions:
   contents: write   # publish assets to the monthly release
@@ -29,6 +34,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   PYTHONUNBUFFERED: "1"
+  LLM_PROVIDER: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
   # SHA of the main run we are retrying for, so all 4 jobs agree on parity.
   MAIN_RUN_ID: >-
     ${{ github.event.workflow_run.id || github.event.inputs.main_run_id }}
@@ -43,6 +49,21 @@ concurrency:
 
 jobs:
   # ------------------------------------------------------------------------- #
+  # preflight — is the selected LLM provider usable?
+  #
+  # A retry against a dead provider is strictly wasted compute: the
+  # packages being retried already failed once, and with no working LLM
+  # every one of them re-escalates without producing a diagnosis.
+  # ------------------------------------------------------------------------- #
+  preflight:
+    name: preflight (${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }})
+    uses: ./.github/workflows/llm-health.yml
+    secrets: inherit
+    with:
+      provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+      fail_on_unavailable: "false"
+
+  # ------------------------------------------------------------------------- #
   # retry-smoke (matrix: platform)
   #
   # Smoke list is small and the main smoke job is unsharded, so the
@@ -50,11 +71,15 @@ jobs:
   # ------------------------------------------------------------------------- #
   retry-smoke:
     name: retry-${{ matrix.platform }}-smoke
+    needs: preflight
     if: >-
+      needs.preflight.outputs.provider_ok == 'true' &&
+      (
       github.event_name == 'workflow_dispatch' ||
       (
         github.event.workflow_run.conclusion != 'cancelled' &&
         github.event.workflow_run.event != 'pull_request'
+      )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -139,7 +164,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
@@ -210,11 +235,15 @@ jobs:
   # ------------------------------------------------------------------------- #
   plan-retry-full:
     name: plan-retry-full
+    needs: preflight
     if: >-
+      needs.preflight.outputs.provider_ok == 'true' &&
+      (
       github.event_name == 'workflow_dispatch' ||
       (
         github.event.workflow_run.conclusion != 'cancelled' &&
         github.event.workflow_run.event != 'pull_request'
+      )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -390,7 +419,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
@@ -543,7 +572,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
