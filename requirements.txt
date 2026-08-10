@@ -10,7 +10,6 @@ langgraph>=0.0.40
 
 # LLM Providers
 openai>=1.10.0
-google-generativeai>=0.3.0
 
 # Utilities
 python-dotenv>=1.0.0
@@ -20,7 +19,6 @@ filelock>=3.12.0
 
 # Optional (for enhanced features)
 requests>=2.31.0
-aiohttp>=3.9.0
 
 # Development
 pytest>=7.4.0

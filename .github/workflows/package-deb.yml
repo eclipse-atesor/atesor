@@ -1,19 +1,28 @@
 name: Package .deb
 
-# Manually-triggered packaging workflow. Mirrors the local flow exactly:
+# Produces the Debian package, two ways:
 #
-#   bash packaging/deb/build_deb.sh [base-image]     -> dist/*.deb + build log
-#   bash packaging/deb/validate_deb.sh [base-image]  -> 9-step contract check
+#   1. Push a tag `vX.Y.Z`  -> full release: tests, build, validate, and
+#      a PUBLISHED GitHub release carrying the .deb + checksum + usage.
+#   2. Run manually          -> same pipeline, artifacts only (or an
+#      optional draft release) for dry runs and non-tag builds.
 #
-# The version input (X.Y.Z) is written into src/__init__.py BEFORE the
-# build so the Debian control file and `atesor-ai --version` agree —
-# validation step 4 asserts exactly that. Leave it empty to package
-# whatever version the checked-out source already declares.
+# The pipeline mirrors the local flow exactly:
+#   PYTHONPATH=. pytest                     -> the suite must be green
+#   packaging/deb/build_deb.sh [image]      -> dist/*.deb + build log
+#   packaging/deb/validate_deb.sh [image]   -> 9-step contract check
 #
-# Artifacts: the .deb, its sha256, and the full container build log.
-# Optionally drafts a GitHub release v<version> with the same files.
+# The version is taken from the tag (`v1.2.0` -> `1.2.0`) and written
+# into src/__init__.py BEFORE the build, so the Debian control file, the
+# artifact filename and `atesor-ai --version` can never disagree —
+# validation step 4 asserts exactly that.
 
 on:
+  push:
+    tags:
+      # Release tags only: v1.2.0, v0.2.0-rc1, v1.2.0~rc1
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+[-~+]*"
   workflow_dispatch:
     inputs:
       version:
@@ -37,47 +46,58 @@ on:
         default: false
 
 permissions:
-  contents: write   # only used by the optional draft-release step
+  contents: write   # required to publish the release and upload assets
 
 concurrency:
-  # One packaging run at a time per ref: two builds would race the
-  # shared dist/ artifact name and the release tag.
+  # One packaging run at a time per ref: two builds would race the shared
+  # dist/ artifact name and the release tag.
   group: package-deb-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   PYTHONUNBUFFERED: "1"
+  # Tag pushes have no inputs, so fall back to the default base image.
+  BASE_IMAGE: ${{ inputs.base_image || 'ubuntu:22.04' }}
 
 jobs:
   package:
-    name: build + validate .deb
+    name: test + build + validate .deb
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve and apply version
+      - name: Resolve version (tag wins)
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
           set -euo pipefail
-          if [ -n "${INPUT_VERSION}" ]; then
-            # Debian-compatible: digits.digits.digits + optional suffix.
-            if ! echo "${INPUT_VERSION}" | \
+          if [ "${IS_TAG}" = "true" ]; then
+            # refs/tags/v1.2.0 -> 1.2.0
+            resolved="${GITHUB_REF_NAME#v}"
+            echo "Release tag ${GITHUB_REF_NAME} -> version ${resolved}"
+          else
+            resolved="${INPUT_VERSION}"
+          fi
+
+          if [ -n "${resolved}" ]; then
+            if ! echo "${resolved}" | \
                 grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([~+.-][A-Za-z0-9.~+-]+)?$'; then
-              echo "ERROR: version '${INPUT_VERSION}' is not a valid" \
+              echo "ERROR: version '${resolved}' is not a valid" \
                    "X.Y.Z[-suffix] version." >&2
               exit 1
             fi
-            python3 - <<'PY'
+            RESOLVED="${resolved}" python3 - <<'PY'
           import os
           import pathlib
           import re
 
-          version = os.environ["INPUT_VERSION"]
+          version = os.environ["RESOLVED"]
           path = pathlib.Path("src/__init__.py")
           text = path.read_text()
           new, n = re.subn(
@@ -93,22 +113,37 @@ jobs:
           path.write_text(new)
           PY
           fi
-          resolved=$(PYTHONPATH=. python3 -c \
+
+          final=$(PYTHONPATH=. python3 -c \
               "from src import __version__; print(__version__)")
-          echo "Building version: ${resolved}"
-          echo "version=${resolved}" >> "${GITHUB_OUTPUT}"
+          echo "Building version: ${final}"
+          echo "version=${final}" >> "${GITHUB_OUTPUT}"
+          echo "is_tag=${IS_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Run test suite
+        # A release must never ship on a red suite.
+        run: PYTHONPATH=. python3 -m pytest -q
+
+      - name: Lint
+        run: python3 -m flake8 main.py src/ tests/ .github/scripts/
 
       - name: Build .deb
-        env:
-          BASE_IMAGE: ${{ inputs.base_image }}
         run: bash packaging/deb/build_deb.sh "${BASE_IMAGE}"
 
       - name: Validate .deb
-        env:
-          BASE_IMAGE: ${{ inputs.base_image }}
         run: bash packaging/deb/validate_deb.sh "${BASE_IMAGE}"
 
-      - name: Checksums and summary
+      - name: Checksums and job summary
         id: artifact
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -117,6 +152,7 @@ jobs:
           deb_path=$(ls dist/atesor-ai_"${VERSION}"_*.deb)
           sha256sum "${deb_path}" > "${deb_path}.sha256"
           echo "deb_path=${deb_path}" >> "${GITHUB_OUTPUT}"
+          echo "deb_name=$(basename "${deb_path}")" >> "${GITHUB_OUTPUT}"
           {
             echo "## atesor-ai .deb package"
             echo
@@ -127,11 +163,10 @@ jobs:
             echo "| Size | $(du -h "${deb_path}" | cut -f1) |"
             echo "| SHA256 | \`$(cut -d' ' -f1 "${deb_path}.sha256")\` |"
             echo
-            echo "Validation: all 9 contract checks passed" \
-                 "(see the 'Validate .deb' step log)."
+            echo "Suite green, 9/9 package contract checks passed."
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Upload artifacts
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: atesor-ai-deb-${{ steps.version.outputs.version }}
@@ -142,22 +177,150 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Draft GitHub release
-        if: ${{ inputs.create_release }}
+      - name: Write release notes
+        if: >-
+          steps.version.outputs.is_tag == 'true' || inputs.create_release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DEB_NAME: ${{ steps.artifact.outputs.deb_name }}
+          DEB_PATH: ${{ steps.artifact.outputs.deb_path }}
+        run: |
+          set -euo pipefail
+          sha=$(cut -d' ' -f1 "${DEB_PATH}.sha256")
+          cat > /tmp/release-notes.md <<EOF
+          Debian package for **atesor-ai ${VERSION}** — an automated
+          C/C++/Go/Rust → RISC-V (riscv64) porting agent.
+
+          \`\`\`
+          SHA256  ${sha}
+          \`\`\`
+
+          ## 1. Install
+
+          Download \`${DEB_NAME}\` from the assets below, then:
+
+          \`\`\`bash
+          sudo apt-get install ./${DEB_NAME}
+          \`\`\`
+
+          \`apt\` pulls in the runtime dependencies (python3, a Docker
+          engine, qemu-user-static, binfmt-support, ca-certificates).
+
+          ## 2. Verify the install
+
+          \`\`\`bash
+          atesor-ai --version      # -> atesor-ai ${VERSION}
+          atesor-ai -h             # full flag reference
+          \`\`\`
+
+          ## 3. One-time host setup
+
+          Add yourself to the docker group (re-login afterwards) and
+          register the riscv64 emulation handler — without it every
+          riscv64 container exits with \`exec format error\`:
+
+          \`\`\`bash
+          sudo usermod -aG docker "\$USER"
+          docker run --privileged --rm tonistiigi/binfmt --install riscv64
+          \`\`\`
+
+          Provide an API key for your LLM provider (or put it in
+          \`~/.config/atesor-ai/.env\` — see
+          \`/opt/atesor-ai/app/.env-example\` for every supported
+          variable):
+
+          \`\`\`bash
+          export LLM_PROVIDER=gemini
+          export GOOGLE_API_KEY=your_key_here
+          \`\`\`
+
+          Then provision the build sandbox (first run builds the
+          riscv64 image under emulation and can take 15-45 min):
+
+          \`\`\`bash
+          atesor-ai --setup-only
+          \`\`\`
+
+          ## 4. Port a repository
+
+          \`\`\`bash
+          # basic run
+          atesor-ai --repo https://github.com/madler/zlib
+
+          # watch what the agents are doing
+          atesor-ai --repo https://github.com/madler/zlib --verbose
+
+          # pick the sandbox distro and allow more fix attempts
+          atesor-ai --repo https://github.com/sqlite/sqlite \\
+                    --platform debian --max-attempts 10
+
+          # on success, also emit a zip (recipe + source + manifest)
+          atesor-ai --repo https://github.com/madler/zlib --package
+
+          # ignore the recipe cache and re-run the whole pipeline
+          atesor-ai --repo https://github.com/madler/zlib --force
+          \`\`\`
+
+          ## 5. Where the output goes
+
+          Runtime state lives under \`\$ATESOR_HOME\` (default
+          \`~/.local/share/atesor-ai\`), never in \`/opt\`:
+
+          \`\`\`bash
+          ~/.local/share/atesor-ai/workspace/output/<repo>_recipe.md   # porting recipe
+          ~/.local/share/atesor-ai/workspace/output/<repo>_report_*.md # build report
+          ~/.local/share/atesor-ai/workspace/logs/agent_<repo>.log     # debug log
+          ~/.local/share/atesor-ai/workspace/packages/                 # --package zips
+          \`\`\`
+
+          ## 6. Tear down
+
+          \`\`\`bash
+          atesor-ai --cleanup            # stop + remove the sandbox container
+          atesor-ai --clean-image        # also remove the sandbox image
+          atesor-ai --clean-workspace    # reclaim workspace disk space
+          \`\`\`
+
+          ---
+          Built from \`${GITHUB_SHA}\` on \`${BASE_IMAGE}\`.
+          Bundled dependency versions: \`/opt/atesor-ai/app/BUILD_INFO\`.
+          EOF
+          echo "--- release notes ---"; head -20 /tmp/release-notes.md
+
+      - name: Publish release (tag push)
+        if: steps.version.outputs.is_tag == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           DEB_PATH: ${{ steps.artifact.outputs.deb_path }}
-          BASE_IMAGE: ${{ inputs.base_image }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} exists; updating notes and assets."
+            gh release edit "${TAG}" \
+                --title "atesor-ai ${VERSION}" \
+                --notes-file /tmp/release-notes.md
+            gh release upload "${TAG}" \
+                "${DEB_PATH}" "${DEB_PATH}.sha256" --clobber
+          else
+            gh release create "${TAG}" \
+                "${DEB_PATH}" "${DEB_PATH}.sha256" \
+                --title "atesor-ai ${VERSION}" \
+                --notes-file /tmp/release-notes.md
+          fi
+
+      - name: Draft release (manual run)
+        if: >-
+          steps.version.outputs.is_tag != 'true' && inputs.create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DEB_PATH: ${{ steps.artifact.outputs.deb_path }}
         run: |
           set -euo pipefail
           tag="v${VERSION}"
-          notes="Debian package for atesor-ai ${VERSION}."
-          notes="${notes}
-          Built from ${GITHUB_SHA} with base image ${BASE_IMAGE}.
-          Install: sudo apt-get install ./$(basename "${DEB_PATH}")"
           if gh release view "${tag}" >/dev/null 2>&1; then
-            echo "Release ${tag} exists; uploading assets (clobber)."
             gh release upload "${tag}" \
                 "${DEB_PATH}" "${DEB_PATH}.sha256" --clobber
           else
@@ -165,5 +328,5 @@ jobs:
                 "${DEB_PATH}" "${DEB_PATH}.sha256" \
                 --draft \
                 --title "atesor-ai ${VERSION}" \
-                --notes "${notes}"
+                --notes-file /tmp/release-notes.md
           fi
