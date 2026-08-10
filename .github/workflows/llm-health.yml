@@ -1,0 +1,226 @@
+name: LLM Provider Health
+
+# Pre-flight check that the configured LLM providers are actually usable.
+#
+# A key that is set but quota-exhausted, revoked, or pointed at a retired
+# model passes a presence check yet fails every real call, so each probe
+# issues a genuine (tiny) completion instead.
+#
+# Gate a batch workflow on the provider it intends to run with:
+#
+#   jobs:
+#     preflight:
+#       uses: ./.github/workflows/llm-health.yml
+#       secrets: inherit
+#       with:
+#         provider: openrouter
+#         fail_on_unavailable: "false"
+#     batch:
+#       needs: preflight
+#       if: needs.preflight.outputs.provider_ok == 'true'
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Provider to gate on (LLM_PROVIDER for the batch run)"
+        type: choice
+        default: openrouter
+        options: [openrouter, gemini, openai]
+      fail_on_unavailable:
+        description: "Fail the run when the gated provider is unusable"
+        type: string
+        default: "true"
+  schedule:
+    # 01:00 UTC — one hour ahead of the nightly batch sweep, so a dead
+    # provider is known before compute is spent on it.
+    - cron: "0 1 * * *"
+  workflow_call:
+    inputs:
+      provider:
+        description: "Provider the caller intends to run with (LLM_PROVIDER)"
+        type: string
+        default: openrouter
+      fail_on_unavailable:
+        description: >-
+          "true" fails this workflow when the selected provider is down.
+          Callers that gate with `if: needs.preflight.outputs.provider_ok`
+          leave this at "false", so a dead provider skips the batch
+          cleanly instead of painting the whole run red. A string, not a
+          boolean: on `schedule` runs `inputs` is null, and null-vs-false
+          coercion in GitHub expressions is ambiguous — comparing against
+          the literal "false" is not.
+        type: string
+        default: "false"
+    outputs:
+      provider_ok:
+        description: "true when the SELECTED provider is operational"
+        value: ${{ jobs.summary.outputs.provider_ok }}
+      provider:
+        description: "The provider that was gated on"
+        value: ${{ jobs.summary.outputs.provider }}
+      openrouter_ok:
+        description: "true when OpenRouter is operational"
+        value: ${{ jobs.summary.outputs.openrouter_ok }}
+      gemini_ok:
+        description: "true when Gemini is operational"
+        value: ${{ jobs.summary.outputs.gemini_ok }}
+      any_ok:
+        description: "true when at least one wired provider is operational"
+        value: ${{ jobs.summary.outputs.any_ok }}
+
+env:
+  # Single source of truth for which provider this run gates on.
+  GATE_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe ${{ matrix.provider }}
+    runs-on: ubuntu-latest
+    # A provider being down must not cancel the other probes — the whole
+    # point is to learn the full picture in one run.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: openrouter   # primary driver for batch runs
+          - provider: gemini       # default provider in src/models.py
+          - provider: openai
+          - provider: anthropic    # not wired into Atesor; key validation only
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The script AST-parses src/models.py rather than importing it, so
+      # the whole langchain tree is unnecessary here.
+      - name: Install probe dependency
+        run: pip install --disable-pip-version-check requests
+
+      - name: Probe ${{ matrix.provider }}
+        id: probe
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_FALLBACK_MODELS: ${{ vars.OPENROUTER_FALLBACK_MODELS }}
+        run: |
+          set -o pipefail
+          python3 .github/scripts/check_llm_providers.py \
+            -p "${{ matrix.provider }}" --json | tee result.json
+          echo "ok=$(python3 -c "import json;print(str(json.load(open('result.json'))['ok']).lower())")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.provider }}"
+            echo ''
+            echo '```json'
+            cat result.json 2>/dev/null || echo '{"ok": false, "reason": "probe did not run"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-health-${{ matrix.provider }}
+          path: result.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  summary:
+    name: summary
+    needs: probe
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      provider_ok: ${{ steps.agg.outputs.provider_ok }}
+      provider: ${{ steps.agg.outputs.provider }}
+      openrouter_ok: ${{ steps.agg.outputs.openrouter_ok }}
+      gemini_ok: ${{ steps.agg.outputs.gemini_ok }}
+      any_ok: ${{ steps.agg.outputs.any_ok }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: llm-health-*
+          path: results
+        continue-on-error: true
+
+      # GATE_PROVIDER comes from the workflow-level `env`, which is
+      # exported into every step, so the heredoc reads it from os.environ.
+      - name: Aggregate
+        id: agg
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob, json, os
+          # Providers Atesor can actually be driven by (see ModelProvider).
+          WIRED = {"openrouter", "gemini", "openai"}
+          gate = os.environ.get("GATE_PROVIDER") or "openrouter"
+          state, degraded = {}, {}
+          for f in glob.glob("results/**/result.json", recursive=True):
+              for r in json.load(open(f)).get("results", []):
+                  state[r["provider"]] = r["ok"]
+                  degraded[r["provider"]] = r.get("degraded", False)
+          for p in ("openrouter", "gemini", "openai", "anthropic"):
+              print(f"{p}_ok={str(state.get(p, False)).lower()}")
+          any_ok = any(v for k, v in state.items() if k in WIRED)
+          provider_ok = bool(state.get(gate, False))
+          print(f"any_ok={str(any_ok).lower()}")
+          print(f"provider={gate}")
+          print(f"provider_ok={str(provider_ok).lower()}")
+
+          def mark(p):
+              if not state.get(p):
+                  return "FAIL"
+              return "DEGRADED" if degraded.get(p) else "PASS"
+
+          lines = [
+              f"- {mark(k)} `{k}`" + ("  <- gated provider" if k == gate else "")
+              for k in sorted(state)
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("## LLM provider health\n\n" + "\n".join(lines) + "\n")
+              fh.write(f"\nGating on **{gate}**: "
+                       f"{'OK' if provider_ok else 'NOT USABLE'}\n")
+              if not provider_ok:
+                  alt = sorted(p for p in WIRED if state.get(p))
+                  fh.write(
+                      f"\n**`{gate}` is not usable — the batch run will be "
+                      "skipped. Starting it anyway would burn compute and "
+                      "produce no diagnoses.**\n"
+                  )
+                  if alt:
+                      fh.write(
+                          f"\nStill usable: {', '.join('`%s`' % a for a in alt)}"
+                          f" — re-dispatch with `llm_provider: {alt[0]}`.\n"
+                      )
+          PY
+
+      - name: Report gate result
+        run: |
+          if [[ "${{ steps.agg.outputs.provider_ok }}" == 'true' ]]; then
+            echo "::notice::${{ env.GATE_PROVIDER }} is operational."
+          else
+            echo "::warning::${{ env.GATE_PROVIDER }} is NOT usable — dependent batch jobs will be skipped."
+          fi
+
+      # Standalone runs (schedule / manual) fail loudly. Callers that gate
+      # on the `provider_ok` output pass "false" so a dead provider skips
+      # the batch instead of painting the run red. On `schedule` there are
+      # no inputs at all, so this resolves to '' != 'false' -> fail.
+      - name: Fail when gated provider is unusable
+        if: >-
+          steps.agg.outputs.provider_ok != 'true' &&
+          inputs.fail_on_unavailable != 'false'
+        run: |
+          echo "::error::${{ env.GATE_PROVIDER }} is not operational."
+          exit 1

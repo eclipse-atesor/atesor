@@ -42,6 +42,11 @@ on:
         description: "Rebuild ALL packages (ignore already-released zips under the monthly tag)"
         type: boolean
         default: false
+      llm_provider:
+        description: "LLM provider to run with (preflight gates on this)"
+        type: choice
+        default: openrouter
+        options: [openrouter, gemini, openai]
 
 permissions:
   contents: write       # publish assets + push data-update branch
@@ -51,20 +56,42 @@ env:
   PYTHON_VERSION: "3.11"
   # Force unbuffered stdout/stderr so batch_test.py logs stream live to
   PYTHONUNBUFFERED: "1"
+  LLM_PROVIDER: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
 
 jobs:
+  # ------------------------------------------------------------------------- #
+  # 0. preflight — is the selected LLM provider actually usable?
+  #
+  # Without this gate a batch run against a dead provider still burns the
+  # full compute budget: every package exhausts its 5 attempts on failed
+  # LLM calls and escalates with no diagnosis.
+  # ------------------------------------------------------------------------- #
+  preflight:
+    name: preflight (${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }})
+    uses: ./.github/workflows/llm-health.yml
+    secrets: inherit
+    with:
+      provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+      # Gate via the output, not by failing: a dead provider should skip
+      # the batch cleanly rather than report the run as failed.
+      fail_on_unavailable: "false"
+
   # ------------------------------------------------------------------------- #
   # 1. atesor-debian-smoke
   # ------------------------------------------------------------------------- #
   atesor-debian-smoke:
     name: atesor-debian-smoke
+    needs: preflight
     if: >-
+      needs.preflight.outputs.provider_ok == 'true' &&
+      (
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       (
         github.event_name == 'workflow_dispatch' &&
         (inputs.target == 'smoke' || inputs.target == 'both') &&
         (inputs.platform == 'debian' || inputs.platform == 'both')
+      )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -93,7 +120,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
@@ -151,13 +178,17 @@ jobs:
   # ------------------------------------------------------------------------- #
   plan-full:
     name: plan-full
+    needs: preflight
     if: >-
+      needs.preflight.outputs.provider_ok == 'true' &&
+      (
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'schedule' ||
       (
         github.event_name == 'workflow_dispatch' &&
         (inputs.target == 'full' || inputs.target == 'both')
+      )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -280,7 +311,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
@@ -351,13 +382,17 @@ jobs:
   # ------------------------------------------------------------------------- #
   atesor-alpine-smoke:
     name: atesor-alpine-smoke
+    needs: preflight
     if: >-
+      needs.preflight.outputs.provider_ok == 'true' &&
+      (
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       (
         github.event_name == 'workflow_dispatch' &&
         (inputs.target == 'smoke' || inputs.target == 'both') &&
         (inputs.platform == 'alpine' || inputs.platform == 'both')
+      )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -386,7 +421,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
@@ -473,7 +508,7 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
