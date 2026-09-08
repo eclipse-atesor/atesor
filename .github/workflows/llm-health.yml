@@ -115,7 +115,7 @@ jobs:
           set -o pipefail
           python3 .github/scripts/check_llm_providers.py \
             -p "${{ matrix.provider }}" --json | tee result.json
-          echo "ok=$(python3 -c "import json;print(str(json.load(open('result.json'))['ok']).lower())")" >> "$GITHUB_OUTPUT"
+             echo "ok=$(python3 -c 'import json; print(str(json.load(open("result.json"))["ok"]).lower())')" >> "$GITHUB_OUTPUT"
 
       - name: Summarise
         if: always()

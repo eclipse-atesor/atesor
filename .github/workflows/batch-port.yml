@@ -624,7 +624,7 @@ jobs:
           name: full-logs-debian
           path: collected-logs/debian/
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
 
       - name: Upload platform full logs (alpine)
         if: always()
@@ -633,7 +633,7 @@ jobs:
           name: full-logs-alpine
           path: collected-logs/alpine/
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
 
   # ------------------------------------------------------------------------- #
   # 6. Merge self-learning data updates and propose a draft PR

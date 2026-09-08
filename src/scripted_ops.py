@@ -649,6 +649,81 @@ class ScriptedOperations:
                         pass
         return score
 
+    # Build files worth searching for below the root, most authoritative
+    # first. Order matters: a repo with both CMakeLists.txt and a plain
+    # Makefile in the same subdir should be treated as cmake.
+    _NESTED_BUILD_MARKERS = (
+        ("cmake", "CMakeLists.txt"),
+        ("meson", "meson.build"),
+        ("autotools", "configure.ac"),
+        ("autotools", "configure.in"),
+        ("make", "Makefile"),
+        ("make", "GNUmakefile"),
+    )
+    # Directories that never hold the primary build root.
+    _NESTED_SKIP_DIRS = frozenset(
+        {
+            ".git",
+            "node_modules",
+            "vendor",
+            "testdata",
+            "test",
+            "tests",
+            "examples",
+            "example",
+            "third_party",
+            "contrib",
+            "__pycache__",
+            ".venv",
+        }
+    )
+
+    def _find_nested_build_root(
+        self, repo_path: str, max_depth: int = 3
+    ) -> Optional[tuple]:
+        """Locate a build file in a subdirectory of ``repo_path``.
+
+        Only called when the top-level scan found nothing. Walks a
+        bounded depth, skipping vendored/test trees, and returns the
+        shallowest match so ``src/CMakeLists.txt`` beats
+        ``src/plugins/foo/CMakeLists.txt``.
+
+        Args:
+            repo_path: Host path to the repository root.
+            max_depth: Directory levels below the root to search.
+
+        Returns:
+            ``(build_system, relative_path_to_build_file)`` or None.
+        """
+        if not os.path.isdir(repo_path):
+            return None
+        root_depth = repo_path.rstrip(os.sep).count(os.sep)
+        best: Optional[tuple] = None
+        best_rank = None
+
+        for current, dirs, files in os.walk(repo_path):
+            depth = current.rstrip(os.sep).count(os.sep) - root_depth
+            if depth >= max_depth:
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in self._NESTED_SKIP_DIRS]
+            if current == repo_path:
+                continue
+            for idx, (sys_name, filename) in enumerate(
+                self._NESTED_BUILD_MARKERS
+            ):
+                if filename not in files:
+                    continue
+                rel_dir = os.path.relpath(current, repo_path)
+                # Rank: shallower wins, then marker authority, then name.
+                rank = (rel_dir.count(os.sep), idx, rel_dir)
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best = (sys_name, f"{rel_dir}/{filename}")
+                break
+
+        return best
+
     def detect_build_system(self, repo_path: str) -> BuildSystemInfo:
         """Detect the build system using file-based heuristics.
 
@@ -749,6 +824,28 @@ class ScriptedOperations:
             logger.info("Only Makefile found; detected as make (fallback)")
 
         if not detected:
+            # Nested build root: a project whose CMakeLists/Makefile/
+            # meson.build/configure.ac lives in a subdirectory (src/,
+            # build/, <name>/) was previously reported as "unknown", so
+            # the workflow fell back to a generic `make` in the repo
+            # root and failed with "No targets specified and no makefile
+            # found". Search a bounded depth and record the module_dir
+            # so both the scout prompt and the builder know where the
+            # real root is.
+            nested = self._find_nested_build_root(repo_path)
+            if nested:
+                sys_name, rel_file = nested
+                detected.append((sys_name, rel_file))
+                # Below a top-level hit (0.95) but above the bare-Makefile
+                # fallback: the evidence is a real build file, just not
+                # at the root.
+                confidence_scores[sys_name] = 0.75
+                logger.info(
+                    f"Found nested build root: {rel_file} "
+                    f"(detected as {sys_name})"
+                )
+
+        if not detected:
             # GOPATH-style Go repos can have a valid main package but no
             # go.mod. If we leave these as "unknown", the workflow often
             # falls back to generic `make` plans that cannot succeed.
@@ -796,8 +893,13 @@ class ScriptedOperations:
             if sys == best_system[0] and f != primary_file
         ]
 
+        # Record the directory holding the primary build file whenever it
+        # is not the repo root. Previously only go/cargo populated this,
+        # so a nested CMakeLists/Makefile root was detected but never
+        # communicated — the scout prompt and builder both assumed the
+        # repo root and the build failed there.
         module_dir = ""
-        if best_system[0] in ["go", "cargo"] and "/" in primary_file:
+        if "/" in primary_file:
             module_dir = primary_file.rsplit("/", 1)[0]
 
         return BuildSystemInfo(

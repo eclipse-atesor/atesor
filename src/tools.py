@@ -825,6 +825,14 @@ _BUNDLED_TOOLCHAIN_TOKENS = (
     ),  # golang, golang-go, golang-1.21, golang-1.18-go, ...
     re.compile(r"^go-1\.[0-9]+$"),  # go-1.21, go-1.22, ...
     re.compile(r"^gccgo(-[a-z0-9.\-]+)?$"),  # gccgo, gccgo-12, ...
+    # Rust is now baked into BOTH images via rustup (see the
+    # RUST_TOOLCHAIN ARG). Installing the distro package puts an older
+    # rustc ahead of ~/.cargo/bin on PATH and reintroduces the
+    # "rustc <old> is not supported by the following packages" failure
+    # that blocked 23 packages. Strip it the same way as Go.
+    re.compile(r"^rust(-[a-z0-9.\-]+)?$"),  # rust, rust-doc, rust-std, ...
+    re.compile(r"^rustc(-[a-z0-9.\-]+)?$"),  # rustc, rustc-1.75, ...
+    re.compile(r"^cargo(-[a-z0-9.\-]+)?$"),  # cargo, cargo-1.75, ...
 )
 
 
@@ -893,14 +901,14 @@ def _strip_bundled_toolchain_packages(command: str) -> str:
             logger.warning(
                 f"Stripped bundled-toolchain install (no other "
                 f"packages requested): {dropped}. Skipping the install "
-                f"clause; sandbox already provides a modern Go "
-                f"toolchain."
+                f"clause; the sandbox already bakes in current Go "
+                f"(/usr/local/go) and Rust (/root/.cargo) toolchains."
             )
             return "true"
         logger.warning(
             f"Stripped bundled-toolchain package(s) from {pm} "
-            f"{verb}: {dropped}. Sandbox already provides a modern Go "
-            f"toolchain at /usr/local/go."
+            f"{verb}: {dropped}. The sandbox already bakes in current Go "
+            f"(/usr/local/go) and Rust (/root/.cargo) toolchains."
         )
         # Preserve original flag placement
         rebuilt = f"{pm} "
