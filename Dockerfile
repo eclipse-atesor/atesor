@@ -54,17 +54,27 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
     | tar -xz -C /usr/local \
     && /usr/local/go/bin/go version
 
-# Install Rust/Cargo from Alpine packages.
-RUN apk add --no-cache rust cargo \
-    && rustc --version \
-    && cargo --version
+# Install a pinned Rust toolchain via rustup instead of `apk add rust cargo`.
+# Alpine's distro rust lags upstream and skews between images; a runtime
+# `apk add rust cargo` from an LLM would otherwise shadow whatever we bake
+# in. Alpine ships `rustup` (musl-native rustup-init) in the community
+# repo, so we do not need gcompat here.
+ARG RUST_TOOLCHAIN=1.90.0
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+RUN apk add --no-cache rustup \
+    && rustup-init -y \
+        --profile minimal \
+        --default-toolchain ${RUST_TOOLCHAIN} \
+        --no-modify-path \
+    && /root/.cargo/bin/rustc --version \
+    && /root/.cargo/bin/cargo --version
 
 # Set up environment variables for native compilation inside the sandbox
 ENV CC=gcc
 ENV CXX=g++
 # Go environment: use direct proxy to avoid network issues in isolated containers
 ENV GOPATH=/root/go
-ENV CARGO_HOME=/root/.cargo
 ENV PATH="${CARGO_HOME}/bin:${GOPATH}/bin:/usr/local/go/bin:${PATH}"
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GONOSUMCHECK=*
