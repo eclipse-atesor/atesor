@@ -356,8 +356,9 @@ def _load_package_list(
 
 BATCH_LOGS_DIR = "output/batch_logs"
 _MIN_TOOLCHAIN = {
-    "debian": {"go": "1.26.3", "cargo": "1.85.0"},
-    "ubuntu": {"go": "1.26.3", "cargo": "1.85.0"},
+    "debian": {"go": "1.26.5", "cargo": "1.90.0"},
+    "ubuntu": {"go": "1.26.5", "cargo": "1.90.0"},
+    "alpine": {"go": "1.26.5", "cargo": "1.90.0"},
 }
 _STREAM_SETUP = os.environ.get("ATESOR_SETUP_STREAM", "").strip().lower() in {
     "1",

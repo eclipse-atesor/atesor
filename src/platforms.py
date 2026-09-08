@@ -130,7 +130,12 @@ ALPINE_RISCV = PlatformProfile(
         "fortran": "gfortran",
         # languages
         "go": "go",
-        "rust": "rust cargo",
+        # NOTE: deliberately no "rust" entry — the sandbox bakes a modern
+        # rustup toolchain into /root/.cargo (see Dockerfile
+        # RUST_TOOLCHAIN). Alpine's `rust`/`cargo` packages are older and
+        # would shadow it on PATH, which is what made 23 Rust packages
+        # fail with "rustc <old> is not supported by the following
+        # packages".
         "python3": "python3 py3-pip",
         "node": "nodejs npm",
         "java": "openjdk17",
@@ -285,7 +290,8 @@ DEBIAN_RISCV = PlatformProfile(
         # directive, `go 1.24.0` 3-part version). The sandbox bakes a recent
         # Go riscv64 toolchain into /usr/local/go via Dockerfile.debian; let
         # the agent use that and never `apt-get install golang*`.
-        "rust": "rustc cargo",
+        # Likewise no "rust" entry: rustup provides a current toolchain in
+        # /root/.cargo, and jammy's rustc would shadow it on PATH.
         "python3": "python3 python3-pip python3-dev",
         "node": "nodejs npm",
         "java": "openjdk-17-jdk",

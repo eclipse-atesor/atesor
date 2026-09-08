@@ -1,0 +1,1442 @@
+{
+  "$schema_version": 1,
+  "description": "Failed/timed-out packages from full run 2026-07-03",
+  "defaults": {
+    "max_attempts": 5,
+    "timeout_seconds": 3600
+  },
+  "packages": [
+    {
+      "name": "cloudlist",
+      "url": "https://github.com/projectdiscovery/cloudlist",
+      "lang": "go",
+      "group": "projectdiscovery",
+      "tags": [
+        "cloud"
+      ]
+    },
+    {
+      "name": "nuclei",
+      "url": "https://github.com/projectdiscovery/nuclei",
+      "lang": "go",
+      "group": "projectdiscovery",
+      "tags": [
+        "cli",
+        "security",
+        "recon",
+        "network",
+        "dns",
+        "cloud",
+        "yaml"
+      ]
+    },
+    {
+      "name": "uncover",
+      "url": "https://github.com/projectdiscovery/uncover",
+      "lang": "go",
+      "group": "projectdiscovery",
+      "tags": [
+        "cli",
+        "recon"
+      ]
+    },
+    {
+      "name": "nginx",
+      "url": "https://github.com/jirutka/nginx-binaries",
+      "lang": "go",
+      "group": "go-heavy",
+      "tags": [
+        "cli",
+        "network",
+        "benchmark",
+        "build"
+      ]
+    },
+    {
+      "name": "dbin",
+      "url": "https://github.com/xplshn/dbin",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "hednsextractor",
+      "url": "https://github.com/HuntDownProject/HEDnsExtractor",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "network",
+        "dns"
+      ]
+    },
+    {
+      "name": "osmedeus",
+      "url": "https://github.com/j3ssie/osmedeus",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "recon",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "slim",
+      "url": "https://github.com/slimtoolkit/slim",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "docker",
+        "crypto",
+        "image",
+        "system"
+      ]
+    },
+    {
+      "name": "trufflehog",
+      "url": "https://github.com/trufflesecurity/trufflehog",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "usql",
+      "url": "https://github.com/xo/usql",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "db"
+      ]
+    },
+    {
+      "name": "vuls",
+      "url": "https://github.com/future-architect/vuls",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "network",
+        "docker",
+        "crypto",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "witness",
+      "url": "https://github.com/in-toto/witness",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "zombie",
+      "url": "https://github.com/chainreactors/zombie",
+      "lang": "go",
+      "group": "go-security",
+      "tags": [
+        "cli",
+        "security",
+        "system"
+      ]
+    },
+    {
+      "name": "aptly",
+      "url": "https://github.com/aptly-dev/aptly",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "git",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "aria2",
+      "url": "https://github.com/abcfy2/aria2-static-build",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "protobuf",
+        "system",
+        "small",
+        "build"
+      ]
+    },
+    {
+      "name": "bsdutils",
+      "url": "https://github.com/dcantrell/bsdutils",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "cobalt-cli",
+      "url": "https://github.com/lostdusty/cobalt",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "daytona",
+      "url": "https://github.com/daytonaio/daytona",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "devbox",
+      "url": "https://github.com/jetify-com/devbox",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "enumerepo",
+      "url": "https://github.com/trickest/enumerepo",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "recon"
+      ]
+    },
+    {
+      "name": "falconhound",
+      "url": "https://github.com/FalconForceTeam/FalconHound",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "findutils",
+      "url": "https://savannah.gnu.org/git/?group=findutils",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "fq",
+      "url": "https://github.com/wader/fq",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "frp",
+      "url": "https://github.com/fatedier/frp",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "network"
+      ]
+    },
+    {
+      "name": "gdb",
+      "url": "https://sourceware.org/git/binutils-gdb.git",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "db",
+        "build"
+      ]
+    },
+    {
+      "name": "gfx",
+      "url": "https://github.com/dwisiswant0/gfx",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "go-fasttld",
+      "url": "https://github.com/elliotwutingfeng/go-fasttld",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "library"
+      ]
+    },
+    {
+      "name": "go-sandbox",
+      "url": "https://github.com/criyle/go-sandbox",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network",
+        "docker"
+      ]
+    },
+    {
+      "name": "gobusybox",
+      "url": "https://github.com/u-root/gobusybox",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "archive",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "gomuks",
+      "url": "https://github.com/tulir/gomuks",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "terminal"
+      ]
+    },
+    {
+      "name": "goop",
+      "url": "https://github.com/nyancrimew/goop",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "security"
+      ]
+    },
+    {
+      "name": "kcptun",
+      "url": "https://github.com/xtaci/kcptun",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network"
+      ]
+    },
+    {
+      "name": "lilipod",
+      "url": "https://github.com/89luca89/lilipod",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker",
+        "crypto",
+        "image",
+        "system"
+      ]
+    },
+    {
+      "name": "mabel",
+      "url": "https://github.com/smmr-software/mabel",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "terminal"
+      ]
+    },
+    {
+      "name": "ncdu",
+      "url": "https://dev.yorhel.nl",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "crypto",
+        "build"
+      ]
+    },
+    {
+      "name": "nodepass",
+      "url": "https://github.com/yosebyte/nodepass",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network",
+        "system"
+      ]
+    },
+    {
+      "name": "ooniprobe",
+      "url": "https://github.com/ooni/probe-cli",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "opengfw",
+      "url": "https://github.com/apernet/OpenGFW",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "php",
+      "url": "https://github.com/crazywhalecc/static-php-cli",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "build"
+      ]
+    },
+    {
+      "name": "ppmap",
+      "url": "https://github.com/kleimont0x00/ppmap",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "protobuf",
+        "system"
+      ]
+    },
+    {
+      "name": "protocurl",
+      "url": "https://github.com/qaware/protocurl",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network",
+        "protobuf",
+        "system"
+      ]
+    },
+    {
+      "name": "pv",
+      "url": "https://codeberg.org/ivarch/pv",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "sling",
+      "url": "https://github.com/slingdata-io/sling-cli",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "db",
+        "archive",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "supercronic",
+      "url": "https://github.com/aptible/supercronic",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker"
+      ]
+    },
+    {
+      "name": "syncthing",
+      "url": "https://github.com/syncthing/syncthing",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "tailscale",
+      "url": "https://github.com/tailscale/tailscale",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network"
+      ]
+    },
+    {
+      "name": "tget",
+      "url": "https://github.com/sweetbbak/tget",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "tor",
+      "url": "https://gitlab.torproject.org/tpo/core/tor",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network",
+        "git",
+        "build"
+      ]
+    },
+    {
+      "name": "toru",
+      "url": "https://github.com/sweetbbak/toru",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "ttyimg",
+      "url": "https://github.com/Skardyy/ttyimg",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker",
+        "crypto",
+        "image",
+        "terminal"
+      ]
+    },
+    {
+      "name": "u-root",
+      "url": "https://github.com/u-root/u-root",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "system",
+        "small"
+      ]
+    },
+    {
+      "name": "wget",
+      "url": "https://www.gnu.org/software/wget/",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network",
+        "build"
+      ]
+    },
+    {
+      "name": "wharfie",
+      "url": "https://github.com/rancher/wharfie",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "docker",
+        "crypto",
+        "image",
+        "system"
+      ]
+    },
+    {
+      "name": "wiretap",
+      "url": "https://github.com/sandialabs/wiretap",
+      "lang": "go",
+      "group": "go-misc",
+      "tags": [
+        "cli",
+        "network"
+      ]
+    },
+    {
+      "name": "axel",
+      "url": "https://github.com/axel-download-accelerator/axel",
+      "lang": "c",
+      "group": "c-autotools",
+      "tags": [
+        "autotools",
+        "cli"
+      ]
+    },
+    {
+      "name": "alpine",
+      "url": "https://github.com/alpinelinux/docker-alpine",
+      "lang": "c",
+      "group": "base-images",
+      "tags": [
+        "docker",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "aws-nuke",
+      "url": "https://github.com/ekristen/aws-nuke",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "cloud",
+        "git",
+        "build"
+      ]
+    },
+    {
+      "name": "cftun",
+      "url": "https://github.com/fmnx/cftun",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "network",
+        "cloud",
+        "system"
+      ]
+    },
+    {
+      "name": "cloudfox",
+      "url": "https://github.com/BishopFox/cloudfox",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "security",
+        "recon",
+        "cloud",
+        "system"
+      ]
+    },
+    {
+      "name": "devpod",
+      "url": "https://github.com/loft-sh/devpod",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "docker",
+        "cloud",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "libaws-cli",
+      "url": "https://github.com/nathants/libaws",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "library",
+        "cloud"
+      ]
+    },
+    {
+      "name": "sccache",
+      "url": "https://github.com/mozilla/sccache",
+      "lang": "rust",
+      "group": "cloud",
+      "tags": [
+        "cloud",
+        "crypto",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "sq",
+      "url": "https://github.com/neilotoole/sq",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "cloud",
+        "db",
+        "xml",
+        "json",
+        "system"
+      ]
+    },
+    {
+      "name": "sshpiperd",
+      "url": "https://github.com/tg123/sshpiper",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "network",
+        "cloud",
+        "crypto"
+      ]
+    },
+    {
+      "name": "sslsearch",
+      "url": "https://github.com/HarshVaragiya/sslsearch",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "recon",
+        "cloud",
+        "git",
+        "crypto"
+      ]
+    },
+    {
+      "name": "steampipe",
+      "url": "https://github.com/turbot/steampipe",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "security",
+        "cloud",
+        "db"
+      ]
+    },
+    {
+      "name": "teldrive",
+      "url": "https://github.com/tgdrive/teldrive",
+      "lang": "go",
+      "group": "cloud",
+      "tags": [
+        "cli",
+        "cloud",
+        "crypto"
+      ]
+    },
+    {
+      "name": "mosh",
+      "url": "https://github.com/blinksh/mosh-static-multiarch",
+      "lang": "c",
+      "group": "network-tools",
+      "tags": [
+        "cli",
+        "network",
+        "crypto",
+        "shell",
+        "build"
+      ]
+    },
+    {
+      "name": "wget2",
+      "url": "https://github.com/rockdaboot/wget2",
+      "lang": "c",
+      "group": "network-tools",
+      "tags": [
+        "network",
+        "git",
+        "build"
+      ]
+    },
+    {
+      "name": "ctrsploit",
+      "url": "https://github.com/ctrsploit/ctrsploit",
+      "lang": "c",
+      "group": "security-tools",
+      "tags": [
+        "security",
+        "docker",
+        "system"
+      ]
+    },
+    {
+      "name": "ebpf-hide-pid",
+      "url": "https://github.com/Acceis/eBPF-hide-PID",
+      "lang": "c",
+      "group": "security-tools",
+      "tags": [
+        "security",
+        "system"
+      ]
+    },
+    {
+      "name": "openvpn",
+      "url": "https://github.com/OpenVPN/openvpn",
+      "lang": "c",
+      "group": "security-tools",
+      "tags": [
+        "security",
+        "network",
+        "build"
+      ]
+    },
+    {
+      "name": "mbedtls",
+      "url": "https://github.com/Mbed-TLS/mbedtls",
+      "lang": "c",
+      "group": "crypto-net",
+      "tags": [
+        "library",
+        "crypto"
+      ]
+    },
+    {
+      "name": "fftw3",
+      "url": "https://github.com/FFTW/fftw3",
+      "lang": "c",
+      "group": "math-text",
+      "tags": [
+        "library",
+        "math"
+      ]
+    },
+    {
+      "name": "re2",
+      "url": "https://github.com/google/re2",
+      "lang": "cpp",
+      "group": "math-text",
+      "tags": [
+        "library",
+        "regex"
+      ]
+    },
+    {
+      "name": "glib",
+      "url": "https://gitlab.gnome.org/GNOME/glib",
+      "lang": "c",
+      "group": "system-libs",
+      "tags": [
+        "library",
+        "git",
+        "build"
+      ]
+    },
+    {
+      "name": "7z",
+      "url": "https://github.com/ip7z/7zip",
+      "lang": "cpp",
+      "group": "system-tools",
+      "tags": [
+        "archive",
+        "build"
+      ]
+    },
+    {
+      "name": "btop",
+      "url": "https://github.com/aristocratos/btop",
+      "lang": "cpp",
+      "group": "system-tools",
+      "tags": [
+        "build"
+      ]
+    },
+    {
+      "name": "coreutils",
+      "url": "https://github.com/coreutils/coreutils",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "cli",
+        "shell",
+        "system"
+      ]
+    },
+    {
+      "name": "ffmpeg",
+      "url": "https://github.com/shaka-project/static-ffmpeg-binaries",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "git",
+        "audio",
+        "video",
+        "build"
+      ]
+    },
+    {
+      "name": "grep",
+      "url": "https://www.gnu.org/software/grep/",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "system"
+      ]
+    },
+    {
+      "name": "hadolint",
+      "url": "https://github.com/hadolint/hadolint",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "cli",
+        "docker",
+        "shell",
+        "build"
+      ]
+    },
+    {
+      "name": "make",
+      "url": "https://git.savannah.gnu.org/cgit/make.git",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "git",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "nvme-cli",
+      "url": "https://github.com/linux-nvme/nvme-cli",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "cli",
+        "crypto"
+      ]
+    },
+    {
+      "name": "qbittorrent-nox",
+      "url": "https://github.com/userdocs/qbittorrent-nox-static",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "cli",
+        "shell",
+        "build"
+      ]
+    },
+    {
+      "name": "tar",
+      "url": "https://git.savannah.gnu.org/cgit/tar.git",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "git",
+        "archive",
+        "build"
+      ]
+    },
+    {
+      "name": "ttyd",
+      "url": "https://github.com/tsl0922/ttyd",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "cli",
+        "network",
+        "crypto",
+        "terminal",
+        "build"
+      ]
+    },
+    {
+      "name": "unionfs-fuse",
+      "url": "https://github.com/rpodgorny/unionfs-fuse",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "system"
+      ]
+    },
+    {
+      "name": "util-linux",
+      "url": "https://github.com/util-linux/util-linux",
+      "lang": "c",
+      "group": "system-tools",
+      "tags": [
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "apkeep",
+      "url": "https://github.com/EFForg/apkeep",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "system"
+      ]
+    },
+    {
+      "name": "atuin",
+      "url": "https://github.com/atuinsh/atuin",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "crypto",
+        "shell",
+        "terminal"
+      ]
+    },
+    {
+      "name": "bandwhich",
+      "url": "https://github.com/imsnif/bandwhich",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "network",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "bat",
+      "url": "https://github.com/sharkdp/bat",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "git",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "bottom",
+      "url": "https://github.com/ClementTsang/bottom",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "cargo-binstall",
+      "url": "https://github.com/cargo-bins/cargo-binstall",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": []
+    },
+    {
+      "name": "cargo-unlock",
+      "url": "https://github.com/dtolnay/cargo-unlock",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": []
+    },
+    {
+      "name": "cherrybomb",
+      "url": "https://github.com/blst-security/cherrybomb",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "security",
+        "network",
+        "system"
+      ]
+    },
+    {
+      "name": "delta",
+      "url": "https://github.com/dandavison/delta",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "git",
+        "crypto",
+        "json"
+      ]
+    },
+    {
+      "name": "dust",
+      "url": "https://github.com/bootandy/dust",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal"
+      ]
+    },
+    {
+      "name": "eza",
+      "url": "https://github.com/eza-community/eza",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "fd-find",
+      "url": "https://github.com/sharkdp/fd",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "feroxbuster",
+      "url": "https://github.com/epi052/feroxbuster",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "security",
+        "recon",
+        "system"
+      ]
+    },
+    {
+      "name": "fnm",
+      "url": "https://github.com/Schniz/fnm",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "crypto",
+        "build"
+      ]
+    },
+    {
+      "name": "gitoxide",
+      "url": "https://github.com/GitoxideLabs/gitoxide",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "git"
+      ]
+    },
+    {
+      "name": "gitui",
+      "url": "https://github.com/extrawurst/gitui",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "git",
+        "shell",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "hexyl",
+      "url": "https://github.com/sharkdp/hexyl",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "hyperfine",
+      "url": "https://github.com/sharkdp/hyperfine",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "benchmark",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "jujutsu",
+      "url": "https://github.com/jj-vcs/jj",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "git"
+      ]
+    },
+    {
+      "name": "jwt-hack",
+      "url": "https://github.com/hahwul/jwt-hack",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "security",
+        "json",
+        "system"
+      ]
+    },
+    {
+      "name": "miniserve",
+      "url": "https://github.com/svenstaro/miniserve",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "network",
+        "archive",
+        "system"
+      ]
+    },
+    {
+      "name": "nping",
+      "url": "https://github.com/hanshuaikang/Nping",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "archive",
+        "system"
+      ]
+    },
+    {
+      "name": "nushell",
+      "url": "https://github.com/nushell/nushell",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "shell"
+      ]
+    },
+    {
+      "name": "openapi-tui",
+      "url": "https://github.com/zaghaghi/openapi-tui",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal"
+      ]
+    },
+    {
+      "name": "pacaptr",
+      "url": "https://github.com/rami3l/pacaptr",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "crypto"
+      ]
+    },
+    {
+      "name": "procs",
+      "url": "https://github.com/dalance/procs",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli"
+      ]
+    },
+    {
+      "name": "rustscan",
+      "url": "https://github.com/RustScan/RustScan",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "security",
+        "network",
+        "docker",
+        "system"
+      ]
+    },
+    {
+      "name": "shadowsocks-rust",
+      "url": "https://github.com/shadowsocks/shadowsocks-rust",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "security",
+        "network",
+        "build"
+      ]
+    },
+    {
+      "name": "skim",
+      "url": "https://github.com/lotabout/skim",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "fuzzing"
+      ]
+    },
+    {
+      "name": "starship",
+      "url": "https://github.com/starship/starship",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "archive",
+        "shell",
+        "build"
+      ]
+    },
+    {
+      "name": "systemctl-tui",
+      "url": "https://github.com/rgwood/systemctl-tui",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "tokei",
+      "url": "https://github.com/XAMPPRocky/tokei",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "urx",
+      "url": "https://github.com/hahwul/urx",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "security",
+        "archive",
+        "system"
+      ]
+    },
+    {
+      "name": "volta",
+      "url": "https://github.com/volta-cli/volta",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "crypto",
+        "system"
+      ]
+    },
+    {
+      "name": "wasmtime",
+      "url": "https://github.com/bytecodealliance/wasmtime",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "docker",
+        "small"
+      ]
+    },
+    {
+      "name": "wezterm",
+      "url": "https://github.com/wez/wezterm",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal"
+      ]
+    },
+    {
+      "name": "xplr",
+      "url": "https://github.com/sayanarijit/xplr",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "crypto",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "zellij",
+      "url": "https://github.com/zellij-org/zellij",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "terminal",
+        "build"
+      ]
+    },
+    {
+      "name": "zenith",
+      "url": "https://github.com/bvaisvil/zenith",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "network",
+        "crypto",
+        "terminal",
+        "system"
+      ]
+    },
+    {
+      "name": "zoxide",
+      "url": "https://github.com/ajeetdsouza/zoxide",
+      "lang": "rust",
+      "group": "rust-tools",
+      "tags": [
+        "cli",
+        "shell",
+        "system",
+        "build"
+      ]
+    },
+    {
+      "name": "dalfox",
+      "url": "https://github.com/hahwul/dalfox",
+      "lang": "go",
+      "group": "go-popular",
+      "tags": [
+        "security"
+      ]
+    },
+    {
+      "name": "highway",
+      "url": "https://github.com/google/highway",
+      "lang": "cpp",
+      "group": "serialization",
+      "tags": [
+        "library",
+        "simd"
+      ]
+    }
+  ]
+}

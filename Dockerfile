@@ -49,23 +49,23 @@ RUN apk add --no-cache \
     coreutils
 
 # Install Go from the official riscv64 tarball instead of `apk add go`.
-# Alpine's `go` package lags upstream (currently 1.25.10); many modern
-# repos (cheat, doggo, garble, amass, gost, gh, ftpgrab, ...) require
-# `go >= 1.26` in go.mod and fail at `go mod tidy` with
-# "go.mod requires go >= 1.26 (running go 1.25.x; GOTOOLCHAIN=local)".
-# Pinning a recent toolchain in the image avoids slow GOTOOLCHAIN
-# downloads during agent runs (which routinely OOM-kill under QEMU).
-ARG GO_VERSION=1.26.3
+ARG GO_VERSION=1.26.5
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
     | tar -xz -C /usr/local \
     && /usr/local/go/bin/go version
+
+# Install Rust/Cargo from Alpine packages.
+RUN apk add --no-cache rust cargo \
+    && rustc --version \
+    && cargo --version
 
 # Set up environment variables for native compilation inside the sandbox
 ENV CC=gcc
 ENV CXX=g++
 # Go environment: use direct proxy to avoid network issues in isolated containers
 ENV GOPATH=/root/go
-ENV PATH="${GOPATH}/bin:/usr/local/go/bin:${PATH}"
+ENV CARGO_HOME=/root/.cargo
+ENV PATH="${CARGO_HOME}/bin:${GOPATH}/bin:/usr/local/go/bin:${PATH}"
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GONOSUMCHECK=*
 ENV GOFLAGS=-buildvcs=false

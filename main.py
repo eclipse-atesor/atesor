@@ -1567,7 +1567,7 @@ def main() -> int:
     # derivation in create_initial_state exactly — the recipe cache is
     # keyed by the state's repo_name, so any divergence here makes
     # cache lookups miss forever.
-    from src.state import is_valid_repo_url, sanitize_repo_name
+    from src.state import derive_repo_name, is_valid_repo_url
 
     repo_name = ""
     if args.repo:
@@ -1588,9 +1588,7 @@ def main() -> int:
                 )
             )
             return 1
-        repo_name = sanitize_repo_name(
-            args.repo.strip().rstrip("/").split("/")[-1].removesuffix(".git")
-        )
+        repo_name = derive_repo_name(args.repo)
 
     # Configure logging (per-repo log files avoid corruption in batch mode)
     configure_logging(args.verbose, repo_name=repo_name)

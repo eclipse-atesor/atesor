@@ -1713,6 +1713,125 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
         logger.warning(f"_fixup_top_builddir_in_submakefiles: {exc}")
 
 
+_MAKEFILE_NAMES = ("Makefile", "makefile", "GNUmakefile")
+# Directories that never hold the primary build root.
+_BUILD_SEARCH_SKIP = {
+    ".git",
+    "node_modules",
+    "vendor",
+    "testdata",
+    "test",
+    "tests",
+    "examples",
+    "example",
+    "third_party",
+    "contrib",
+    "__pycache__",
+}
+
+
+def _find_makefile_dir(repo_host_path: str, max_depth: int = 3) -> str:
+    """Return the shallowest subdirectory containing a makefile.
+
+    Used as a deterministic safety net: build-system detection can
+    report ``make`` while the makefile actually lives one level down
+    (common for ``src/``-style layouts), and the builder then runs
+    ``make`` in the repo root where it fails with "No targets specified
+    and no makefile found".
+
+    Args:
+        repo_host_path: Host-side path to the repository root.
+        max_depth: How many directory levels below the root to search.
+
+    Returns:
+        The makefile's directory RELATIVE to the repo root, or ``""``
+        when the root already has one, none exists, or the result is
+        ambiguous.
+    """
+    if not os.path.isdir(repo_host_path):
+        return ""
+    # Root already has one — nothing to redirect.
+    if any(
+        os.path.isfile(os.path.join(repo_host_path, n))
+        for n in _MAKEFILE_NAMES
+    ):
+        return ""
+
+    root_depth = repo_host_path.rstrip(os.sep).count(os.sep)
+    candidates: List[str] = []
+    for current, dirs, files in os.walk(repo_host_path):
+        depth = current.rstrip(os.sep).count(os.sep) - root_depth
+        if depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in _BUILD_SEARCH_SKIP]
+        if current == repo_host_path:
+            continue
+        if any(n in files for n in _MAKEFILE_NAMES):
+            candidates.append(os.path.relpath(current, repo_host_path))
+
+    if not candidates:
+        return ""
+    # Shallowest wins; ties broken alphabetically for determinism.
+    candidates.sort(key=lambda p: (p.count(os.sep), p))
+    return candidates[0]
+
+
+def _autotools_bootstrap_prefix(repo_host_path: str) -> str:
+    """Return the command that generates a missing ``./configure``.
+
+    Many autotools projects commit ``configure.ac``/``autogen.sh`` but
+    NOT the generated ``configure`` script (it is a release-tarball
+    artifact, not a source file). Running ``./configure`` on a fresh
+    clone then dies with ``./configure: No such file or directory`` —
+    the single failure mode behind 11 packages (grep, less, make, tar,
+    wget, strace, ffmpeg, ...).
+
+    Bootstrap choice, most-specific first:
+      1. ``./autogen.sh`` / ``./buildconf`` — upstream's own script,
+         which usually wraps autoreconf with project-specific steps.
+      2. ``autoreconf -fi`` when ``configure.ac``/``configure.in``
+         exists.
+
+    Gettext caveat: when ``m4/gettext.m4`` is present, ``autoreconf``
+    internally runs ``autopoint``, which REVERTS any gettext.m4 fix the
+    agent applied. In that case emit the same copy-first sequence the
+    builder already uses elsewhere instead of a bare autoreconf.
+
+    Args:
+        repo_host_path: Host-side path to the repository root.
+
+    Returns:
+        A shell command to run before ``./configure``, or ``""`` when
+        no bootstrap is needed or possible.
+    """
+    if not os.path.isdir(repo_host_path):
+        return ""
+    # Already bootstrapped (or ships a committed configure) — nothing to do.
+    if os.path.isfile(os.path.join(repo_host_path, "configure")):
+        return ""
+
+    for script in ("autogen.sh", "buildconf", "buildconf.sh", "bootstrap"):
+        path = os.path.join(repo_host_path, script)
+        if os.path.isfile(path):
+            return f"sh {script}"
+
+    has_ac = any(
+        os.path.isfile(os.path.join(repo_host_path, name))
+        for name in ("configure.ac", "configure.in")
+    )
+    if not has_ac:
+        return ""
+
+    if os.path.isfile(os.path.join(repo_host_path, "m4", "gettext.m4")):
+        return (
+            "cp /usr/share/gettext/m4/*.m4 m4/ 2>/dev/null || true"
+            " && aclocal -I m4 -I /usr/share/aclocal"
+            " && autoconf"
+        )
+    return "autoreconf -fi"
+
+
 def _extract_cd_prefix(command: str) -> str:
     """Extract leading `cd ... &&` prefix to match companion commands."""
     match = re.match(r"^\s*(cd\s+[^&;]+&&\s*)", command)
@@ -2118,6 +2237,48 @@ def builder_node(state: AgentState) -> AgentState:
                     logger.info(
                         "Rewrote autoreconf → copy-first gettext sequence "
                         "(autoreconf/autopoint would revert gettext.m4)"
+                    )
+
+            # Autotools bootstrap: a fresh clone of an autotools project
+            # usually has no committed `configure`, so `./configure`
+            # dies with "No such file or directory" before anything is
+            # built. Generate it first (autogen.sh / autoreconf -fi).
+            # Scripted and LLM-free; runs in state.repo_path, which is
+            # the cwd of the execute_command below, so a `cd build &&`
+            # companion still lands in the right place.
+            if "./configure" in optimized_cmd:
+                bootstrap = _autotools_bootstrap_prefix(
+                    _to_host_path(state.repo_path)
+                )
+                if bootstrap:
+                    optimized_cmd = f"{bootstrap} && {optimized_cmd}"
+                    state.log_scripted_op("autotools_bootstrap")
+                    logger.info(
+                        f"No committed ./configure; prepended bootstrap: "
+                        f"{bootstrap[:60]}"
+                    )
+
+            # Build-root threading: run `make` where the makefile
+            # actually is. Detection can report `make` while the
+            # makefile lives a level down, and the bare command then
+            # fails with "No targets specified and no makefile found".
+            # Only rewrite a plain `make` (no cd/-C/-f already steering
+            # it) and only when a makefile really exists somewhere —
+            # otherwise the original, truthful error is preserved.
+            if (
+                re.match(r"^make\b", optimized_cmd.strip())
+                and " -C" not in optimized_cmd
+                and " -f" not in optimized_cmd
+            ):
+                make_dir = _find_makefile_dir(_to_host_path(state.repo_path))
+                if make_dir:
+                    optimized_cmd = f"cd {shlex.quote(make_dir)} && " + (
+                        optimized_cmd
+                    )
+                    state.log_scripted_op("make_root_redirect")
+                    logger.info(
+                        f"No makefile at repo root; redirected make to "
+                        f"'{make_dir}'"
                     )
 
             # Before any make command, proactively fix po/Makefile

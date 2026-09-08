@@ -37,17 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go from the official riscv64 tarball. Ubuntu jammy ships 1.18,
-# which is below what most modern go.mod files (1.22+) require. Pinning a recent
-# toolchain in the image avoids slow GOTOOLCHAIN downloads during agent runs.
-ARG GO_VERSION=1.26.3
+
+ARG GO_VERSION=1.26.5
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
     | tar -xz -C /usr/local \
     && /usr/local/go/bin/go version
 
 # Install a modern Rust/Cargo toolchain via rustup. Ubuntu jammy's cargo 1.75
 # cannot build crates using Edition 2024 (seen in dalfox and similar repos).
-ARG RUST_TOOLCHAIN=1.85.0
+ARG RUST_TOOLCHAIN=1.90.0
 RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
     && sh /tmp/rustup-init.sh -y \
         --profile minimal \

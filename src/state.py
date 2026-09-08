@@ -561,10 +561,57 @@ def sanitize_repo_name(raw: str) -> str:
 
 
 def is_valid_repo_url(repo_url: str) -> bool:
-    """Return True when ``repo_url`` is a plain, shell-safe http(s) URL.
-    """
+    """Return True when ``repo_url`` is a plain, shell-safe http(s) URL."""
     url = (repo_url or "").strip()
     return bool(re.fullmatch(r"https?://[A-Za-z0-9._~:/?#@!+,=%\-]+", url))
+
+
+# URL basenames that describe the artifact rather than the project, so
+# they collide across unrelated upstreams. Observed: `step-cli`, `gh`,
+# `gitlab-cli`, `ipinfo` and `hcloud` ALL end in `/cli`, so all five
+# derived repo_name "cli" and overwrote each other's workspace, recipe
+# cache key, log file and release asset — at most one of the five was
+# ever really built.
+#
+# Kept deliberately small. Every name added here changes the cache key
+# for its packages (invalidating any existing cached recipe), so only
+# add a basename once a real collision is observed.
+_AMBIGUOUS_BASENAMES = frozenset(
+    {"cli", "core", "src", "app", "main", "client", "server", "lib"}
+)
+
+
+def derive_repo_name(repo_url: str) -> str:
+    """Derive the canonical ``repo_name`` key for a repository URL.
+
+    The single source of truth for this derivation: the recipe cache,
+    the clone directory, the per-repo log files and the release asset
+    name are all keyed on the result, so any divergence between callers
+    makes cache lookups miss forever.
+
+    Normally the URL basename, EXCEPT when that basename is generic
+    (see ``_AMBIGUOUS_BASENAMES``), in which case the owner segment is
+    prefixed — ``github.com/cli/cli`` -> ``cli-cli``,
+    ``github.com/smallstep/cli`` -> ``smallstep-cli``. This keeps every
+    non-colliding package's key byte-identical to the historical value.
+
+    Args:
+        repo_url: The repository URL.
+
+    Returns:
+        A safe, collision-resistant repo name.
+    """
+    trimmed = (repo_url or "").strip().rstrip("/")
+    segments = [s for s in trimmed.split("/") if s]
+    basename = segments[-1].removesuffix(".git") if segments else ""
+
+    if basename.lower() in _AMBIGUOUS_BASENAMES and len(segments) >= 2:
+        owner = segments[-2].removesuffix(".git")
+        # Skip the scheme/host segments ("https:", "github.com").
+        if owner and owner != "" and ":" not in owner and "." not in owner:
+            return sanitize_repo_name(f"{owner}-{basename}")
+
+    return sanitize_repo_name(basename)
 
 
 def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
@@ -583,9 +630,7 @@ def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
             "(expected a plain http(s) URL without shell metacharacters)"
         )
 
-    repo_name = sanitize_repo_name(
-        url.rstrip("/").split("/")[-1].removesuffix(".git")
-    )
+    repo_name = derive_repo_name(url)
 
     return AgentState(
         repo_url=url,
