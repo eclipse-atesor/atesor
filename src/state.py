@@ -44,7 +44,6 @@ class BuildStatus(str, Enum):
     PLANNING = "PLANNING"
     SCOUTING = "SCOUTING"
     BUILDING = "BUILDING"
-    TESTING = "TESTING"
     FIXING = "FIXING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
@@ -87,7 +86,6 @@ class AgentRole(str, Enum):
     BUILDER = "builder"
     FIXER = "fixer"
     SUMMARIZER = "summarizer"
-    AGENT = "agent"
 
 
 class Action(str, Enum):

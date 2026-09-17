@@ -700,7 +700,6 @@ class TestEnumStability(unittest.TestCase):
             "PLANNING",
             "SCOUTING",
             "BUILDING",
-            "TESTING",
             "FIXING",
             "SUCCESS",
             "FAILED",
@@ -742,7 +741,6 @@ class TestEnumStability(unittest.TestCase):
             "builder",
             "fixer",
             "summarizer",
-            "agent",
         }
         self.assertEqual({r.value for r in AgentRole}, expected)
 
