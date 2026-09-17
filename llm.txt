@@ -16,7 +16,7 @@ Important current behavior:
 ## Entrypoints
 
 - [main.py](./main.py): CLI entrypoint, Docker setup/cleanup, workflow execution, reporting.
-- [batch_test.py](./batch_test.py): Batch runner for multiple repositories.
+- [batch_test.py](./.github/scripts/batch_test.py): Batch runner for multiple repositories.
 - [Dockerfile](./Dockerfile): Alpine/riscv64 sandbox image definition.
 - [requirements.txt](./requirements.txt): Runtime and dev dependencies.
 

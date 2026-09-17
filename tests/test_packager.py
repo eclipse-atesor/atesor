@@ -5,8 +5,9 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
-from src.packager import package_build
+from src.packager import _add_repo_tree, _safe_zip_path, package_build
 
 
 class TestPackageBuild(unittest.TestCase):
@@ -192,6 +193,60 @@ class TestPackageBuild(unittest.TestCase):
             msg=f"unexpected .log entries: {names}",
         )
         self.assertEqual(manifest["logs_in_zip"], [])
+
+
+class TestPackagerEdgeCases(unittest.TestCase):
+    """Cover collision numbering, symlink skips, unreadable files."""
+
+    def setUp(self) -> None:
+        """Create temp dirs."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+
+    def tearDown(self) -> None:
+        """Remove temp dirs."""
+        self.tmp.cleanup()
+
+    def test_safe_zip_path_increments_past_collisions(self) -> None:
+        """Test safe zip path increments past collisions."""
+        for name in ("pkg.zip", "pkg.1.zip"):
+            with open(os.path.join(self.root, name), "w") as f:
+                f.write("x")
+        self.assertEqual(
+            _safe_zip_path(self.root, "pkg.zip"),
+            os.path.join(self.root, "pkg.2.zip"),
+        )
+
+    def test_symlinked_directory_is_skipped(self) -> None:
+        """Test symlinked directory is skipped."""
+        repo = os.path.join(self.root, "repo")
+        outside = os.path.join(self.root, "outside")
+        os.makedirs(repo)
+        os.makedirs(outside)
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("secret")
+        with open(os.path.join(repo, "main.c"), "w") as f:
+            f.write("int main;")
+        os.symlink(outside, os.path.join(repo, "link"))
+        zip_path = os.path.join(self.root, "out.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            added, skipped = _add_repo_tree(zf, repo, "r")
+        self.assertEqual(added, 1)
+        self.assertEqual(skipped, 1)
+        with zipfile.ZipFile(zip_path) as zf:
+            self.assertNotIn("r/link/secret.txt", zf.namelist())
+
+    def test_unreadable_file_is_skipped(self) -> None:
+        """Test unreadable file is skipped."""
+        repo = os.path.join(self.root, "repo")
+        os.makedirs(repo)
+        with open(os.path.join(repo, "main.c"), "w") as f:
+            f.write("int main;")
+        zf = mock.MagicMock()
+        zf.write.side_effect = OSError("unreadable")
+        added, skipped = _add_repo_tree(zf, repo, "r")
+        self.assertEqual(added, 0)
+        self.assertEqual(skipped, 0)
 
 
 if __name__ == "__main__":

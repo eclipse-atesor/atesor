@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from src.artifact_curator import curate_artifacts
+from src.artifact_curator import _parse_curator_json, curate_artifacts
 
 
 def _art(path, type="binary"):
@@ -174,6 +174,48 @@ class TestLLMCurator(unittest.TestCase):
         self.assertNotIn("/b/CMakeFiles/CompilerIdC/a.out", paths)
         # The prompt only saw one item, so id 1 == /b/foo
         self.assertIn("/b/foo", paths)
+
+
+class TestCuratorEdgeCases(unittest.TestCase):
+    """Cover noise drops, plain-primary fallback, and JSON parsing."""
+
+    def test_empty_path_and_noise_are_dropped(self) -> None:
+        """Test empty path and noise are dropped."""
+        out = curate_artifacts(
+            [
+                {"filepath": "", "type": "binary"},
+                _art("/b/meson-private/probe"),
+            ],
+            "foo",
+        )
+        self.assertEqual(out, [])
+
+    def test_plain_binary_defaults_to_primary(self) -> None:
+        """Test plain binary defaults to primary."""
+        out = curate_artifacts([_art("/b/otherbin")], "foo")
+        self.assertEqual(out[0]["role"], "primary")
+
+    def test_parse_curator_json_edge_inputs(self) -> None:
+        """Test parse curator json edge inputs."""
+        self.assertIsNone(_parse_curator_json("", 3))
+        self.assertIsNone(_parse_curator_json("no braces here", 3))
+        self.assertIsNone(_parse_curator_json("{not valid json}", 3))
+        parsed = _parse_curator_json(
+            '{"primary": ["x", 2, 99], "secondary": [], "drop": []}', 3
+        )
+        self.assertEqual(parsed, ([2], [], []))
+
+    def test_llm_list_content_parts_are_joined(self) -> None:
+        """Test llm list content parts are joined."""
+        artifacts = [_art("/b/foo"), _art("/b/tests/foo-test")]
+        llm = mock.MagicMock()
+        llm.invoke.return_value = mock.MagicMock(
+            content=['{"primary": [1], "secondary"', ': [2], "drop": []}']
+        )
+        out = curate_artifacts(artifacts, "foo", llm=llm)
+        roles = {a["filepath"]: a["role"] for a in out}
+        self.assertEqual(roles.get("/b/foo"), "primary")
+        self.assertEqual(roles.get("/b/tests/foo-test"), "secondary")
 
 
 if __name__ == "__main__":

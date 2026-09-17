@@ -1,0 +1,134 @@
+name: Regression Tests
+
+# Full regression suite, split into categories so failures are
+# attributable at a glance. Runs on every push to main/dev; the
+# `report` job aggregates all category JUnit results into a single
+# Markdown table in the run summary and fails if any test file in
+# tests/ is not claimed by exactly one category.
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  tests:
+    name: ${{ matrix.category }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - category: state-and-routing
+            paths: >-
+              tests/test_state.py
+              tests/test_graph_routing.py
+              tests/test_graph_agent_node.py
+          - category: graph-agents
+            paths: >-
+              tests/test_graph_agents.py
+              tests/test_graph_validators.py
+          - category: execution-tools
+            paths: >-
+              tests/test_tools.py
+              tests/test_platforms.py
+              tests/test_config.py
+              tests/test_security_hardening.py
+          - category: llm-and-memory
+            paths: >-
+              tests/test_models.py
+              tests/test_memory.py
+              tests/test_llm_helpers.py
+              tests/test_llm_logger.py
+          - category: repo-analysis
+            paths: >-
+              tests/test_scripted_ops.py
+              tests/test_evidence.py
+              tests/test_knowledge.py
+          - category: artifacts-packaging
+            paths: >-
+              tests/test_artifact_scanner.py
+              tests/test_artifact_curator.py
+              tests/test_packager.py
+          - category: cli-main
+            paths: >-
+              tests/test_main.py
+          - category: regression-suites
+            paths: >-
+              tests/test_concurrency.py
+              tests/test_masterplan_fixes.py
+              tests/test_plan_remaining.py
+              tests/test_resource_lifecycle.py
+              tests/test_shard_planning.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Record category file list
+        run: printf '%s\n' ${{ matrix.paths }} > "paths-${{ matrix.category }}.txt"
+
+      - name: Run ${{ matrix.category }} tests
+        env:
+          PYTHONPATH: .
+        run: >-
+          python3 -m pytest ${{ matrix.paths }} -q
+          --junitxml="results-${{ matrix.category }}.xml"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.category }}
+          path: |
+            results-${{ matrix.category }}.xml
+            paths-${{ matrix.category }}.txt
+          retention-days: 14
+
+  report:
+    name: report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: tests
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download category results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: junit-*
+          path: test-results
+          merge-multiple: true
+
+      - name: Aggregate and report
+        run: >-
+          python3 .github/scripts/report_regression.py
+          --results-dir test-results --tests-dir tests
+
+      - name: Fail if any category job failed
+        if: needs.tests.result != 'success'
+        run: |
+          echo "One or more test category jobs failed."
+          exit 1
