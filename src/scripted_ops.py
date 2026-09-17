@@ -805,7 +805,7 @@ class ScriptedOperations:
                 candidates_sorted = sorted(
                     go_subdir_candidates, key=lambda x: x[2], reverse=True
                 )
-                best_root, best_dir, best_score = candidates_sorted[0]
+                _best_root, best_dir, best_score = candidates_sorted[0]
                 detected.append(("go", f"{best_dir}/go.mod"))
                 confidence_scores["go"] = 0.90
                 logger.info(

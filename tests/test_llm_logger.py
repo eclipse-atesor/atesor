@@ -1,7 +1,10 @@
 """Tests for src/llm_logger.py — audit log writer, per-repo file switching."""
 
 import os
+import shutil
 import unittest
+import uuid
+from unittest import mock
 
 from src.llm_logger import LLMCallLogger, log_llm_call, set_llm_log_repo
 
@@ -10,7 +13,6 @@ class TestLogCall(unittest.TestCase):
     """Tests for LogCall."""
 
     def setUp(self) -> None:
-        # Use a fresh tempdir for logs
         """Set up test fixtures."""
         self.tmpdir = self._tmp()
         # Reset singleton state pointing at the temp dir
@@ -22,15 +24,15 @@ class TestLogCall(unittest.TestCase):
             f.write("")
 
     def _tmp(self):
-        """Tmp."""
-        import tempfile
-
-        return tempfile.mkdtemp(prefix="atesor-logtest-")
+        """Create a project-local scratch directory for log files."""
+        root = os.path.join(os.getcwd(), "workspace", "test-llm-logger")
+        os.makedirs(root, exist_ok=True)
+        path = os.path.join(root, f"atesor-logtest-{uuid.uuid4().hex}")
+        os.makedirs(path, exist_ok=False)
+        return path
 
     def tearDown(self) -> None:
         """Tear down test fixtures."""
-        import shutil
-
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _read_log(self, path=None):
@@ -112,6 +114,44 @@ class TestLogCall(unittest.TestCase):
         """Test call ids are unique."""
         ids = {log_llm_call("R", "p", "r", "m", 0.0) for _ in range(20)}
         self.assertEqual(len(ids), 20)
+
+    def test_ensure_log_file_writes_header_for_new_file(self) -> None:
+        """Fresh log initialization writes the audit header."""
+        fresh_dir = os.path.join(self.tmpdir, "fresh")
+        inst = LLMCallLogger()
+        with mock.patch("src.config.LOGS_DIR", fresh_dir):
+            inst._ensure_log_file()
+
+        content = self._read_log(os.path.join(fresh_dir, "agent-call.log"))
+        self.assertIn("ATESOR AI - LLM CALL LOG", content)
+        self.assertIn("Created:", content)
+
+    def test_ensure_log_file_failure_disables_file(self) -> None:
+        """Initialization failures leave file logging disabled."""
+        inst = LLMCallLogger()
+        with (
+            mock.patch("src.llm_logger.os.makedirs", side_effect=OSError),
+            self.assertLogs("src.llm_logger", level="ERROR"),
+        ):
+            inst._ensure_log_file()
+
+        self.assertIsNone(inst.log_file)
+        self.assertIsNone(inst._logs_dir)
+
+    def test_log_call_write_failure_still_returns_id(self) -> None:
+        """File-write failures are logged but do not break callers."""
+        inst = LLMCallLogger()
+        inst.log_file = os.path.join(self.tmpdir, "unwritable.log")
+        before = len(inst.calls)
+        with (
+            mock.patch("builtins.open", side_effect=OSError("blocked")),
+            self.assertLogs("src.llm_logger", level="ERROR") as logs,
+        ):
+            call_id = inst.log_call("SCOUT", "p", "r", "m")
+
+        self.assertTrue(call_id.startswith("call_"))
+        self.assertEqual(len(inst.calls), before + 1)
+        self.assertIn("Failed to write LLM call log", "\n".join(logs.output))
 
 
 class TestLoggerSingleton(unittest.TestCase):

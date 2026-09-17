@@ -431,10 +431,6 @@ def collect_package_logs(
 # ---------------------------------------------------------------------------
 
 
-def _slug(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-")
-
-
 def _fmt_dur(start: str | None, end: str | None) -> str:
     if not (start and end):
         return "?"

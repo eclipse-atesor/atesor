@@ -28,7 +28,6 @@ from .state import AgentRole
 logger = logging.getLogger(__name__)
 
 
-_FREE_MODELS_CACHE: "List[str] | None" = None
 _DEFAULT_MAX_TOKENS = int(os.getenv("ATESOR_MAX_OUTPUT_TOKENS", "8192"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("ATESOR_LLM_TIMEOUT", "120"))
 
@@ -208,8 +207,8 @@ def _openrouter_fallback_ids() -> List[str]:
     if not ids:
         # Currently-live curated defaults, diversified across providers
         # to survive a single-provider outage. Refresh via:
-        #   python3 -c "from src.models import
-        #     _discover_openrouter_free_models as f; print(f())"
+        #   curl -s https://openrouter.ai/api/v1/models |
+        #     jq -r '.data[].id' | grep ':free'
         ids = [
             "qwen/qwen3-coder:free",
             "openai/gpt-oss-120b:free",
@@ -270,44 +269,6 @@ def create_llm_pool(role: AgentRole) -> List[BaseChatModel]:
         except Exception as exc:
             logger.warning(f"Skipping fallback model '{model_id}': {exc}")
     return [primary, *fallbacks]
-
-
-def _discover_openrouter_free_models(timeout: int = 8) -> List[str]:
-    """Fetch the live ``:free`` slugs from OpenRouter ``/models``.
-
-    Returns an empty list on any error — callers must treat this as a
-    best-effort augmentation, not a required step. Cached in-process for
-    the lifetime of the run to avoid hammering the endpoint from every
-    ``create_llm_pool`` call.
-    """
-    global _FREE_MODELS_CACHE
-    if _FREE_MODELS_CACHE is not None:
-        return _FREE_MODELS_CACHE
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        _FREE_MODELS_CACHE = []
-        return _FREE_MODELS_CACHE
-    try:
-        import requests
-
-        resp = requests.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        models = resp.json().get("data", [])
-        _FREE_MODELS_CACHE = sorted(
-            m["id"] for m in models if ":free" in m.get("id", "")
-        )
-        logger.info(
-            f"Discovered {len(_FREE_MODELS_CACHE)} live OpenRouter "
-            f":free slugs for fallback pool augmentation."
-        )
-    except Exception as exc:
-        logger.warning(f"OpenRouter model discovery failed: {exc}")
-        _FREE_MODELS_CACHE = []
-    return _FREE_MODELS_CACHE
 
 
 def _resolve_model_name(role: AgentRole) -> str:

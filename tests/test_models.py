@@ -2,15 +2,234 @@
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from src.models import (
+    _DEFAULT_MAX_TOKENS,
+    LLM_REQUEST_TIMEOUT,
+    MODEL_CONFIG,
     OPENROUTER_FREE_ROUTER,
     _create_llm_with_model,
     _openrouter_fallback_ids,
+    _resolve_model_name,
+    check_api_keys,
+    create_llm,
     create_llm_pool,
+    is_free_model,
+    print_model_info,
 )
 from src.state import AgentRole
+
+
+class TestCheckApiKeys(unittest.TestCase):
+    """Tests for provider API-key validation."""
+
+    def test_openai_key_branches(self) -> None:
+        """Validate missing, placeholder, and present OpenAI keys."""
+        cases = [
+            ({}, False, "OPENAI_API_KEY not found"),
+            ({"OPENAI_API_KEY": "your_key_here"}, False, "not found"),
+            ({"OPENAI_API_KEY": "sk-test"}, True, "OpenAI API key"),
+        ]
+        for extra_env, expected_ok, expected_msg in cases:
+            env = {"LLM_PROVIDER": "openai", **extra_env}
+            with self.subTest(extra_env=extra_env):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    ok, message, provider = check_api_keys()
+
+                self.assertEqual(ok, expected_ok)
+                self.assertIn(expected_msg, message)
+                self.assertEqual(provider, "openai")
+
+    def test_gemini_key_branches(self) -> None:
+        """Validate missing, placeholder, and present Gemini keys."""
+        cases = [
+            ({}, False, "GOOGLE_API_KEY not found"),
+            ({"GOOGLE_API_KEY": "your_key_here"}, False, "not found"),
+            ({"GOOGLE_API_KEY": "google-test"}, True, "Gemini API key"),
+        ]
+        for extra_env, expected_ok, expected_msg in cases:
+            env = {"LLM_PROVIDER": "gemini", **extra_env}
+            with self.subTest(extra_env=extra_env):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    ok, message, provider = check_api_keys()
+
+                self.assertEqual(ok, expected_ok)
+                self.assertIn(expected_msg, message)
+                self.assertEqual(provider, "gemini")
+
+    def test_openrouter_key_branches(self) -> None:
+        """Validate missing, placeholder, and present OpenRouter keys."""
+        cases = [
+            ({}, False, "OPENROUTER_API_KEY not found"),
+            ({"OPENROUTER_API_KEY": "your_key_here"}, False, "not found"),
+            (
+                {"OPENROUTER_API_KEY": "router-test"},
+                True,
+                "OpenRouter API key",
+            ),
+        ]
+        for extra_env, expected_ok, expected_msg in cases:
+            env = {"LLM_PROVIDER": "openrouter", **extra_env}
+            with self.subTest(extra_env=extra_env):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    ok, message, provider = check_api_keys()
+
+                self.assertEqual(ok, expected_ok)
+                self.assertIn(expected_msg, message)
+                self.assertEqual(provider, "openrouter")
+
+    def test_unknown_provider_fails(self) -> None:
+        """Unknown providers are reported without falling through."""
+        with mock.patch.dict(
+            os.environ, {"LLM_PROVIDER": "anthropic"}, clear=True
+        ):
+            ok, message, provider = check_api_keys()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "Unknown provider: anthropic")
+        self.assertEqual(provider, "anthropic")
+
+
+class TestIsFreeModel(unittest.TestCase):
+    """Tests for free-model slug detection."""
+
+    def test_detects_free_tier_slugs_case_insensitively(self) -> None:
+        """Free suffixes and router id are detected."""
+        self.assertTrue(is_free_model("QWEN/QWEN3-CODER:FREE"))
+        self.assertTrue(is_free_model(OPENROUTER_FREE_ROUTER))
+
+    def test_false_for_empty_or_paid_model(self) -> None:
+        """Empty and paid model ids are not free."""
+        self.assertFalse(is_free_model(""))
+        self.assertFalse(is_free_model("gpt-4o"))
+
+
+class TestCreateLLM(unittest.TestCase):
+    """Tests for create_llm and role-to-model resolution."""
+
+    @mock.patch("src.models._resolve_model_name", return_value="model-id")
+    @mock.patch("src.models._create_llm_with_model", return_value="llm")
+    def test_create_llm_uses_resolved_model(
+        self,
+        mock_create_with_model: mock.MagicMock,
+        mock_resolve: mock.MagicMock,
+    ) -> None:
+        """create_llm delegates construction to the explicit builder."""
+        self.assertEqual(create_llm(AgentRole.SCOUT), "llm")
+        mock_resolve.assert_called_once_with(AgentRole.SCOUT)
+        mock_create_with_model.assert_called_once_with(
+            AgentRole.SCOUT, "model-id"
+        )
+
+    def test_resolve_model_uses_provider_role_and_fallbacks(self) -> None:
+        """Model resolution falls back for unknown providers and roles."""
+        with mock.patch.dict(
+            os.environ, {"LLM_PROVIDER": "openai"}, clear=True
+        ):
+            self.assertEqual(_resolve_model_name(AgentRole.FIXER), "gpt-4o")
+
+        with mock.patch.dict(
+            os.environ, {"LLM_PROVIDER": "unknown"}, clear=True
+        ):
+            self.assertEqual(
+                _resolve_model_name(AgentRole.BUILDER),
+                "gemini-flash-lite-latest",
+            )
+
+        with mock.patch.dict(
+            os.environ, {"LLM_PROVIDER": "openai"}, clear=True
+        ):
+            self.assertEqual(_resolve_model_name("made-up"), "gpt-4o-mini")
+
+
+class TestCreateLLMWithModel(unittest.TestCase):
+    """Tests for provider-specific LLM construction without real clients."""
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=True)
+    @mock.patch("src.models.ChatOpenAI")
+    def test_openai_constructor_arguments(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        """Provider clients receive role temperature and token limits."""
+        _create_llm_with_model(AgentRole.BUILDER, "gpt-test")
+
+        mock_chat.assert_called_once_with(
+            model="gpt-test",
+            temperature=0.0,
+            request_timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+        )
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "gemini"}, clear=True)
+    @mock.patch("src.models.ChatGoogleGenerativeAI")
+    def test_gemini_constructor_arguments(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        """Gemini clients receive timeout and max-output arguments."""
+        _create_llm_with_model(AgentRole.SCOUT, "gemini-test")
+
+        mock_chat.assert_called_once_with(
+            model="gemini-test",
+            temperature=0.1,
+            timeout=LLM_REQUEST_TIMEOUT,
+            max_output_tokens=_DEFAULT_MAX_TOKENS,
+        )
+
+    @mock.patch.dict(
+        os.environ,
+        {"LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "router-key"},
+        clear=True,
+    )
+    @mock.patch("src.models.ChatOpenAI")
+    def test_openrouter_constructor_arguments(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        """Router clients use base URL and fallback settings."""
+        _create_llm_with_model(AgentRole.FIXER, "openai/gpt-oss-120b:free")
+
+        kwargs = mock_chat.call_args.kwargs
+        self.assertEqual(kwargs["model"], "openai/gpt-oss-120b:free")
+        self.assertEqual(kwargs["openai_api_key"], "router-key")
+        self.assertEqual(
+            kwargs["openai_api_base"], "https://openrouter.ai/api/v1"
+        )
+        self.assertEqual(kwargs["extra_body"]["models"][-1], "openrouter/free")
+        self.assertLessEqual(len(kwargs["extra_body"]["models"]), 3)
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "unknown"}, clear=True)
+    @mock.patch("src.models.ChatGoogleGenerativeAI")
+    def test_unknown_provider_falls_back_to_gemini(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        """Unknown configured providers fall back to Gemini."""
+        _create_llm_with_model(AgentRole.SCOUT, "gemini-test")
+        self.assertEqual(mock_chat.call_args.kwargs["model"], "gemini-test")
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=True)
+    @mock.patch("src.models.ChatOpenAI")
+    def test_unknown_role_falls_back_to_supervisor_temperature(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
+        """Unknown roles use the supervisor temperature."""
+        _create_llm_with_model("unknown-role", "gpt-test")
+        self.assertEqual(mock_chat.call_args.kwargs["temperature"], 0.0)
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "unsupported"}, clear=True)
+    def test_configured_but_unsupported_provider_raises(self) -> None:
+        """Providers in config but without plumbing raise ValueError."""
+        fake_config = {
+            "unsupported": {
+                "supervisor": {
+                    "model": "unsupported-model",
+                    "temperature": 0.0,
+                }
+            }
+        }
+        with mock.patch.dict(MODEL_CONFIG, fake_config):
+            with self.assertRaisesRegex(ValueError, "Unsupported provider"):
+                _create_llm_with_model(AgentRole.SUPERVISOR, "model")
 
 
 class TestCreateLLMPool(unittest.TestCase):
@@ -60,6 +279,38 @@ class TestCreateLLMPool(unittest.TestCase):
         pool = create_llm_pool(AgentRole.SCOUT)
         self.assertEqual(pool, ["primary"])
 
+    @mock.patch.dict(
+        os.environ,
+        {
+            "LLM_PROVIDER": "openrouter",
+            "OPENROUTER_FALLBACK_MODELS": "primary-model, bad, good",
+        },
+        clear=False,
+    )
+    @mock.patch("src.models._create_llm_with_model")
+    @mock.patch("src.models.create_llm")
+    def test_openrouter_skips_primary_and_failed_fallbacks(
+        self,
+        mock_create_llm: mock.MagicMock,
+        mock_create_with_model: mock.MagicMock,
+    ) -> None:
+        """Router pools skip duplicate and failed fallback models."""
+        primary = SimpleNamespace(model_name="primary-model")
+        mock_create_llm.return_value = primary
+        mock_create_with_model.side_effect = [
+            RuntimeError("boom"),
+            "good",
+            "router",
+        ]
+
+        pool = create_llm_pool(AgentRole.FIXER)
+
+        self.assertEqual(pool, [primary, "good", "router"])
+        self.assertEqual(
+            [call.args[1] for call in mock_create_with_model.call_args_list],
+            ["bad", "good", OPENROUTER_FREE_ROUTER],
+        )
+
 
 class TestOpenRouterFallbackIds(unittest.TestCase):
     """Tests for the shared OpenRouter fallback chain."""
@@ -108,8 +359,16 @@ class TestServerSideFallback(unittest.TestCase):
         },
         clear=False,
     )
-    def test_extra_body_models_excludes_primary(self) -> None:
+    @mock.patch("src.models.ChatOpenAI")
+    def test_extra_body_models_excludes_primary(
+        self, mock_chat: mock.MagicMock
+    ) -> None:
         """extra_body carries the fallback chain minus the primary."""
+        def fake_openai(**kwargs):
+            """Return constructor kwargs as a simple fake LLM."""
+            return SimpleNamespace(**kwargs, model_name=kwargs["model"])
+
+        mock_chat.side_effect = fake_openai
         llm = _create_llm_with_model(
             AgentRole.FIXER, "openai/gpt-oss-120b:free"
         )
@@ -161,6 +420,33 @@ class TestCostForUsage(unittest.TestCase):
         from src.models import cost_for_usage
 
         self.assertEqual(cost_for_usage("gpt-4o", -5, -5), 0.0)
+
+
+class TestPrintModelInfo(unittest.TestCase):
+    """Tests for selected-provider reporting."""
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=True)
+    @mock.patch("builtins.print")
+    def test_prints_provider_and_models(
+        self, mock_print: mock.MagicMock
+    ) -> None:
+        """Known providers print the compact model summary."""
+        print_model_info()
+
+        printed = [call.args[0] for call in mock_print.call_args_list]
+        self.assertEqual(printed[0], "   Provider: openai")
+        self.assertIn("gpt-4o-mini", printed[1])
+        self.assertIn("gpt-4o", printed[1])
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "unknown"}, clear=True)
+    @mock.patch("builtins.print")
+    def test_unknown_provider_prints_provider_only(
+        self, mock_print: mock.MagicMock
+    ) -> None:
+        """Unknown providers do not attempt a model summary."""
+        print_model_info()
+
+        mock_print.assert_called_once_with("   Provider: unknown")
 
 
 if __name__ == "__main__":

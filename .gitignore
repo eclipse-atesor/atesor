@@ -13,3 +13,6 @@ __pycache__/
 output/*
 docs/*
 test_results/*
+
+CLAUDE.md
+PROJECT.md

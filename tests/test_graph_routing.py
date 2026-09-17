@@ -17,6 +17,7 @@ from src.state import (
     BuildPlan,
     BuildStatus,
     ErrorCategory,
+    FixAttempt,
     PackageAnalysis,
     create_initial_state,
 )
@@ -256,6 +257,25 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
 
+    def test_failed_compilation_routes_to_subgraph(self):
+        """Failed non-replan errors route into the build-fix subgraph."""
+        s = _base_state(
+            package_analysis=_analysis(),
+            build_status=BuildStatus.FAILED,
+            last_error_category=ErrorCategory.COMPILATION,
+            last_error="compiler error",
+        )
+        self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
+
+    def test_pending_without_plan_routes_to_scout(self):
+        """Pending analyzed state without a plan asks the scout to plan."""
+        s = _base_state(
+            package_analysis=_analysis(),
+            build_plan=None,
+            build_status=BuildStatus.PENDING,
+        )
+        self.assertEqual(route_supervisor_to_next(s), "scout_node")
+
 
 class TestBuildFixSubgraphRouting(unittest.TestCase):
     """Tests for the build-fix subgraph routing."""
@@ -270,6 +290,15 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_build_result(s), "fix_node")
 
+    def test_build_fail_at_max_attempts_exits_subgraph(self):
+        """A failed build at the retry ceiling exits to the parent graph."""
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=5,
+            max_attempts=5,
+        )
+        self.assertEqual(route_build_result(s), "__end__")
+
     def test_verify_success_exits_subgraph(self):
         """Verify success exits subgraph."""
         s = _base_state(build_status=BuildStatus.SUCCESS)
@@ -280,6 +309,31 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_verify_result(s), "fix_node")
 
+    def test_verify_fail_at_max_attempts_exits_subgraph(self):
+        """A verify failure at max attempts exits instead of fixing."""
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=5,
+            max_attempts=5,
+        )
+        self.assertEqual(route_verify_result(s), "__end__")
+
+    def test_verify_fail_after_non_build_fix_exits_subgraph(self):
+        """Post-fix non-build verification failures do not loop forever."""
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            last_error_category=ErrorCategory.CONFIGURATION,
+            fixes_attempted=[
+                FixAttempt(
+                    error_category=ErrorCategory.CONFIGURATION,
+                    strategy="change plan",
+                    changes_made=["Executed: true"],
+                    success=False,
+                )
+            ],
+        )
+        self.assertEqual(route_verify_result(s), "__end__")
+
     def test_fix_success_retries_build(self):
         """Fix success retries build."""
         s = _base_state(build_status=BuildStatus.PENDING)
@@ -288,6 +342,15 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
     def test_fix_still_failed_exits_subgraph(self):
         """Fix still failed exits subgraph."""
         s = _base_state(build_status=BuildStatus.FAILED)
+        self.assertEqual(route_fix_result(s), "__end__")
+
+    def test_fix_at_max_attempts_exits_subgraph(self):
+        """A nominally successful fix still exits at the retry ceiling."""
+        s = _base_state(
+            build_status=BuildStatus.PENDING,
+            attempt_count=5,
+            max_attempts=5,
+        )
         self.assertEqual(route_fix_result(s), "__end__")
 
 

@@ -271,5 +271,34 @@ class TestDebianGoBundling(unittest.TestCase):
         )
 
 
+class TestProfileCacheAndDefaults(unittest.TestCase):
+    """Cover the cache-miss path and default container resolution."""
+
+    def test_get_active_profile_detects_on_cache_miss(self) -> None:
+        """Test get active profile detects on cache miss."""
+        platforms._cached_profile = None
+        with mock.patch.object(
+            platforms, "detect_platform", return_value=DEBIAN_RISCV
+        ) as detect:
+            self.assertIs(get_active_profile(), DEBIAN_RISCV)
+        detect.assert_called_once()
+        # Second call must hit the cache, not re-detect.
+        self.assertIs(get_active_profile(), DEBIAN_RISCV)
+
+    def test_detect_platform_uses_default_container(self) -> None:
+        """Test detect platform uses default container."""
+        env = {k: v for k, v in os.environ.items()}
+        env.pop("ATESOR_PLATFORM", None)
+        env.pop("ATESOR_CONTAINER", None)
+        completed = SimpleNamespace(returncode=1, stdout="", stderr="")
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
+            "src.platforms.subprocess.run", return_value=completed
+        ) as run:
+            profile = detect_platform()
+        self.assertIs(profile, platforms._DEFAULT_PROFILE)
+        cmd = run.call_args[0][0]
+        self.assertIn(platforms._DEFAULT_PROFILE.container_name, cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

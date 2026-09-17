@@ -181,15 +181,6 @@ def to_host_path(path: str) -> str:
     return path
 
 
-def print_config() -> None:
-    """Print the current configuration to standard output."""
-    environment = "Docker Container" if _IN_DOCKER else "Host System"
-    print(f"[Config] Environment: {environment}")
-    print(f"[Config] Workspace: {WORKSPACE_ROOT}")
-    print(f"[Config] Output: {OUTPUT_DIR}")
-    print(f"[Config] Repos: {REPOS_DIR}")
-
-
 __all__ = [
     "is_running_in_docker",
     "get_workspace_root",
@@ -209,7 +200,6 @@ __all__ = [
     "LOGS_DIR",
     "PACKAGES_DIR",
     "to_host_path",
-    "print_config",
     "CONTAINER_NAME",
     "IMAGE_NAME",
     "_IN_DOCKER",

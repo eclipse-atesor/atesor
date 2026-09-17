@@ -130,7 +130,6 @@ class TestProvisionLockSerializesImageBuild:
     ) -> None:
         """Two concurrent _provision_sandbox calls -> one api.build."""
         import main as main_mod
-
         from src import platforms
 
         monkeypatch.setattr(main_mod, "LOGS_DIR", str(tmp_path))
