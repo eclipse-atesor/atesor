@@ -1865,7 +1865,7 @@ def _is_go_build_command(command: str) -> bool:
 
 def _inject_go_output(command: str, output_path: str) -> str:
     """Inject `-o <path>` into Go build/install commands."""
-    if re.search(r"\b-o\s+\S+", command):
+    if re.search(r"(?:^|\s)-o\s+\S+", command):
         return command
     return _inject_go_flag(command, f"-o {output_path}")
 

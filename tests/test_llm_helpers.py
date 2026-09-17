@@ -7,6 +7,8 @@ from unittest import mock
 from src.llm_helpers import (
     LLMCallOutcome,
     ValidationResult,
+    _accepts_timeout,
+    _build_replacement_llm,
     _extract_affordable_tokens,
     _extract_slug_hint,
     _is_provider_error,
@@ -14,6 +16,7 @@ from src.llm_helpers import (
     extract_content,
     extract_json_block,
     llm_call_with_validation,
+    response_cost,
     response_usage,
 )
 
@@ -34,6 +37,11 @@ class TestExtractHelpers(unittest.TestCase):
         """Test extract content list of strings."""
         out = extract_content(["x", "y"])
         self.assertEqual(out, "x\ny")
+
+    def test_extract_content_falls_back_to_str(self) -> None:
+        """Unknown content shapes are stringified."""
+        out = extract_content(SimpleNamespace(value=3))
+        self.assertEqual(out, "namespace(value=3)")
 
     def test_extract_json_block_strips_prose(self) -> None:
         """Test extract json block strips prose."""
@@ -251,6 +259,20 @@ class TestLLMCallWithValidation(unittest.TestCase):
         self.assertEqual(out.data, {"x": 1})
         self.assertEqual(out.attempts, 2)
 
+    def test_non_provider_exception_without_retry_returns_none(self) -> None:
+        """A local exception with no retry budget returns a failure outcome."""
+        invoke, _ = _make_invoke([RuntimeError("local validation crash")])
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hello",
+                validator=_ok_validator,
+                max_retries=0,
+            )
+        self.assertIsNone(out.data)
+        self.assertIn("local validation crash", out.last_error)
+
     def test_top_level_non_dict_json_rejected(self) -> None:
         # `[1, 2]` is valid JSON but not an object
         """Test top level non dict json rejected."""
@@ -265,6 +287,54 @@ class TestLLMCallWithValidation(unittest.TestCase):
                 max_retries=0,
             )
         self.assertTrue(out.used_fallback)
+
+    def test_empty_response_without_retry_returns_none(self) -> None:
+        """Empty content fails when no fallback model or retry is available."""
+        invoke, _ = _make_invoke([""])
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hello",
+                validator=_ok_validator,
+                max_retries=0,
+            )
+        self.assertIsNone(out.data)
+        self.assertIn("empty response", out.last_error)
+
+    def test_validation_failure_without_retry_returns_none(self) -> None:
+        """Schema failures return a failure outcome with no retry budget."""
+        invoke, _ = _make_invoke(['{"x": 1}'])
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hello",
+                validator=lambda _data: ValidationResult.bad("missing y"),
+                max_retries=0,
+            )
+        self.assertIsNone(out.data)
+        self.assertIn("missing y", out.last_error)
+
+    def test_fallback_factory_exception_returns_none(self) -> None:
+        """Fallback factory errors are swallowed into a failure outcome."""
+        invoke, _ = _make_invoke(["not json"])
+
+        def failing_fallback():
+            """Raise from a deterministic fallback factory."""
+            raise RuntimeError("fallback crashed")
+
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hello",
+                validator=_ok_validator,
+                fallback_factory=failing_fallback,
+                max_retries=0,
+            )
+        self.assertIsNone(out.data)
+        self.assertFalse(out.used_fallback)
 
 
 class TestProviderErrorDetection(unittest.TestCase):
@@ -466,6 +536,35 @@ class TestTokenBudgetSelfHeal(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(llm.max_tokens, 1000)
 
+    def test_shrink_max_tokens_updates_model_kwargs(self) -> None:
+        """Nested model kwargs caps are lowered too."""
+        llm = SimpleNamespace(
+            model_kwargs={"max_tokens": 8000, "max_output_tokens": 7000}
+        )
+        changed = _shrink_max_tokens(llm, 1000)
+        self.assertTrue(changed)
+        self.assertEqual(llm.model_kwargs["max_tokens"], 900)
+        self.assertEqual(llm.model_kwargs["max_output_tokens"], 900)
+
+    def test_shrink_max_tokens_ignores_setattr_errors(self) -> None:
+        """Read-only max-token attributes do not raise out."""
+
+        class ReadOnlyCap:
+            """Object whose cap property refuses writes."""
+
+            @property
+            def max_tokens(self):
+                """Return an oversized cap."""
+                return 9000
+
+            @max_tokens.setter
+            def max_tokens(self, value):
+                """Reject cap updates."""
+                raise RuntimeError("read-only")
+
+        changed = _shrink_max_tokens(ReadOnlyCap(), 1000)
+        self.assertFalse(changed)
+
     def test_402_error_shrinks_and_retries_same_model(self) -> None:
         """HTTP 402 shrinks the pool max_tokens then retries same model."""
         primary = SimpleNamespace(max_tokens=65536, model_name="p")
@@ -501,6 +600,44 @@ class TestTokenBudgetSelfHeal(unittest.TestCase):
         self.assertLess(seen_caps[1], 6000)
         # Fallback should have been shrunk too, ready for future calls.
         self.assertLess(fallback.max_tokens, 6000)
+
+
+class TestInternalUtilities(unittest.TestCase):
+    """Tests for small internal LLM helper utilities."""
+
+    def test_accepts_timeout_handles_uninspectable_callable(self) -> None:
+        """Signature-inspection failures safely return False."""
+        with mock.patch("inspect.signature", side_effect=ValueError):
+            self.assertFalse(_accepts_timeout(lambda _llm, _messages: None))
+
+    def test_build_replacement_llm_clones_common_attrs(self) -> None:
+        """Replacement LLMs keep provider settings and swap the model."""
+
+        class CloneableLLM:
+            """Minimal LLM constructor used by replacement cloning."""
+
+            def __init__(self, model=None, **kwargs):
+                self.model = model
+                self.kwargs = kwargs
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        reference = CloneableLLM(
+            model="old/model",
+            temperature=0.2,
+            openai_api_key="key",
+            openai_api_base="https://example.invalid",
+            request_timeout=30,
+            timeout=31,
+        )
+
+        replacement = _build_replacement_llm(reference, "new/model")
+
+        self.assertIsInstance(replacement, CloneableLLM)
+        self.assertEqual(replacement.model, "new/model")
+        self.assertEqual(replacement.temperature, 0.2)
+        self.assertEqual(replacement.openai_api_key, "key")
+        self.assertEqual(replacement.timeout, 31)
 
 
 class TestUsageAccounting(unittest.TestCase):
@@ -550,6 +687,14 @@ class TestUsageAccounting(unittest.TestCase):
     def test_response_usage_unknown_is_zero(self) -> None:
         """No usage anywhere reads as (0, 0), never invented."""
         self.assertEqual(response_usage(SimpleNamespace()), (0, 0))
+
+    def test_response_cost_prices_usage(self) -> None:
+        """response_cost delegates actual usage to the model price table."""
+        response = SimpleNamespace(
+            usage_metadata={"input_tokens": 1000, "output_tokens": 100}
+        )
+        cost = response_cost(self._llm("gpt-4o"), response)
+        self.assertAlmostEqual(cost, 0.0035)
 
     def test_outcome_carries_free_model_zero_cost(self) -> None:
         """Free-tier models bill $0 but still report tokens."""

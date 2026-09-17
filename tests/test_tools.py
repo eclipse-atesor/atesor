@@ -17,11 +17,13 @@ from unittest import mock
 
 from src.tools import (
     CommandValidator,
+    DockerConfig,
     _fix_pkg_names,
     _is_pkg_command,
     _is_pkg_lock_error,
     apply_patch,
     execute_command,
+    write_file,
 )
 
 # ===========================================================================
@@ -175,6 +177,70 @@ class TestCommandValidatorDangerous(unittest.TestCase):
                 self.assertTrue(ok, cmd)
 
 
+class TestCommandValidatorSegments(unittest.TestCase):
+    """Tests for segment splitting and single-invocation validation."""
+
+    validator = CommandValidator()
+
+    def test_empty_command_rejected(self) -> None:
+        """Whitespace-only commands are rejected explicitly."""
+        ok, reason = self.validator.is_safe("   \n\t  ")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Empty command")
+
+    def test_and_or_segments_are_split(self) -> None:
+        """Boolean shell operators start new validation segments."""
+        segments = self.validator.split_segments("make && ninja || echo no")
+        self.assertEqual(segments, ["make", "ninja", "echo no"])
+
+    def test_unknown_tail_segment_is_reported(self) -> None:
+        """A safe prefix cannot hide an unknown command in a chain."""
+        ok, reason = self.validator.is_safe("make && nmap 127.0.0.1")
+        self.assertFalse(ok)
+        self.assertIn("segment: nmap 127.0.0.1", reason)
+
+    def test_single_invocation_allows_plain_command(self) -> None:
+        """A normal safe command is a valid single invocation."""
+        ok, reason = self.validator.is_safe_single("make -j4")
+        self.assertTrue(ok, reason)
+
+    def test_single_invocation_allows_cd_prefix(self) -> None:
+        """The documented ``cd DIR && command`` idiom stays valid."""
+        ok, reason = self.validator.is_safe_single("cd build && ninja")
+        self.assertTrue(ok, reason)
+
+    def test_single_invocation_reuses_base_rejection(self) -> None:
+        """Unknown commands fail before single-invocation checks."""
+        ok, reason = self.validator.is_safe_single("definitely-unknown")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Unknown command pattern (not in whitelist)")
+
+    def test_single_invocation_blocks_extra_chain(self) -> None:
+        """More than one non-cd command is refused."""
+        ok, reason = self.validator.is_safe_single(
+            "cd build && make && ninja"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Chained commands are not allowed", reason)
+
+    def test_single_invocation_blocks_non_cd_pair(self) -> None:
+        """Two commands are refused unless the first is a cd."""
+        ok, reason = self.validator.is_safe_single("make && ninja")
+        self.assertFalse(ok)
+        self.assertIn("Chained commands are not allowed", reason)
+
+    def test_single_invocation_blocks_unquoted_redirection(self) -> None:
+        """Redirection outside quotes is refused."""
+        ok, reason = self.validator.is_safe_single("echo hello > file.txt")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Redirection (>) is not allowed here")
+
+    def test_single_invocation_ignores_quoted_redirection(self) -> None:
+        """Redirection-looking text inside quotes is harmless."""
+        ok, reason = self.validator.is_safe_single("grep 'a > b' file.txt")
+        self.assertTrue(ok, reason)
+
+
 # ===========================================================================
 # Package manager detection helpers
 # ===========================================================================
@@ -216,6 +282,12 @@ class TestPkgCommandDetection(unittest.TestCase):
         # commands using `&&` chaining still contain the prefix as substring
         """Test pkg command inside chain detected."""
         self.assertTrue(_is_pkg_command("apk update && apk add zlib-dev"))
+
+    def test_pkg_command_inside_late_chain_detected(self) -> None:
+        """Package-manager invocations are detected beyond the prefix."""
+        self.assertTrue(
+            _is_pkg_command("cd build && apt-get install -y libssl-dev")
+        )
 
 
 # ===========================================================================
@@ -326,6 +398,39 @@ class TestFixPkgNames(unittest.TestCase):
         got = self._apply("apt-get install -y xz-dev2-foo", "debian")
         self.assertIn("xz-dev2-foo", got)
 
+    def test_empty_corrections_passes_through(self) -> None:
+        """Profiles without corrections leave commands unchanged."""
+        profile = SimpleNamespace(name="empty", name_corrections={})
+        with mock.patch(
+            "src.platforms.get_active_profile", return_value=profile
+        ):
+            self.assertEqual(_fix_pkg_names("apk add foo"), "apk add foo")
+
+
+class TestDockerConfig(unittest.TestCase):
+    """Tests for Docker container status probing."""
+
+    def test_is_container_running_true(self) -> None:
+        """A docker inspect stdout of ``true`` returns True."""
+        with mock.patch("src.tools.subprocess.run") as mrun:
+            mrun.return_value = SimpleNamespace(stdout="true\n")
+            self.assertTrue(DockerConfig.is_container_running())
+        args = mrun.call_args.args[0]
+        self.assertEqual(args[:3], ["docker", "inspect", "-f"])
+
+    def test_is_container_running_false(self) -> None:
+        """Any non-true stdout returns False."""
+        with mock.patch("src.tools.subprocess.run") as mrun:
+            mrun.return_value = SimpleNamespace(stdout="false\n")
+            self.assertFalse(DockerConfig.is_container_running())
+
+    def test_is_container_running_exception(self) -> None:
+        """Docker inspect failures are swallowed as False."""
+        with mock.patch(
+            "src.tools.subprocess.run", side_effect=OSError("no docker")
+        ):
+            self.assertFalse(DockerConfig.is_container_running())
+
 
 # ===========================================================================
 # execute_command — mocked subprocess
@@ -376,6 +481,21 @@ class TestExecuteCommand(unittest.TestCase):
             res = execute_command("blahblah-unknown-cmd", validate=False)
             self.assertTrue(res.success)
             mrun.assert_called_once()
+
+    def test_in_docker_flag_forces_host_execution(self) -> None:
+        """Already-in-container execution bypasses docker exec."""
+        with (
+            mock.patch("src.config._IN_DOCKER", True),
+            mock.patch("src.tools.subprocess.run") as mrun,
+        ):
+            mrun.return_value = SimpleNamespace(
+                returncode=0, stdout="ok", stderr=""
+            )
+            res = execute_command("echo hi", use_docker=True)
+
+        self.assertTrue(res.success)
+        self.assertEqual(mrun.call_args.args[0], "echo hi")
+        self.assertTrue(mrun.call_args.kwargs["shell"])
 
     def test_successful_command_returns_correct_result(self) -> None:
         """Test successful command returns correct result."""
@@ -529,6 +649,22 @@ class TestExecuteCommand(unittest.TestCase):
         # Translated to /workspace/...
         self.assertTrue(args[w_idx + 1].startswith("/workspace"))
 
+    def test_workspace_fragment_absolute_path_translated(self) -> None:
+        """Absolute paths containing workspace are normalized."""
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            """Fake run."""
+            captured["args"] = args
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("src.tools.subprocess.run", side_effect=fake_run):
+            execute_command("ls", cwd="/opt/build/workspace/repos/foo")
+
+        args = captured["args"]
+        w_idx = args.index("-w")
+        self.assertEqual(args[w_idx + 1], "/workspace/repos/foo")
+
     def test_extra_env_is_forwarded_to_docker_exec(self) -> None:
         """extra_env values become --env flags on the docker exec argv."""
         captured = {}
@@ -553,6 +689,28 @@ class TestExecuteCommand(unittest.TestCase):
                 env_pairs.append(args[idx + 1])
         self.assertIn("GIT_TERMINAL_PROMPT=0", env_pairs)
         self.assertIn("FOO=bar", env_pairs)
+
+    def test_secret_extra_env_is_forwarded_by_name_only(self) -> None:
+        """Secret values go through subprocess env, never argv."""
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            """Capture docker argv and host env."""
+            captured["args"] = args
+            captured["env"] = kwargs.get("env") or {}
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("src.tools.subprocess.run", side_effect=fake_run):
+            execute_command(
+                "git status",
+                extra_env={"OPENAI_API_KEY": "secret-value"},
+            )
+
+        args = captured["args"]
+        self.assertIn("--env", args)
+        self.assertIn("OPENAI_API_KEY", args)
+        self.assertNotIn("OPENAI_API_KEY=secret-value", args)
+        self.assertEqual(captured["env"]["OPENAI_API_KEY"], "secret-value")
 
     def test_extra_env_is_merged_when_running_on_host(self) -> None:
         """When not using Docker, extra_env is merged into env dict."""
@@ -589,6 +747,98 @@ class TestExecuteCommand(unittest.TestCase):
         self.assertIn("'https://x/y z'", bash_cmd)
         self.assertIn("'/tmp/y z'", bash_cmd)
 
+    def test_pkg_lock_retry_succeeds(self) -> None:
+        """Package-manager lock contention is retried."""
+        results = [
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="ERROR: Unable to lock database",
+            ),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+
+        with (
+            mock.patch("src.tools.subprocess.run", side_effect=results),
+            mock.patch("src.tools.random.uniform", return_value=0.0),
+            mock.patch("src.tools.time.sleep") as sleep_mock,
+        ):
+            res = execute_command("apk add zlib-dev")
+
+        self.assertTrue(res.success)
+        self.assertEqual(res.stdout, "ok")
+        sleep_mock.assert_called_once_with(5.0)
+
+    def test_nonzero_command_result_is_returned(self) -> None:
+        """A normal command failure is returned without retrying."""
+        with mock.patch("src.tools.subprocess.run") as mrun:
+            mrun.return_value = SimpleNamespace(
+                returncode=2, stdout="", stderr="bad option"
+            )
+            res = execute_command("ls --bad")
+
+        self.assertFalse(res.success)
+        self.assertEqual(res.exit_code, 2)
+        self.assertIn("bad option", res.stderr)
+
+
+# ===========================================================================
+# write_file — mocked file and command operations
+# ===========================================================================
+
+
+class TestWriteFile(unittest.TestCase):
+    """Tests for Docker and host file writes."""
+
+    def test_docker_write_file_encodes_content(self) -> None:
+        """Docker writes mkdir first, then base64-decode content."""
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record write commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with mock.patch("src.tools.execute_command", side_effect=fake_execute):
+            ok = write_file(
+                "/workspace/repos/pkg/file.txt",
+                "hello",
+                use_docker=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(calls[0], "mkdir -p /workspace/repos/pkg")
+        self.assertIn("aGVsbG8=", calls[1])
+        self.assertIn("base64 -d", calls[1])
+
+    def test_docker_write_file_propagates_decode_failure(self) -> None:
+        """A failed decode/write command returns False."""
+        results = [
+            SimpleNamespace(success=True),
+            SimpleNamespace(success=False),
+        ]
+        with mock.patch("src.tools.execute_command", side_effect=results):
+            ok = write_file(
+                "/workspace/repos/pkg/file.txt",
+                "hello",
+                use_docker=True,
+            )
+        self.assertFalse(ok)
+
+    def test_host_write_file_success(self) -> None:
+        """Host writes use normal text file I/O."""
+        opener = mock.mock_open()
+        with mock.patch("builtins.open", opener):
+            ok = write_file("workspace/test-tools-file.txt", "body", False)
+        self.assertTrue(ok)
+        opener().write.assert_called_once_with("body")
+
+    def test_host_write_file_failure(self) -> None:
+        """Host write exceptions are converted to False."""
+        with mock.patch("builtins.open", side_effect=OSError("read-only")):
+            ok = write_file("workspace/test-tools-file.txt", "body", False)
+        self.assertFalse(ok)
+
 
 # ===========================================================================
 # apply_patch — rejects content that isn't a valid unified diff when
@@ -621,6 +871,242 @@ class TestApplyPatch(unittest.TestCase):
                     any("patch src/foo.c" in c for c in cmds),
                     f"patch was invoked on non-diff content: {cmds}",
                 )
+
+    def test_docker_apply_patch_returns_false_when_write_fails(self) -> None:
+        """A patch that cannot be staged in the container fails."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        with (
+            mock.patch("src.tools.write_file", return_value=False),
+            mock.patch("src.tools.execute_command") as exec_mock,
+        ):
+            ok = apply_patch(diff, use_docker=True)
+        self.assertFalse(ok)
+        exec_mock.assert_not_called()
+
+    def test_docker_filepath_unified_diff_invokes_patch(self) -> None:
+        """Unified diffs with an explicit filepath use direct patch."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record patch commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with (
+            mock.patch("src.tools.write_file", return_value=True),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+        ):
+            ok = apply_patch(diff, filepath="foo.c", use_docker=True)
+
+        self.assertTrue(ok)
+        self.assertTrue(any(cmd.startswith("patch foo.c <") for cmd in calls))
+
+    def test_docker_filepath_hunk_only_invokes_patch_p0(self) -> None:
+        """Hunk-only patches with filepath use ``patch -p0``."""
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record patch commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with (
+            mock.patch("src.tools.write_file", return_value=True),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+        ):
+            ok = apply_patch(
+                "@@ -1 +1 @@\n-old\n+new\n",
+                filepath="foo.c",
+                use_docker=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(
+            any(cmd.startswith("patch -p0 foo.c <") for cmd in calls)
+        )
+
+    def test_docker_patch_falls_back_to_p0(self) -> None:
+        """A failed p1 dry-run falls back to p0."""
+        diff = "--- foo.c\n+++ foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        calls = []
+        results = [
+            SimpleNamespace(success=False, stderr="p1 failed"),
+            SimpleNamespace(success=True, stderr=""),
+            SimpleNamespace(success=True, stderr=""),
+            SimpleNamespace(success=True, stderr=""),
+        ]
+
+        def fake_execute(command, **kwargs):
+            """Record patch commands."""
+            calls.append(command)
+            return results.pop(0)
+
+        with (
+            mock.patch("src.tools.write_file", return_value=True),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+        ):
+            ok = apply_patch(diff, cwd="/workspace/repos/pkg")
+
+        self.assertTrue(ok)
+        self.assertTrue(any("patch -p0 --dry-run" in cmd for cmd in calls))
+        self.assertTrue(any(cmd.startswith("patch -p0 <") for cmd in calls))
+
+    def test_docker_patch_returns_false_when_all_dry_runs_fail(self) -> None:
+        """If p1 and p0 dry-runs fail, no patch is applied."""
+        diff = "--- foo.c\n+++ foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        calls = []
+        results = [
+            SimpleNamespace(success=False, stderr="p1 failed"),
+            SimpleNamespace(success=False, stderr="p0 failed"),
+            SimpleNamespace(success=True, stderr=""),
+        ]
+
+        def fake_execute(command, **kwargs):
+            """Record patch commands."""
+            calls.append(command)
+            return results.pop(0)
+
+        with (
+            mock.patch("src.tools.write_file", return_value=True),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+        ):
+            ok = apply_patch(diff, use_docker=True)
+
+        self.assertFalse(ok)
+        self.assertFalse(any(cmd.startswith("patch -p0 <") for cmd in calls))
+
+    def test_local_apply_patch_invokes_patch_and_cleans_up(self) -> None:
+        """Host patching stages a local patch file and removes it."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        fake_file = _FakeNamedPatch("workspace/test-tools-local.patch")
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record local patch commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with (
+            mock.patch("tempfile.NamedTemporaryFile", return_value=fake_file),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+            mock.patch("src.tools.os.remove") as remove_mock,
+        ):
+            ok = apply_patch(diff, use_docker=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(fake_file.content, diff)
+        self.assertEqual(
+            calls,
+            ["patch -p1 < workspace/test-tools-local.patch"],
+        )
+        remove_mock.assert_called_once_with("workspace/test-tools-local.patch")
+
+    def test_local_filepath_unified_diff_invokes_direct_patch(self) -> None:
+        """Host patching honors an explicit filepath for full diffs."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        fake_file = _FakeNamedPatch("workspace/test-tools-local.patch")
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record local patch commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with (
+            mock.patch("tempfile.NamedTemporaryFile", return_value=fake_file),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+            mock.patch("src.tools.os.remove"),
+        ):
+            ok = apply_patch(diff, filepath="foo.c", use_docker=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            calls, ["patch foo.c < workspace/test-tools-local.patch"]
+        )
+
+    def test_local_filepath_hunk_only_invokes_patch_p0(self) -> None:
+        """Host hunk-only patches with filepath use p0."""
+        fake_file = _FakeNamedPatch("workspace/test-tools-local.patch")
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            """Record local patch commands."""
+            calls.append(command)
+            return SimpleNamespace(success=True)
+
+        with (
+            mock.patch("tempfile.NamedTemporaryFile", return_value=fake_file),
+            mock.patch("src.tools.execute_command", side_effect=fake_execute),
+            mock.patch("src.tools.os.remove"),
+        ):
+            ok = apply_patch(
+                "@@ -1 +1 @@\n-old\n+new\n",
+                filepath="foo.c",
+                use_docker=False,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            calls, ["patch -p0 foo.c < workspace/test-tools-local.patch"]
+        )
+
+    def test_local_invalid_filepath_patch_rejected(self) -> None:
+        """Host filepath patches reject non-diff content."""
+        fake_file = _FakeNamedPatch("workspace/test-tools-local.patch")
+        with (
+            mock.patch("tempfile.NamedTemporaryFile", return_value=fake_file),
+            mock.patch("src.tools.execute_command") as exec_mock,
+            mock.patch("src.tools.os.remove") as remove_mock,
+        ):
+            ok = apply_patch("plain text", filepath="foo.c", use_docker=False)
+
+        self.assertFalse(ok)
+        exec_mock.assert_not_called()
+        remove_mock.assert_called_once_with("workspace/test-tools-local.patch")
+
+    def test_local_cleanup_ignores_remove_errors(self) -> None:
+        """Host cleanup ignores missing staged patch files."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        fake_file = _FakeNamedPatch("workspace/test-tools-local.patch")
+        with (
+            mock.patch("tempfile.NamedTemporaryFile", return_value=fake_file),
+            mock.patch(
+                "src.tools.execute_command",
+                return_value=SimpleNamespace(success=True),
+            ),
+            mock.patch("src.tools.os.remove", side_effect=OSError("gone")),
+        ):
+            self.assertTrue(apply_patch(diff, use_docker=False))
+
+    def test_local_tempfile_failure_returns_false(self) -> None:
+        """Host patch staging failures are converted to False."""
+        diff = "--- a/foo.c\n+++ b/foo.c\n@@ -1 +1 @@\n-old\n+new\n"
+        with mock.patch(
+            "tempfile.NamedTemporaryFile", side_effect=OSError("no space")
+        ):
+            self.assertFalse(apply_patch(diff, use_docker=False))
+
+
+class _FakeNamedPatch:
+    """Minimal context manager emulating ``NamedTemporaryFile``."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.content = ""
+
+    def __enter__(self):
+        """Return self for context-manager use."""
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        """Propagate exceptions from the context body."""
+        return False
+
+    def write(self, content: str) -> int:
+        """Record written content and return its length."""
+        self.content += content
+        return len(content)
 
 
 # ===========================================================================
@@ -711,6 +1197,70 @@ class TestCodexEnvelopePatch(unittest.TestCase):
         self.assertIn("--- /dev/null", out)
         self.assertIn("+++ b/scripts/new.sh", out)
         self.assertIn("+#!/bin/sh", out)
+
+    def test_delete_file_envelope_creates_dev_null_target(self) -> None:
+        """Delete-file envelopes become delete diffs."""
+        from src.tools import _convert_codex_envelope_to_unified_diff
+
+        envelope = (
+            "*** Begin Patch\n"
+            "*** Delete File: scripts/old.sh\n"
+            "*** End Patch\n"
+        )
+        out = _convert_codex_envelope_to_unified_diff(envelope)
+        self.assertIn("--- a/scripts/old.sh", out)
+        self.assertIn("+++ /dev/null", out)
+
+    def test_update_without_hunk_synthesizes_header(self) -> None:
+        """Update envelopes without hunk markers get synthetic ranges."""
+        from src.tools import _convert_codex_envelope_to_unified_diff
+
+        envelope = (
+            "*** Begin Patch\n"
+            "*** Update File: config.h\n"
+            " #define KEEP 1\n"
+            "-#define OLD 1\n"
+            "+#define NEW 1\n"
+            "plain context\n"
+            "*** End Patch\n"
+        )
+        out = _convert_codex_envelope_to_unified_diff(envelope)
+        self.assertIn("@@ -1,3 +1,3 @@", out)
+        self.assertIn(" #define KEEP 1", out)
+        self.assertIn(" plain context", out)
+
+    def test_empty_envelope_returns_none(self) -> None:
+        """An envelope without file operations is not converted."""
+        from src.tools import _convert_codex_envelope_to_unified_diff
+
+        envelope = "*** Begin Patch\n*** End Patch\n"
+        self.assertIsNone(_convert_codex_envelope_to_unified_diff(envelope))
+
+    def test_apply_patch_envelope_drops_filepath(self) -> None:
+        """Envelope paths supersede a caller-supplied filepath."""
+        calls = []
+
+        def fake_exec(cmd, **kw):
+            """Record shell calls."""
+            calls.append(cmd)
+            return SimpleNamespace(
+                success=True, stdout="", stderr="", exit_code=0
+            )
+
+        with (
+            mock.patch("src.tools.write_file", return_value=True),
+            mock.patch("src.tools.execute_command", side_effect=fake_exec),
+        ):
+            ok = apply_patch(
+                self.SAMPLE_ENVELOPE,
+                filepath="wrong-path.txt",
+                cwd="/workspace/repos/afrog",
+                use_docker=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(any("patch -p1" in cmd for cmd in calls))
+        self.assertFalse(any("wrong-path.txt" in cmd for cmd in calls))
 
 
 # ===========================================================================

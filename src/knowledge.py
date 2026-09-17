@@ -45,15 +45,6 @@ RISCV_PREPROCESSOR_MACROS = {
     "__riscv_compressed": "Defined when C (compressed) extension is present",
 }
 
-RISCV_ARCH_DETECTION_SNIPPET = """\
-#if defined(__riscv)
-  #if __riscv_xlen == 64
-    /* RISC-V 64-bit */
-  #elif __riscv_xlen == 32
-    /* RISC-V 32-bit */
-  #endif
-#endif"""
-
 # Common error patterns when porting to RISC-V on Alpine/musl
 COMMON_PORTING_ISSUES = {
     "x86_intrinsics": {
@@ -238,13 +229,6 @@ COMMON_PORTING_ISSUES = {
             ),
         ],
     },
-}
-
-# RISC-V target triplets for different configurations
-RISCV_TRIPLETS = {
-    "alpine_native": "riscv64-alpine-linux-musl",
-    "gnu_linux": "riscv64-unknown-linux-gnu",
-    "bare_metal": "riscv64-unknown-elf",
 }
 
 

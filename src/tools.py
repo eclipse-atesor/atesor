@@ -928,53 +928,6 @@ def _strip_bundled_toolchain_packages(command: str) -> str:
 # ============================================================================
 
 
-def read_file(
-    filepath: str, max_lines: int = 1000, use_docker: bool = True
-) -> str:
-    """Read file content with line limit.
-
-    Args:
-        filepath: Path to file (inside container if use_docker=True)
-        max_lines: Maximum lines to read
-        use_docker: Whether to read from Docker container
-
-    Returns:
-        File content (truncated if needed)
-    """
-    if use_docker:
-        # Read from Docker container. Quote: file names come from
-        # cloned repos and may contain spaces/metacharacters.
-        import shlex
-
-        result = execute_command(
-            f"head -n {max_lines} {shlex.quote(filepath)}", use_docker=True
-        )
-        if result.success:
-            return result.stdout
-        else:
-            logger.error(
-                f"Failed to read file {filepath} from container: "
-                f"{result.stderr}"
-            )
-            return f"Error reading file: {result.stderr}"
-    else:
-        # Read from host
-        try:
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= max_lines:
-                        lines.append(
-                            f"\n... (truncated after {max_lines} lines)"
-                        )
-                        break
-                    lines.append(line)
-                return "".join(lines)
-        except Exception as e:
-            logger.error(f"Failed to read file {filepath}: {e}")
-            return f"Error reading file: {e}"
-
-
 def write_file(filepath: str, content: str, use_docker: bool = True) -> bool:
     """Write content to file.
 
@@ -1015,27 +968,6 @@ def write_file(filepath: str, content: str, use_docker: bool = True) -> bool:
         except Exception as e:
             logger.error(f"Failed to write file {filepath}: {e}")
             return False
-
-
-def file_exists(filepath: str, use_docker: bool = True) -> bool:
-    """Check if file exists.
-
-    Args:
-        filepath: Path to file
-        use_docker: Whether to check in Docker container
-
-    Returns:
-        True if file exists
-    """
-    if use_docker:
-        import shlex
-
-        result = execute_command(
-            f"test -e {shlex.quote(filepath)}", use_docker=True
-        )
-        return result.success
-    else:
-        return os.path.exists(filepath)
 
 
 # ============================================================================
@@ -1299,9 +1231,7 @@ def apply_patch(
 # Export all functions
 __all__ = [
     "execute_command",
-    "read_file",
     "write_file",
-    "file_exists",
     "apply_patch",
     "CommandValidator",
     "DockerConfig",

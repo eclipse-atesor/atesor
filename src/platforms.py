@@ -59,7 +59,6 @@ class PlatformProfile:
     # Package manager command templates
     pkg_install: str  # "apk add", "apt-get install -y"
     pkg_update: str  # "apk update", "apt-get update"
-    pkg_remove: str  # "apk del", "apt-get remove -y"
     pkg_lock_file: str  # path used with `flock` to serialize installs
 
     # Canonical name (used by scripted_ops/knowledge) → distro package name
@@ -112,7 +111,6 @@ ALPINE_RISCV = PlatformProfile(
     container_name="atesor-ai-sandbox",
     pkg_install="apk add",
     pkg_update="apk update",
-    pkg_remove="apk del",
     pkg_lock_file="/tmp/apk.lock",
     package_map={
         # build systems
@@ -266,7 +264,6 @@ DEBIAN_RISCV = PlatformProfile(
     container_name="atesor-ai-sandbox-debian",
     pkg_install="apt-get install -y --no-install-recommends",
     pkg_update="apt-get update",
-    pkg_remove="apt-get remove -y",
     # /var/lib/dpkg/lock-frontend only exists after the first apt run;
     # use our own lock file instead.
     pkg_lock_file="/tmp/apt.lock",

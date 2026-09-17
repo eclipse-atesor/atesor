@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from src.evidence import collect_build_evidence, error_context_excerpts
 
@@ -107,6 +108,89 @@ class TestErrorContextExcerpts(unittest.TestCase):
         error = "src/main.c:5: error a\nsrc/main.c:6: error b"
         out = error_context_excerpts(error, self.repo)
         self.assertEqual(out.count("### src/main.c"), 1)
+
+
+class TestEvidenceEdgeCases(unittest.TestCase):
+    """Cover caps, budgets, and containment branches."""
+
+    def setUp(self) -> None:
+        """Create an empty temp repo."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+
+    def tearDown(self) -> None:
+        """Remove the temp repo."""
+        self.tmp.cleanup()
+
+    def test_unreadable_build_file_is_skipped(self) -> None:
+        """Test unreadable build file is skipped."""
+        path = os.path.join(self.repo, "Makefile")
+        with open(path, "w") as f:
+            f.write("all:\n\ttrue\n")
+        real_open = open
+
+        def failing_open(fname, *args, **kwargs):
+            """Failing open."""
+            if fname == path:
+                raise OSError("permission denied")
+            return real_open(fname, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=failing_open):
+            out = collect_build_evidence(self.repo)
+        self.assertNotIn("### Makefile", out)
+
+    def test_whitespace_only_build_file_is_skipped(self) -> None:
+        """Test whitespace only build file is skipped."""
+        with open(os.path.join(self.repo, "Makefile"), "w") as f:
+            f.write("   \n\t\n")
+        out = collect_build_evidence(self.repo)
+        self.assertNotIn("### Makefile", out)
+
+    def test_top_level_listing_truncates_long_dirs(self) -> None:
+        """Test top level listing truncates long dirs."""
+        for i in range(70):
+            with open(os.path.join(self.repo, f"f{i:03d}.txt"), "w") as f:
+                f.write("x")
+        out = collect_build_evidence(self.repo)
+        self.assertIn("more entries ...]", out)
+
+    def test_budget_exhaustion_stops_collection(self) -> None:
+        """Test budget exhaustion stops collection."""
+        big = "x" * 3000 + "\n"
+        for name in (
+            "go.mod",
+            "Cargo.toml",
+            "CMakeLists.txt",
+            "configure.ac",
+            "configure.in",
+            "meson.build",
+            "Makefile.am",
+            "Makefile",
+        ):
+            with open(os.path.join(self.repo, name), "w") as f:
+                f.write(big)
+        with open(os.path.join(self.repo, "README.md"), "w") as f:
+            f.write("# readme\n")
+        out = collect_build_evidence(self.repo)
+        # Budget (14000 chars) is spent before the doc loop runs.
+        self.assertNotIn("README.md (excerpt)", out)
+        self.assertNotIn("### Makefile\n", out)
+
+    def test_error_refs_outside_repo_are_ignored(self) -> None:
+        """Test error refs outside repo are ignored."""
+        error = "../secrets/evil.c:3: error: nope"
+        self.assertEqual(error_context_excerpts(error, self.repo), "")
+
+    def test_error_excerpts_capped_at_three_files(self) -> None:
+        """Test error excerpts capped at three files."""
+        refs = []
+        for name in ("a.c", "b.c", "c.c", "d.c"):
+            with open(os.path.join(self.repo, name), "w") as f:
+                f.write("int main(void) { return 0; }\n")
+            refs.append(f"{name}:1: error: boom")
+        out = error_context_excerpts("\n".join(refs), self.repo)
+        self.assertEqual(out.count("### "), 3)
+        self.assertNotIn("d.c", out)
 
 
 if __name__ == "__main__":

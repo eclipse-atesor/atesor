@@ -2,8 +2,10 @@
 
 import json
 import shutil
-import tempfile
+import unittest
+import uuid
 from pathlib import Path
+from unittest import mock
 
 from src.memory import (
     MEMORY_INSTANCES,
@@ -17,8 +19,32 @@ from src.memory import (
     materialize_cached_recipe,
     reload_agent_memory,
     render_recipe_markdown,
+)
+from src.memory import save_learned_example as save_agent_learned_example
+from src.memory import (
     save_to_recipe_cache,
 )
+
+LOCAL_TEST_ROOT = Path("workspace/test-memory")
+
+
+def _make_test_dir(prefix: str) -> Path:
+    """Create an isolated project-local test directory."""
+    path = LOCAL_TEST_ROOT / f"{prefix}-{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    return path
+
+
+def _write_examples_file(
+    examples_dir: Path,
+    agent_type: str,
+    examples: list[dict[str, object]],
+) -> Path:
+    """Write a compact examples file under a project-local test dir."""
+    examples_dir.mkdir(parents=True, exist_ok=True)
+    path = examples_dir / f"{agent_type}_examples.json"
+    path.write_text(json.dumps({"version": "2.0", "examples": examples}))
+    return path
 
 
 class TestAgentExample:
@@ -238,8 +264,8 @@ class TestAutoLearning:
     """Tests for auto-learning (save_learned_example)."""
 
     def setup_method(self) -> None:
-        """Create a temp examples directory for each test."""
-        self.tmp_dir = Path(tempfile.mkdtemp())
+        """Create a project-local examples directory for each test."""
+        self.tmp_dir = _make_test_dir("auto-learning")
         self.examples_dir = self.tmp_dir / "examples"
         self.examples_dir.mkdir()
         # Write a minimal examples file
@@ -551,31 +577,36 @@ class TestRecipeMaterialization:
         assert md == "# Exact Guide\n\nVerbatim body.\n"
         assert "Reconstructed" not in md
 
-    def test_save_persists_recipe_markdown(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_save_persists_recipe_markdown(self) -> None:
         """save_to_recipe_cache stores recipe_markdown when provided."""
         import src.memory as memory
 
-        cache_file = tmp_path / "recipe_cache.json"
-        cache_file.write_text(json.dumps({"version": "2.0", "packages": {}}))
-        monkeypatch.setattr(memory, "RECIPE_CACHE_PATH", cache_file)
+        test_dir = _make_test_dir("recipe-markdown")
+        try:
+            cache_file = test_dir / "recipe_cache.json"
+            cache_file.write_text(
+                json.dumps({"version": "2.0", "packages": {}})
+            )
 
-        memory.save_to_recipe_cache(
-            repo_name="mark-pkg",
-            repo_url="https://github.com/test/mark-pkg",
-            build_system="go",
-            build_plan={"phases": []},
-            dependencies=[],
-            patches=[],
-            artifacts=[],
-            build_duration_seconds=1.0,
-            recipe_markdown="# Stored\n",
-        )
-        cached = memory.get_cached_recipe("mark-pkg")
-        assert cached["recipe_markdown"] == "# Stored\n"
+            with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
+                memory.save_to_recipe_cache(
+                    repo_name="mark-pkg",
+                    repo_url="https://github.com/test/mark-pkg",
+                    build_system="go",
+                    build_plan={"phases": []},
+                    dependencies=[],
+                    patches=[],
+                    artifacts=[],
+                    build_duration_seconds=1.0,
+                    recipe_markdown="# Stored\n",
+                )
+                cached = memory.get_cached_recipe("mark-pkg")
 
-    def test_materialize_writes_file(self, tmp_path) -> None:
+            assert cached["recipe_markdown"] == "# Stored\n"
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+    def test_materialize_writes_file(self) -> None:
         """materialize_cached_recipe writes <repo>_recipe.md to disk."""
         recipe = {
             "build_system": "cmake",
@@ -583,15 +614,613 @@ class TestRecipeMaterialization:
                 "phases": [{"name": "build", "commands": ["cmake .."]}]
             },
         }
-        out = materialize_cached_recipe("zlib", str(tmp_path), recipe)
-        assert out is not None
-        written = tmp_path / "zlib_recipe.md"
-        assert written.exists()
-        assert "cmake .." in written.read_text()
-        assert out == str(written.resolve())
+        test_dir = _make_test_dir("materialize")
+        try:
+            out = materialize_cached_recipe("zlib", str(test_dir), recipe)
+            assert out is not None
+            written = test_dir / "zlib_recipe.md"
+            assert written.exists()
+            assert "cmake .." in written.read_text()
+            assert out == str(written.resolve())
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
 
-    def test_materialize_returns_none_without_recipe(self, tmp_path) -> None:
+    def test_materialize_returns_none_without_recipe(self) -> None:
         """Materialize returns None when no recipe is available."""
-        out = materialize_cached_recipe("absent-pkg", str(tmp_path), {})
-        assert out is None
-        assert not (tmp_path / "absent-pkg_recipe.md").exists()
+        test_dir = _make_test_dir("materialize-miss")
+        try:
+            out = materialize_cached_recipe("absent-pkg", str(test_dir), {})
+            assert out is None
+            assert not (test_dir / "absent-pkg_recipe.md").exists()
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+
+class TestMemoryEdgeCases(unittest.TestCase):
+    """Tests for defensive and less common memory branches."""
+
+    def setUp(self) -> None:
+        """Create a project-local scratch tree for each test."""
+        self.test_dir = _make_test_dir("memory-edges")
+        self.examples_dir = self.test_dir / "examples"
+        self.examples_dir.mkdir()
+        self.addCleanup(shutil.rmtree, self.test_dir, True)
+
+    def _memory_with_examples(
+        self,
+        agent_type: str,
+        examples: list[dict[str, object]],
+    ) -> AgentMemory:
+        """Build an AgentMemory backed by isolated example data."""
+        _write_examples_file(self.examples_dir, agent_type, examples)
+        return AgentMemory(agent_type, examples_dir=self.examples_dir)
+
+    def test_seed_bundled_data_copies_examples_and_cache(self) -> None:
+        """Bundled examples and cache are copied into writable paths."""
+        import src.memory as memory
+
+        bundled_dir = self.test_dir / "bundled"
+        bundled_examples = bundled_dir / "examples"
+        bundled_examples.mkdir(parents=True)
+        (bundled_examples / "scout_examples.json").write_text(
+            json.dumps({"version": "2.0", "examples": []})
+        )
+        bundled_cache = bundled_dir / "recipe_cache.json"
+        bundled_cache.write_text(
+            json.dumps({"version": "2.0", "packages": {"zlib": {}}})
+        )
+        target_examples = self.test_dir / "seeded_examples"
+        target_cache = self.test_dir / "seeded_cache.json"
+
+        with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
+            with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
+                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
+                                       target_cache):
+                    memory._seed_bundled_data()
+
+        self.assertTrue((target_examples / "scout_examples.json").exists())
+        self.assertEqual(
+            json.loads(target_cache.read_text())["packages"],
+            {"zlib": {}},
+        )
+
+    def test_seed_bundled_data_creates_default_cache(self) -> None:
+        """A missing bundled cache creates an empty writable cache."""
+        import src.memory as memory
+
+        bundled_dir = self.test_dir / "empty_bundle"
+        bundled_dir.mkdir()
+        target_examples = self.test_dir / "default_examples"
+        target_cache = self.test_dir / "default_cache.json"
+
+        with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
+            with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
+                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
+                                       target_cache):
+                    memory._seed_bundled_data()
+
+        self.assertEqual(
+            json.loads(target_cache.read_text()),
+            {"version": "2.0", "packages": {}},
+        )
+
+    def test_unknown_prompt_type_returns_empty(self) -> None:
+        """Unknown example prompt types return an empty string."""
+        example = AgentExample(id="ex", name="Example", tags=[])
+        self.assertEqual(example.to_prompt_text("supervisor"), "")
+
+    def test_fixer_prompt_formats_create_file_and_patch(self) -> None:
+        """Fixer examples include create-file and patch actions."""
+        example = AgentExample(
+            id="fixer-extra",
+            name="Fixer Extra",
+            tags=["c"],
+            fix={
+                "analysis": "Patch build glue",
+                "actions": [
+                    {"type": "create_file", "path": "config.h"},
+                    {"type": "patch", "file": "src/main.c"},
+                ],
+            },
+            reasoning="Need generated config",
+        )
+
+        text = example.to_prompt_text("fixer")
+
+        self.assertIn("create: config.h", text)
+        self.assertIn("patch: src/main.c", text)
+        self.assertIn("Patch build glue", text)
+
+    def test_to_dict_includes_all_optional_fields(self) -> None:
+        """Serialization preserves every optional payload field."""
+        example = AgentExample(
+            id="full",
+            name="Full Example",
+            tags=["go"],
+            build_system="go",
+            trigger={"has_main": True},
+            plan={"phases": []},
+            error_pattern="missing",
+            fix={"actions": []},
+            phases=[{"name": "build", "commands": ["make"]}],
+            timeout_recommendation="90s",
+            reasoning="Complete",
+            context={"module_dir": "cmd/app"},
+            expected_output={"phases": []},
+            solution={"strategy": "patch"},
+            execution={"duration": 1},
+        )
+
+        data = example.to_dict()
+
+        for key in [
+            "trigger",
+            "plan",
+            "error_pattern",
+            "fix",
+            "phases",
+            "timeout_recommendation",
+            "reasoning",
+            "context",
+            "expected_output",
+            "solution",
+            "execution",
+        ]:
+            with self.subTest(key=key):
+                self.assertIn(key, data)
+
+    def test_missing_example_file_loads_empty_memory(self) -> None:
+        """A missing examples file logs and leaves memory empty."""
+        memory = AgentMemory("missing", examples_dir=self.examples_dir)
+        self.assertEqual(memory.examples, [])
+        self.assertEqual(memory._read_json_file()["examples"], [])
+
+    def test_invalid_example_file_loads_empty_memory(self) -> None:
+        """Invalid JSON is caught during example loading."""
+        path = self.examples_dir / "fixer_examples.json"
+        path.write_text("{not-json")
+
+        memory = AgentMemory("fixer", examples_dir=self.examples_dir)
+
+        self.assertEqual(memory.examples, [])
+
+    def test_empty_memory_has_no_relevant_examples_or_prompt(self) -> None:
+        """Empty memories return no matches and no prompt section."""
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+
+        self.assertEqual(memory.get_relevant_examples({"build_system": "go"}),
+                         [])
+        self.assertEqual(memory.format_examples_for_prompt([]), "")
+
+    def test_profile_failure_still_scores_examples(self) -> None:
+        """Profile lookup failures fall back to sandbox-agnostic scoring."""
+        self._memory_with_examples(
+            "scout",
+            [
+                {
+                    "id": "scout-001",
+                    "name": "Go build",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "trigger": {"has_main": True},
+                    "plan": {"phases": []},
+                }
+            ],
+        )
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+
+        with mock.patch(
+            "src.platforms.get_active_profile",
+            side_effect=RuntimeError("no profile"),
+        ):
+            examples = memory.get_relevant_examples(
+                {"build_system": "go"}, max_examples=1
+            )
+
+        self.assertEqual(len(examples), 1)
+
+    def test_wrong_sandbox_returns_no_examples(self) -> None:
+        """Examples from a different sandbox are hard-filtered."""
+        memory = self._memory_with_examples(
+            "scout",
+            [
+                {
+                    "id": "scout-debian",
+                    "name": "Debian build",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "sandbox": "debian-riscv64",
+                }
+            ],
+        )
+
+        examples = memory.get_relevant_examples(
+            {"build_system": "go", "sandbox": "alpine-riscv64"}
+        )
+
+        self.assertEqual(examples, [])
+
+    def test_relevance_handles_regex_and_bonus_edges(self) -> None:
+        """Relevance scoring handles regex errors and extra bonuses."""
+        memory = AgentMemory("fixer", examples_dir=self.examples_dir)
+        example = AgentExample(
+            id="fixer",
+            name="Fixer",
+            tags=["cgo", "missing"],
+            build_system="go",
+            sandbox="debian-riscv64",
+            trigger={"has_main": True, "module_dir": "cmd/app"},
+            error_pattern="[",
+            raw={"sandbox": "debian-riscv64"},
+        )
+
+        score = memory._calculate_relevance(
+            example,
+            {
+                "build_system": "go",
+                "error_message": "missing symbol",
+                "has_main": True,
+                "module_dir": "cmd/app",
+                "has_cgo": True,
+                "sandbox": "alpine-riscv64",
+            },
+        )
+        partial_score = memory._calculate_relevance(
+            example,
+            {"module_dir": "other", "sandbox": "debian-riscv64"},
+        )
+
+        self.assertGreater(score, 0.0)
+        self.assertGreater(partial_score, 0.0)
+
+    def test_save_learned_example_skips_bad_auto_suffix(self) -> None:
+        """Bad auto-id suffixes are ignored when assigning the next id."""
+        memory = self._memory_with_examples(
+            "scout",
+            [
+                {
+                    "id": "scout-auto-bad",
+                    "name": "Bad suffix",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "source": "auto",
+                    "repo_name": "old-repo",
+                }
+            ],
+        )
+
+        result = memory.save_learned_example(
+            {
+                "name": "New",
+                "tags": ["go"],
+                "build_system": "go",
+                "repo_name": "new-repo",
+            }
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(memory.examples[-1].id, "scout-auto-001")
+
+    def test_save_learned_example_returns_false_on_lock_error(self) -> None:
+        """File-lock failures make save_learned_example return False."""
+        memory = self._memory_with_examples("scout", [])
+
+        with mock.patch(
+            "src.memory.filelock.FileLock",
+            side_effect=RuntimeError("locked"),
+        ):
+            result = memory.save_learned_example(
+                {"name": "New", "tags": [], "build_system": "go"}
+            )
+
+        self.assertFalse(result)
+
+    def test_duplicate_checks_sandbox_error_pattern_and_commands(self) -> None:
+        """Duplicate detection respects sandbox, patterns, and commands."""
+        scout = self._memory_with_examples(
+            "scout",
+            [
+                {
+                    "id": "scout-001",
+                    "name": "Scout",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "repo_name": "same-repo",
+                    "sandbox": "alpine-riscv64",
+                }
+            ],
+        )
+        self.assertFalse(
+            scout._is_duplicate(
+                {
+                    "build_system": "go",
+                    "repo_name": "same-repo",
+                    "sandbox": "debian-riscv64",
+                }
+            )
+        )
+
+        fixer = self._memory_with_examples(
+            "fixer",
+            [
+                {
+                    "id": "fixer-001",
+                    "name": "Fixer",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "error_pattern": "missing symbol",
+                    "sandbox": "alpine-riscv64",
+                }
+            ],
+        )
+        self.assertTrue(
+            fixer._is_duplicate(
+                {
+                    "build_system": "go",
+                    "error_pattern": "missing symbol",
+                    "sandbox": "alpine-riscv64",
+                }
+            )
+        )
+
+        builder = self._memory_with_examples(
+            "builder",
+            [
+                {
+                    "id": "builder-001",
+                    "name": "Builder",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "phases": [{"name": "build", "commands": ["go build"]}],
+                    "sandbox": "alpine-riscv64",
+                }
+            ],
+        )
+        self.assertTrue(
+            builder._is_duplicate(
+                {
+                    "build_system": "go",
+                    "phases": [
+                        {"name": "build", "commands": ["go build"]}
+                    ],
+                    "sandbox": "alpine-riscv64",
+                }
+            )
+        )
+
+    def test_duplicate_profile_failure_falls_back(self) -> None:
+        """Duplicate checks tolerate active-profile lookup failures."""
+        memory = self._memory_with_examples("scout", [])
+
+        with mock.patch(
+            "src.platforms.get_active_profile",
+            side_effect=RuntimeError("no profile"),
+        ):
+            is_duplicate = memory._is_duplicate({"build_system": "go"})
+
+        self.assertFalse(is_duplicate)
+
+    def test_extract_commands_reads_all_supported_shapes(self) -> None:
+        """Command fingerprints include phases, plan, and legacy output."""
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+
+        fingerprint = memory._extract_commands(
+            {
+                "phases": [{"commands": ["make"]}],
+                "plan": {"phases": [{"commands": ["go build"]}]},
+                "expected_output": {
+                    "phases": [{"commands": ["cmake --build build"]}]
+                },
+            }
+        )
+
+        self.assertTrue(fingerprint)
+        self.assertEqual(memory._extract_commands({}), "")
+
+    def test_prune_drops_auto_when_overflow_exceeds_auto_count(self) -> None:
+        """If overflow is larger than auto examples, all autos drop."""
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+        examples = [
+            {
+                "id": f"manual-{i}",
+                "name": f"Manual {i}",
+                "source": "manual",
+            }
+            for i in range(101)
+        ]
+        examples.append(
+            {
+                "id": "auto-001",
+                "name": "Auto",
+                "source": "auto",
+                "timestamp": "2026-01-01",
+            }
+        )
+
+        pruned = memory._prune_examples_list(examples)
+
+        self.assertFalse(any(e.get("source") == "auto" for e in pruned))
+
+    def test_migrate_legacy_cache_skips_non_dict_and_wraps_flat(self) -> None:
+        """Legacy cache migration skips junk and wraps flat entries."""
+        import src.memory as memory
+
+        cache = {
+            "packages": {
+                "junk": "not-a-dict",
+                "zlib": {
+                    "sandbox": "debian-riscv64",
+                    "build_plan": {"phases": []},
+                },
+            }
+        }
+
+        migrated = memory._migrate_legacy_cache(cache)
+
+        self.assertEqual(migrated["packages"]["junk"], "not-a-dict")
+        self.assertIn("debian-riscv64", migrated["packages"]["zlib"])
+
+    def test_load_recipe_cache_missing_and_invalid(self) -> None:
+        """Cache loading returns defaults for missing or invalid JSON."""
+        import src.memory as memory
+
+        cache_file = self.test_dir / "recipe_cache.json"
+        with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
+            self.assertEqual(
+                memory.load_recipe_cache(),
+                {"version": "2.0", "packages": {}},
+            )
+
+            cache_file.write_text("{not-json")
+            self.assertEqual(
+                memory.load_recipe_cache(),
+                {"version": "2.0", "packages": {}},
+            )
+
+    def test_default_sandbox_falls_back_on_profile_error(self) -> None:
+        """Default sandbox falls back to Alpine if profile lookup fails."""
+        import src.memory as memory
+
+        with mock.patch(
+            "src.platforms.get_active_profile",
+            side_effect=RuntimeError("no profile"),
+        ):
+            self.assertEqual(memory._default_sandbox(), "alpine-riscv64")
+
+    def test_get_cached_recipe_respects_architecture(self) -> None:
+        """Recipes for a different architecture do not match."""
+        import src.memory as memory
+
+        cache = {
+            "packages": {
+                "pkg": {
+                    "alpine-riscv64": {
+                        "architecture": "x86_64",
+                        "build_plan": {"phases": []},
+                    }
+                }
+            }
+        }
+        with mock.patch.object(memory, "load_recipe_cache",
+                               return_value=cache):
+            recipe = memory.get_cached_recipe(
+                "pkg", architecture="riscv64", sandbox="alpine-riscv64"
+            )
+
+        self.assertIsNone(recipe)
+
+    def test_save_to_recipe_cache_preserves_legacy_entry(self) -> None:
+        """Saving over a flat legacy entry preserves its sandbox copy."""
+        import src.memory as memory
+
+        cache_file = self.test_dir / "legacy_cache.json"
+        legacy_cache = {
+            "version": "1.0",
+            "packages": {
+                "pkg": {
+                    "sandbox": "alpine-riscv64",
+                    "build_plan": {"phases": []},
+                }
+            },
+        }
+
+        with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
+            with mock.patch.object(memory, "load_recipe_cache",
+                                   return_value=legacy_cache):
+                saved = memory.save_to_recipe_cache(
+                    repo_name="pkg",
+                    repo_url="https://github.com/test/pkg",
+                    build_system="go",
+                    build_plan={"phases": [{"commands": ["go build"]}]},
+                    dependencies=[],
+                    patches=[],
+                    artifacts=[],
+                    build_duration_seconds=2.0,
+                    sandbox="debian-riscv64",
+                )
+
+        data = json.loads(cache_file.read_text())
+        self.assertTrue(saved)
+        self.assertIn("alpine-riscv64", data["packages"]["pkg"])
+        self.assertIn("debian-riscv64", data["packages"]["pkg"])
+
+    def test_reload_agent_memory_creates_uncached_memory(self) -> None:
+        """Reloading an uncached agent creates a new memory instance."""
+        import src.memory as memory
+
+        fake_memory = object()
+        memory.MEMORY_INSTANCES.clear()
+        with mock.patch.object(memory, "AgentMemory",
+                               return_value=fake_memory) as mock_agent:
+            memory.reload_agent_memory("fresh")
+
+        self.assertIs(memory.MEMORY_INSTANCES["fresh"], fake_memory)
+        mock_agent.assert_called_once_with("fresh")
+
+    def test_save_to_recipe_cache_returns_false_on_lock_error(self) -> None:
+        """Recipe-cache lock failures return False."""
+        import src.memory as memory
+
+        cache_file = self.test_dir / "lock_cache.json"
+        cache_file.write_text(json.dumps({"version": "2.0", "packages": {}}))
+
+        with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
+            with mock.patch(
+                "src.memory.filelock.FileLock",
+                side_effect=RuntimeError("locked"),
+            ):
+                saved = memory.save_to_recipe_cache(
+                    repo_name="pkg",
+                    repo_url="https://github.com/test/pkg",
+                    build_system="go",
+                    build_plan={"phases": []},
+                    dependencies=[],
+                    patches=[],
+                    artifacts=[],
+                    build_duration_seconds=1.0,
+                )
+
+        self.assertFalse(saved)
+
+    def test_materialize_fetches_recipe_when_none(self) -> None:
+        """Materialization fetches a cached recipe when omitted."""
+        import src.memory as memory
+
+        output_dir = self.test_dir / "output"
+        recipe = {"build_system": "go", "build_plan": {"phases": []}}
+        with mock.patch.object(memory, "get_cached_recipe",
+                               return_value=recipe):
+            path = memory.materialize_cached_recipe("pkg", str(output_dir))
+
+        self.assertIsNotNone(path)
+        self.assertTrue((output_dir / "pkg_recipe.md").exists())
+
+    def test_materialize_returns_none_on_write_error(self) -> None:
+        """Materialization returns None when the output write fails."""
+        import src.memory as memory
+
+        with mock.patch.object(memory.os, "makedirs",
+                               side_effect=OSError("denied")):
+            path = memory.materialize_cached_recipe(
+                "pkg", str(self.test_dir / "blocked"), {"build_system": "go"}
+            )
+
+        self.assertIsNone(path)
+
+    def test_save_learned_example_convenience_uses_memory(self) -> None:
+        """The module-level helper delegates to the cached memory."""
+        fake_memory = mock.Mock()
+        fake_memory.save_learned_example.return_value = True
+
+        with mock.patch(
+            "src.memory.get_agent_memory", return_value=fake_memory
+        ) as mock_get:
+            saved = save_agent_learned_example(
+                "scout", {"name": "New", "build_system": "go"}
+            )
+
+        self.assertTrue(saved)
+        mock_get.assert_called_once_with("scout")
+        fake_memory.save_learned_example.assert_called_once_with(
+            {"name": "New", "build_system": "go"}
+        )

@@ -26,6 +26,8 @@ import json
 import unittest
 
 from src.state import (
+    MAX_AUDIT_EVENTS,
+    MAX_ERROR_HISTORY,
     Action,
     AgentRole,
     AgentState,
@@ -35,10 +37,12 @@ from src.state import (
     ErrorCategory,
     ErrorRecord,
     FailureSeverity,
+    FixAttempt,
     TaskPlan,
     classify_error,
     create_error_record,
     create_initial_state,
+    derive_repo_name,
     get_next_action_recommendation,
     infer_failure_severity,
     should_escalate,
@@ -700,7 +704,6 @@ class TestEnumStability(unittest.TestCase):
             "PLANNING",
             "SCOUTING",
             "BUILDING",
-            "TESTING",
             "FIXING",
             "SUCCESS",
             "FAILED",
@@ -742,7 +745,6 @@ class TestEnumStability(unittest.TestCase):
             "builder",
             "fixer",
             "summarizer",
-            "agent",
         }
         self.assertEqual({r.value for r in AgentRole}, expected)
 
@@ -804,6 +806,143 @@ class TestSerialization(unittest.TestCase):
             self.assertEqual(len(data["error_history"]), 1)
         finally:
             os.unlink(path)
+
+
+class TestUncoveredHelperBranches(unittest.TestCase):
+    """Cover helper methods and classifier branches missed elsewhere."""
+
+    def setUp(self) -> None:
+        """Create a fresh state."""
+        self.state = create_initial_state("https://github.com/o/r")
+
+    def test_error_history_trimmed_to_cap(self) -> None:
+        """Test error history trimmed to cap."""
+        for i in range(MAX_ERROR_HISTORY + 5):
+            self.state.add_error(create_error_record(f"boom {i}"))
+        self.assertEqual(len(self.state.error_history), MAX_ERROR_HISTORY)
+        self.assertIn("boom 5", self.state.error_history[0].message)
+
+    def test_add_fix_attempt_records(self) -> None:
+        """Test add fix attempt records."""
+        fix = FixAttempt(
+            error_category=ErrorCategory.COMPILATION,
+            strategy="patch include",
+            changes_made=["a.c"],
+            success=True,
+        )
+        self.state.add_fix_attempt(fix)
+        self.assertEqual(self.state.fixes_attempted, [fix])
+
+    def test_log_scripted_op_increments_counter(self) -> None:
+        """Test log scripted op increments counter."""
+        before = self.state.scripted_ops_count
+        self.state.log_scripted_op("clone")
+        self.assertEqual(self.state.scripted_ops_count, before + 1)
+        self.assertEqual(self.state.audit_trail[-1]["event"], "scripted_op")
+
+    def test_audit_trail_trimmed_to_cap(self) -> None:
+        """Test audit trail trimmed to cap."""
+        for i in range(MAX_AUDIT_EVENTS + 3):
+            self.state.log_event("tick", {"i": i})
+        self.assertEqual(len(self.state.audit_trail), MAX_AUDIT_EVENTS)
+
+    def test_cache_file_content(self) -> None:
+        """Test cache file content."""
+        self.state.cache_file_content("/workspace/repos/r/a.c", "int x;")
+        self.assertEqual(
+            self.state.file_content_cache["/workspace/repos/r/a.c"],
+            "int x;",
+        )
+
+    def test_get_execution_duration_non_negative(self) -> None:
+        """Test get execution duration non negative."""
+        self.assertGreaterEqual(self.state.get_execution_duration(), 0.0)
+
+    def test_to_dict_serializes_arbitrary_object(self) -> None:
+        """Test to dict serializes arbitrary object."""
+
+        class Marker:
+            """Marker."""
+
+            def __init__(self) -> None:
+                self.x = 1
+
+        self.state.context_cache["marker"] = Marker()
+        data = self.state.to_dict()
+        self.assertEqual(data["context_cache"]["marker"], {"x": 1})
+
+    def test_derive_repo_name_ambiguous_prefixes_owner(self) -> None:
+        """Test derive repo name ambiguous prefixes owner."""
+        self.assertEqual(
+            derive_repo_name("https://github.com/cli/cli"), "cli-cli"
+        )
+        self.assertEqual(
+            derive_repo_name("https://github.com/smallstep/cli.git"),
+            "smallstep-cli",
+        )
+
+    def test_derive_repo_name_dotted_owner_falls_back(self) -> None:
+        """Test derive repo name dotted owner falls back."""
+        self.assertEqual(
+            derive_repo_name("https://gitlab.com/foo.bar/cli"), "cli"
+        )
+
+    def test_create_initial_state_rejects_bad_url(self) -> None:
+        """Test create initial state rejects bad url."""
+        with self.assertRaises(ValueError):
+            create_initial_state("git@github.com:o/r.git")
+
+    def test_classify_clone_auth_as_network(self) -> None:
+        """Test classify clone auth as network."""
+        msg = "fatal: could not read Username for 'https://github.com'"
+        self.assertEqual(classify_error(msg), ErrorCategory.NETWORK)
+
+    def test_classify_repo_not_found_as_configuration(self) -> None:
+        """Test classify repo not found as configuration."""
+        msg = "fatal: repository 'https://github.com/x/y/' not found"
+        self.assertEqual(classify_error(msg), ErrorCategory.CONFIGURATION)
+
+    def test_classify_empty_repository_as_configuration(self) -> None:
+        """Test classify empty repository as configuration."""
+        msg = "warning: remote HEAD refers to an empty repository"
+        self.assertEqual(classify_error(msg), ErrorCategory.CONFIGURATION)
+
+    def test_severity_which_probe_not_found_is_low(self) -> None:
+        """Test severity which probe not found is low."""
+        severity = infer_failure_severity(
+            ErrorCategory.UNKNOWN,
+            command=None,
+            message="sh: which ninja: not found",
+        )
+        self.assertEqual(severity, FailureSeverity.LOW)
+
+    def _plan_state(self) -> AgentState:
+        """Return a state with plans set, ready for action routing."""
+        state = create_initial_state("https://github.com/o/r")
+        state.task_plan = TaskPlan(phases=[])
+        state.build_plan = BuildPlan(
+            build_system="make",
+            build_system_confidence=0.9,
+            phases=[],
+            total_estimated_duration="5m",
+        )
+        return state
+
+    def test_replan_failure_recommends_scout(self) -> None:
+        """Test replan failure recommends scout."""
+        state = self._plan_state()
+        state.build_status = BuildStatus.FAILED
+        state.last_error_category = ErrorCategory.COMPILATION
+        state.last_error = "./configure: No such file or directory"
+        self.assertEqual(get_next_action_recommendation(state), Action.SCOUT)
+
+    def test_default_action_is_builder(self) -> None:
+        """Test default action is builder."""
+        state = self._plan_state()
+        state.build_status = BuildStatus.FIXING
+        self.assertEqual(
+            get_next_action_recommendation(state), Action.BUILDER
+        )
 
 
 if __name__ == "__main__":
