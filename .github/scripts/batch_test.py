@@ -27,6 +27,19 @@ import time
 from datetime import datetime
 from typing import Any
 
+from dotenv import load_dotenv
+
+# The script runs from .github/scripts, so the repository root must be on
+# sys.path before "src" can be imported.
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src import sandbox, target  # noqa: E402
+from src.platforms import PROFILES  # noqa: E402
+
 # Default worker count auto-detected from the host CPU. Override with
 # --workers <N> (1 .. _MAX_AVAILABLE_WORKERS). os.cpu_count() can return
 # None on exotic platforms, so fall back to a conservative 2.
@@ -431,19 +444,31 @@ def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
 
 
 def _probe_toolchains(container_name: str) -> dict[str, str]:
-    """Read toolchain versions from an existing container."""
+    """Read toolchain versions from an existing container.
+
+    On native, a worker container stops when its main.py run ends, so
+    the probe runs in a throwaway container from the same image.
+    """
     out: dict[str, str] = {}
     commands = {
         "go": "go version",
         "cargo": "cargo --version",
     }
     for tool, probe in commands.items():
-        result = subprocess.run(
-            ["docker", "exec", container_name, "sh", "-lc", probe],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if target.is_native():
+            result = sandbox.run_in_throwaway(
+                PROFILES[PLATFORM].image_name, ["sh", "-lc", probe]
+            )
+        else:
+            call = sandbox.build_exec_argv(
+                container_name, ["sh", "-lc", probe]
+            )
+            result = subprocess.run(
+                call.argv,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
         text = ((result.stdout or "") + " " + (result.stderr or "")).strip()
         if tool == "go":
             match = re.search(r"\bgo(\d+\.\d+(?:\.\d+)?)\b", text)
@@ -510,12 +535,7 @@ def _refresh_worker_pool_if_needed() -> bool:
     worker_names = [f"{_BASE_CONTAINER}-w{i + 1}" for i in range(MAX_WORKERS)]
     for container_name in worker_names:
         print(f"[PREFLIGHT] Refreshing worker container: {container_name}")
-        subprocess.run(
-            ["docker", "rm", "-f", container_name],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        sandbox.remove_container(container_name)
         ok, output = _run_setup(container_name, rebuild=False)
         if not ok:
             print(
@@ -868,6 +888,10 @@ def main() -> int:
         # env and module state in sync so child processes agree with us.
         os.environ["ATESOR_PLATFORM"] = PLATFORM
 
+    # .env gives the target and the SSH settings to src.target. It loads
+    # after the platform choice, so it cannot change the batch platform.
+    load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+
     global MAX_WORKERS
     if args.workers < 1:
         print(
@@ -1191,4 +1215,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        # Close the ssh connection that the native helpers opened.
+        target.close_connection()

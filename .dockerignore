@@ -1,4 +1,5 @@
 workspace/
+workspace-native/
 output/
 data/recipe_cache.json
 __pycache__/

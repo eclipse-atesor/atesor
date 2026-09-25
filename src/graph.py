@@ -1676,6 +1676,7 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
         docker_repo_path: Path to the repository inside the container.
     """
     try:
+        from src import sandbox
         from src.platforms import get_container_name
 
         container = get_container_name()
@@ -1696,11 +1697,14 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
             "  fi; "
             "done"
         )
+        # docker exec on qemu; ssh and podman exec on native.
+        call = sandbox.build_exec_argv(container, ["sh", "-c", script])
         result = subprocess.run(
-            ["docker", "exec", container, "sh", "-c", script],
+            call.argv,
             capture_output=True,
             text=True,
             timeout=30,
+            **call.run_kwargs(),
         )
         if result.stdout.strip():
             logger.info(f"top_builddir fixup: {result.stdout.strip()}")

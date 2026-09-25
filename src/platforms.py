@@ -53,6 +53,7 @@ class PlatformProfile:
 
     # Sandbox container identity
     dockerfile: str  # path to the Dockerfile for this profile
+    native_dockerfile: str  # the Dockerfile for the native target
     image_name: str  # docker image tag
     container_name: str  # docker container name
 
@@ -107,6 +108,7 @@ ALPINE_RISCV = PlatformProfile(
     libc="musl",
     target_triplet="riscv64-alpine-linux-musl",
     dockerfile="Dockerfile",
+    native_dockerfile="Dockerfile",
     image_name="atesor-ai-sandbox:latest",
     container_name="atesor-ai-sandbox",
     pkg_install="apk add",
@@ -260,6 +262,9 @@ DEBIAN_RISCV = PlatformProfile(
     libc="glibc",
     target_triplet="riscv64-unknown-linux-gnu",
     dockerfile="Dockerfile.debian",
+    # Debian trixie runs on any rv64gc board. The ubuntu platform uses
+    # this profile too, and Ubuntu 25.10 and later need RVA23 hardware.
+    native_dockerfile="Dockerfile.native",
     image_name="atesor-ai-sandbox-debian:latest",
     container_name="atesor-ai-sandbox-debian",
     pkg_install="apt-get install -y --no-install-recommends",

@@ -3,8 +3,10 @@
 # This Dockerfile creates a native RISC-V 64-bit development environment using Alpine Linux.
 # It uses QEMU user-mode emulation via Docker's multi-platform support (binfmt_misc).
 
-# Base image: Alpine Linux for RISC-V 64-bit
-FROM alpine:latest
+# Base image: Alpine Linux for RISC-V 64-bit. The name is fully
+# qualified, because podman on a native machine may have no short-name
+# alias for "alpine".
+FROM docker.io/library/alpine:latest
 
 LABEL maintainer="Atesor AI"
 LABEL description="Minimal RISC-V 64-bit sandbox for automated software porting"

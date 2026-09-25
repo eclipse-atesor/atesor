@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 import filelock
 
 from .config import DATA_DIR
+from .target import is_native
 
 logger = logging.getLogger(__name__)
 
@@ -670,16 +671,22 @@ def load_recipe_cache() -> Dict[str, Any]:
 def _default_sandbox() -> str:
     """Return the active platform's sandbox key.
 
+    The native target adds ``-native``, so native and QEMU recipes
+    never share a cache entry.
+
     Returns:
         The sandbox key, e.g. ``"alpine-riscv64"`` or
-        ``"debian-riscv64"``.
+        ``"debian-riscv64-native"``.
     """
     try:
         from .platforms import get_active_profile
 
-        return f"{get_active_profile().name}-riscv64"
+        sandbox = f"{get_active_profile().name}-riscv64"
     except Exception:
-        return "alpine-riscv64"
+        sandbox = "alpine-riscv64"
+    if is_native():
+        sandbox += "-native"
+    return sandbox
 
 
 def get_cached_recipe(

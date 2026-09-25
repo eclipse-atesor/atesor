@@ -58,6 +58,23 @@ def _restore_active_profile() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# Isolate the cached execution target (qemu / native) between tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_target_cache() -> Iterator[None]:
+    """Forget the cached target before and after each test."""
+    from src import target
+
+    target.reset_target_cache()
+    try:
+        yield
+    finally:
+        target.reset_target_cache()
+
+
+# ---------------------------------------------------------------------------
 # Safe helper: stub execute_command in a single module so tests
 # don't fork docker
 # ---------------------------------------------------------------------------

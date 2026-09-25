@@ -10,11 +10,16 @@ exercised via monkeypatched subprocess.run.
 
 from __future__ import annotations
 
+import os
+import shlex
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from src import target
+from src.sandbox import SandboxUnavailableError
 from src.tools import (
     CommandValidator,
     DockerConfig,
@@ -780,6 +785,140 @@ class TestExecuteCommand(unittest.TestCase):
         self.assertFalse(res.success)
         self.assertEqual(res.exit_code, 2)
         self.assertIn("bad option", res.stderr)
+
+
+class TestExecuteCommandNative(unittest.TestCase):
+    """execute_command() on the native target: ssh and podman exec."""
+
+    def setUp(self) -> None:
+        """Select a valid native config with a scratch cache folder."""
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        env = {
+            "ATESOR_TARGET": "native",
+            "ATESOR_PLATFORM": "debian",
+            "ATESOR_SSH_HOST": "tester@board-1",
+            "ATESOR_CONTAINER": "box",
+            "XDG_CACHE_HOME": self._tmp.name,
+            "HOME": self._tmp.name,
+        }
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        target.reset_target_cache()
+        probe = mock.patch("src.tools.DockerConfig.is_container_running")
+        self.probe = probe.start()
+        self.addCleanup(probe.stop)
+
+    def _script(self, run_mock, index: int = 0) -> list:
+        """Return the words of the remote script of one ssh call."""
+        argv = run_mock.call_args_list[index].args[0]
+        self.assertEqual("ssh", argv[0])
+        self.assertEqual("tester@board-1", argv[-2])
+        return shlex.split(argv[-1])
+
+    def test_one_ssh_call_runs_podman_exec(self) -> None:
+        """The command goes over ssh, with no Docker probe first."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="hi\n", stderr=""
+            )
+            res = execute_command("echo hi", cwd="/workspace/repos/x")
+        self.assertTrue(res.success)
+        self.assertEqual("hi\n", res.stdout)
+        self.probe.assert_not_called()
+        words = self._script(run)
+        self.assertEqual(
+            ["exec", "podman", "exec", "-w", "/workspace/repos/x", "box"],
+            words[:6],
+        )
+        self.assertEqual(["bash", "-c"], words[6:8])
+        self.assertIn("echo hi", words[8])
+        self.assertIs(subprocess.DEVNULL, run.call_args.kwargs["stdin"])
+
+    def test_secret_goes_on_stdin(self) -> None:
+        """A secret value never reaches the argv on either machine."""
+        secret = "Authorization: bearer ghp_TESTSECRET"
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="", stderr=""
+            )
+            execute_command(
+                "git status",
+                extra_env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_VALUE_0": secret,
+                },
+            )
+        argv = run.call_args.args[0]
+        self.assertNotIn("ghp_TESTSECRET", " ".join(argv))
+        self.assertEqual(secret + "\n", run.call_args.kwargs["input"])
+        self.assertIn("GIT_TERMINAL_PROMPT=0", self._script(run))
+
+    def test_missing_container_is_not_running(self) -> None:
+        """Podman exit 125 gives the usual not-running result."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=125,
+                stdout="",
+                stderr='Error: no container with name or ID "box" found: '
+                "no such container",
+            )
+            res = execute_command("ls")
+        self.assertEqual(1, res.exit_code)
+        self.assertEqual("Container 'box' is not running", res.stderr)
+
+    def test_stopped_container_is_not_running(self) -> None:
+        """Podman exec exit 255 on a stopped container is no ssh error."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=255,
+                stdout="",
+                stderr="Error: can only create exec sessions on running "
+                "containers: container state improper",
+            )
+            res = execute_command("ls")
+        self.assertEqual(1, res.exit_code)
+        self.assertEqual("Container 'box' is not running", res.stderr)
+
+    def test_dropped_connection_escalates(self) -> None:
+        """A transport error raises, so the fixer never sees it."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=255,
+                stdout="",
+                stderr="Connection to board-1 closed by remote host.",
+            )
+            with self.assertRaises(SandboxUnavailableError):
+                execute_command("make -j4")
+
+    def test_timeout_kills_through_the_same_prefix(self) -> None:
+        """The post-timeout pkill also goes over ssh and podman exec."""
+        results = [
+            subprocess.TimeoutExpired(cmd="ssh", timeout=1),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with mock.patch(
+            "src.sandbox.subprocess.run", side_effect=results
+        ) as run:
+            res = execute_command("make -j4", timeout=1)
+        self.assertEqual(-1, res.exit_code)
+        self.assertEqual(
+            ["exec", "podman", "exec", "box", "pkill", "-9", "-f", "make"],
+            self._script(run, index=1),
+        )
+
+    def test_in_docker_flag_does_not_apply(self) -> None:
+        """Native reaches its container over ssh, also from a container."""
+        with (
+            mock.patch("src.config._IN_DOCKER", True),
+            mock.patch("src.sandbox.subprocess.run") as run,
+        ):
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="", stderr=""
+            )
+            execute_command("echo hi")
+        self.assertEqual("ssh", run.call_args.args[0][0])
 
 
 # ===========================================================================

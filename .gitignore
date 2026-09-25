@@ -4,6 +4,7 @@
 
 # Workspace directories (host-side)
 /workspace/
+/workspace-native/
 *.pyc
 __pycache__/
 .cache/

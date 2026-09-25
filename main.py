@@ -6,12 +6,15 @@ workflow.
 """
 
 import argparse
+import contextlib
 import fcntl
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
+from typing import Iterator, List
 
 import docker
 from dotenv import load_dotenv
@@ -38,7 +41,23 @@ if os.environ.get("ATESOR_HOME"):
 for _env_path in _env_candidates:
     load_dotenv(_env_path, override=False)
 
-from src import __version__  # noqa: E402
+# src.config computes its paths at import time, so a --target flag must
+# reach the environment first. The flag wins over .env.
+from src.target import (  # noqa: E402
+    apply_target_flag,
+    close_connection,
+    is_native,
+    machine_label,
+    redact,
+    remote_workdir,
+    reset_target_cache,
+    target_name_from_env,
+)
+
+apply_target_flag(sys.argv[1:])
+_TARGET_AT_IMPORT = target_name_from_env()
+
+from src import __version__, sandbox  # noqa: E402
 from src.config import (  # noqa: E402
     LOGS_DIR,
     OUTPUT_DIR,
@@ -52,6 +71,18 @@ from src.state import AgentState  # noqa: E402
 # Directory holding bundled resources (Dockerfiles, seed data), resolved
 # from the install location so image builds work regardless of the CWD.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The first native image build downloads the base image and the Go and
+# Rust toolchains on the machine.
+NATIVE_BUILD_TIMEOUT = 5400
+
+# The distro IDs that each profile accepts in the container. The ubuntu
+# platform uses the debian profile, which has the same package map.
+_NATIVE_DISTROS = {
+    "alpine": {"alpine"},
+    "debian": {"debian", "ubuntu"},
+    "ubuntu": {"debian", "ubuntu"},
+}
 
 
 # Configure logging
@@ -690,6 +721,427 @@ def _provision_sandbox_locked(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Native target: the build container on the user's riscv64 machine
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _sandbox_setup_lock() -> Iterator[None]:
+    """Hold the setup flock that _provision_sandbox() also takes.
+
+    batch_test.py starts several main.py processes at once. The lock
+    lets one of them build the image while the others wait.
+    """
+    lock_path = os.path.join(LOGS_DIR, ".container_setup.lock")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    with open(lock_path, "w") as lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(
+                colored(
+                    "   Another worker is provisioning the sandbox "
+                    "(image build / container setup); waiting...",
+                    "yellow",
+                )
+            )
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+
+def setup_native_environment() -> bool:
+    """Set up the build container on the native machine.
+
+    Podman builds the image on the machine when the image is missing or
+    ``REBUILD_IMAGE=true``. Then Atesor creates or starts the container
+    and runs the health checks. Nothing here uses the local Docker
+    daemon or binfmt_misc. The preflight must pass first, because rung
+    10 finds the work directory that the container mounts.
+
+    Returns:
+        True when the container runs and passes the health checks.
+    """
+    from src.platforms import get_active_profile, get_container_name
+
+    profile = get_active_profile()
+    container = get_container_name()
+    print(
+        colored(
+            f"\nSetting up the RISC-V sandbox ({profile.display_name}) "
+            f"on {machine_label()}...",
+            "cyan",
+        )
+    )
+    try:
+        with _sandbox_setup_lock():
+            return (
+                _ensure_native_image(profile)
+                and _ensure_native_container(container, profile.image_name)
+                and _check_native_container(profile, container)
+            )
+    except (
+        sandbox.SandboxUnavailableError,
+        sandbox.PodmanError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        print(colored(f"ERROR: {exc}", "red"))
+        return False
+
+
+def _ensure_native_image(profile) -> bool:
+    """Build the native image when it is missing or a rebuild is due."""
+    image = profile.image_name
+    if os.environ.get("REBUILD_IMAGE") == "true":
+        print(colored(f"Forcing rebuild of image '{image}'...", "yellow"))
+    elif sandbox.image_exists(image):
+        print(colored(f"Image '{image}' found", "green"))
+        return True
+
+    dockerfile = profile.native_dockerfile
+    print(
+        colored(
+            f"   Building image '{image}' from {dockerfile} on "
+            f"{machine_label()}...",
+            "yellow",
+        )
+    )
+    print(
+        colored(
+            "   Note: the first build downloads the base image and the Go "
+            "and Rust toolchains. Later runs reuse the image.",
+            "yellow",
+        )
+    )
+    with open(os.path.join(APP_DIR, dockerfile), encoding="utf-8") as handle:
+        text = handle.read()
+    started = time.time()
+    code = sandbox.build_image(
+        image,
+        text,
+        on_line=lambda line: print(f"   {line}"),
+        timeout=NATIVE_BUILD_TIMEOUT,
+    )
+    minutes = (time.time() - started) / 60
+    if code == 0:
+        print(
+            colored(f"Image built successfully in {minutes:.1f} min", "green")
+        )
+        return True
+    if code == sandbox.BUILD_TIMED_OUT:
+        print(
+            colored(
+                f"ERROR: The image build stopped at the time limit "
+                f"({NATIVE_BUILD_TIMEOUT} s)",
+                "red",
+            )
+        )
+    else:
+        print(
+            colored(
+                f"ERROR: Failed to build the image (podman exit {code})",
+                "red",
+            )
+        )
+    return False
+
+
+def _ensure_native_container(container: str, image: str) -> bool:
+    """Create or start the native container on the work directory.
+
+    A container whose ``/workspace`` mount is not the current work
+    directory is recreated, so it never works on stale files.
+    """
+    workdir = remote_workdir()
+    if not workdir:
+        print(
+            colored(
+                "ERROR: The work directory is unknown, because preflight "
+                "rung 10 did not run.",
+                "red",
+            )
+        )
+        return False
+    for _ in range(2):
+        state = sandbox.inspect_container(container)
+        if state is not None and state.workspace_source != workdir:
+            print(
+                colored(
+                    f"   Container '{container}' has a stale workspace "
+                    f"mount ({redact(state.workspace_source)}); "
+                    "recreating it...",
+                    "yellow",
+                )
+            )
+            sandbox.remove_container(container)
+            state = None
+        if state is None:
+            print(colored(f"   Creating container '{container}'...", "yellow"))
+            sandbox.create_container(container, image, workdir)
+        elif state.status != "running":
+            print(
+                colored(
+                    f"   Starting existing container '{container}'...",
+                    "yellow",
+                )
+            )
+            sandbox.start_container(container)
+        state = sandbox.inspect_container(container)
+        if state is not None and state.status == "running":
+            print(colored(f"Container '{container}' is running", "green"))
+            return True
+        status = state.status if state is not None else "missing"
+        print(
+            colored(f"   Container status: {status}, recreating...", "yellow")
+        )
+        sandbox.remove_container(container)
+    print(colored("ERROR: Failed to start container after 2 attempts", "red"))
+    return False
+
+
+def _os_release_id(text: str) -> str:
+    """Return the ID value of an /etc/os-release text, in lower case."""
+    for line in text.splitlines():
+        if line.startswith("ID="):
+            return line.split("=", 1)[1].strip().strip('"').lower()
+    return ""
+
+
+def _check_native_container(profile, container: str) -> bool:
+    """Check the distro, the architecture and the shell of the container.
+
+    The check also creates the workspace directories, because the bind
+    mount of the work directory hides the ones in the image.
+    """
+    osr = sandbox.run_in_container(container, ["cat", "/etc/os-release"])
+    if osr.returncode == 0:
+        distro = _os_release_id(osr.stdout)
+        allowed = _NATIVE_DISTROS.get(profile.name, {profile.name})
+        if distro and distro not in allowed:
+            print(
+                colored(
+                    f"ERROR: Platform mismatch: container '{container}' is "
+                    f"'{distro}', but --platform '{profile.name}' was "
+                    "selected.",
+                    "red",
+                )
+            )
+            print(
+                colored(
+                    "  Fix: remove the stale container on the machine, "
+                    f"then re-run.\n    podman rm -f {container}",
+                    "yellow",
+                )
+            )
+            return False
+        logger.info(f"Container distro check OK: {distro} in {allowed}")
+    else:
+        logger.warning(
+            f"Could not read /etc/os-release from container "
+            f"(exit {osr.returncode})"
+        )
+
+    arch = sandbox.run_in_container(container, ["uname", "-m"])
+    arch_name = arch.stdout.strip()
+    if arch.returncode != 0 or arch_name != "riscv64":
+        print(
+            colored(
+                f"ERROR: The container reports the architecture "
+                f"'{arch_name}' (exit {arch.returncode}), not riscv64",
+                "red",
+            )
+        )
+        return False
+    print(
+        colored(
+            f"Container architecture verified: {arch_name} (native)",
+            "green",
+        )
+    )
+
+    dirs = sandbox.run_in_container(
+        container,
+        [
+            "mkdir",
+            "-p",
+            "/workspace/repos",
+            "/workspace/output",
+            "/workspace/logs",
+            "/workspace/patches",
+        ],
+    )
+    ready = sandbox.run_in_container(container, ["echo", "Container ready!"])
+    if dirs.returncode == 0 and ready.returncode == 0:
+        print(colored("Container is responsive", "green"))
+        return True
+    print(colored("ERROR: Container is not responding correctly", "red"))
+    return False
+
+
+def stop_native_container() -> None:
+    """Stop the native build container when a native command ends.
+
+    A failure is logged, and the command still ends. The next native
+    command starts the container again.
+    """
+    from src.platforms import get_container_name
+
+    container = get_container_name()
+    try:
+        result = sandbox.stop_container(container)
+    except Exception as exc:  # the stop must never hide the exit reason
+        logger.warning(f"Could not stop container '{container}': {exc}")
+        return
+    if result.returncode == 0:
+        print(
+            colored(
+                f"Container '{container}' stopped on {machine_label()}",
+                "cyan",
+            )
+        )
+    elif "no such container" not in result.stderr.lower():
+        logger.warning(
+            f"Could not stop container '{container}': "
+            f"{redact(result.stderr.strip())}"
+        )
+
+
+def cleanup_native_container(remove_image: bool = False) -> None:
+    """Remove the native build container, and its image when asked.
+
+    Args:
+        remove_image: If True, also remove the sandbox image.
+    """
+    from src.platforms import get_active_profile, get_container_name
+
+    container = get_container_name()
+    image = get_active_profile().image_name
+    try:
+        if sandbox.container_exists(container):
+            print(
+                colored(
+                    f"Removing container '{container}' on "
+                    f"{machine_label()}...",
+                    "yellow",
+                )
+            )
+            result = sandbox.remove_container(container)
+            if result.returncode == 0:
+                print(colored("Container cleaned up", "green"))
+            else:
+                print(
+                    colored(
+                        "Error removing container: "
+                        f"{redact(result.stderr.strip())}",
+                        "red",
+                    )
+                )
+        else:
+            print(colored(f"Container '{container}' not found", "yellow"))
+
+        if remove_image:
+            print(
+                colored(
+                    f"Removing image '{image}' on {machine_label()}...",
+                    "yellow",
+                )
+            )
+            result = sandbox.remove_image(image)
+            if result.returncode == 0:
+                print(colored(f"Image '{image}' removed", "green"))
+            elif "image not known" in result.stderr.lower():
+                print(colored(f"Image '{image}' not found", "yellow"))
+            else:
+                print(
+                    colored(
+                        "Error removing image: "
+                        f"{redact(result.stderr.strip())}",
+                        "red",
+                    )
+                )
+    except (
+        sandbox.SandboxUnavailableError,
+        sandbox.PodmanError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        print(colored(f"Error during cleanup: {exc}", "red"))
+
+
+def clean_native_repos() -> None:
+    """Remove the cloned repositories from the native work directory.
+
+    Rungs 2 to 10 run first, because rung 10 finds the work directory.
+    ``podman unshare`` can remove files that container users own.
+    """
+    from src import preflight
+
+    report = preflight.run_preflight(first=2, last=10)
+    if not report.passed:
+        print(report.render(paint=colored))
+        return
+    repos = f"{remote_workdir()}/repos"
+    print(
+        colored(
+            f"Removing the cloned repositories on {machine_label()}...",
+            "yellow",
+        )
+    )
+    try:
+        result = sandbox.run_raw(
+            ["podman", "unshare", "rm", "-rf", "--", repos], timeout=600
+        )
+    except (sandbox.SandboxUnavailableError, subprocess.TimeoutExpired) as exc:
+        print(
+            colored(f"   Error cleaning repos/ on the machine: {exc}", "red")
+        )
+        return
+    if result.returncode == 0:
+        print(colored(f"   Cleaned repos/ on {machine_label()}", "green"))
+    else:
+        print(
+            colored(
+                "   Error cleaning repos/ on the machine: "
+                f"{redact(result.stderr.strip())}",
+                "red",
+            )
+        )
+
+
+def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
+    """Set up the native container, run the command, then stop it.
+
+    The container stops when the command ends: after a port, a failure,
+    an escalation, an exception or --setup-only.
+
+    Args:
+        args: The parsed command-line arguments.
+        infra_only: True for --setup-only, or --rebuild without --repo.
+
+    Returns:
+        The exit code of the command.
+    """
+    try:
+        if not setup_native_environment():
+            return 1
+        if infra_only:
+            message = "\nSetup complete!"
+            if args.rebuild and not args.setup_only:
+                message = "\nRebuild complete!"
+            print(colored(message, "green"))
+            return 0
+        return run_agent(
+            repo_url=args.repo,
+            max_attempts=args.max_attempts,
+            verbose=args.verbose,
+            package=args.package,
+        )
+    finally:
+        stop_native_container()
+
+
 def save_porting_outputs(state: AgentState, output_dir: str) -> None:
     """Save all porting outputs to files."""
     # Ensure output directory exists
@@ -1209,12 +1661,16 @@ def run_agent(
             handler.flush()
 
 
-def cleanup_workspace(dry_run: bool = False) -> None:
+def cleanup_workspace(dry_run: bool = False) -> List[str]:
     """Clean up workspace directory to manage size.
 
     Args:
         dry_run: If True, only show what would be deleted without
             actually deleting.
+
+    Returns:
+        The directory names that the user chose to clean, for example
+        ``["repos"]``. The list is empty when nothing was chosen.
     """
     import shutil
     from pathlib import Path
@@ -1222,7 +1678,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
     workspace_path = Path(WORKSPACE_ROOT)
     if not workspace_path.exists():
         print(colored("Workspace directory does not exist", "yellow"))
-        return
+        return []
 
     # Calculate current size
     total_size = 0
@@ -1270,7 +1726,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
 
     if dry_run:
         print(colored("\n[DRY RUN] No files will be deleted", "yellow"))
-        return
+        return []
 
     try:
         choice = input(
@@ -1280,7 +1736,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
         # Non-interactive stdin (CI, piped input) or Ctrl-C: exit
         # cleanly instead of dumping a traceback.
         print(colored("\nCleanup cancelled (no interactive input)", "yellow"))
-        return
+        return []
 
     dirs_to_clean = []
     if choice == "1":
@@ -1295,10 +1751,10 @@ def cleanup_workspace(dry_run: bool = False) -> None:
         dirs_to_clean = ["repos", "output", "logs", ".cache", "patches"]
     elif choice.lower() == "q":
         print(colored("Cleanup cancelled", "yellow"))
-        return
+        return []
     else:
         print(colored("Invalid option", "red"))
-        return
+        return []
 
     # Perform cleanup
     for dirname in dirs_to_clean:
@@ -1321,6 +1777,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
     print(colored("\nCleanup Complete!", "green", attrs=["bold"]))
     print(colored(f"   Freed: {freed_mb:.2f} MB", "green"))
     print(colored(f"   New Size: {new_size_mb:.2f} MB", "white"))
+    return dirs_to_clean
 
 
 def cleanup_container(remove_image: bool = False) -> None:
@@ -1448,6 +1905,16 @@ class _CleanHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
 def main() -> int:
     """Run the CLI entry point and return the process exit code."""
+    try:
+        return _main()
+    finally:
+        # On native, each process opens its own ssh connection. Close it
+        # when the command ends, after the container stops.
+        close_connection()
+
+
+def _main() -> int:
+    """Parse the arguments, run the command and return its exit code."""
     parser = argparse.ArgumentParser(
         prog="atesor-ai",
         add_help=False,  # -h is declared in the "other" group below
@@ -1496,6 +1963,13 @@ def main() -> int:
         help="sandbox distro: alpine|debian|ubuntu|auto",
     )
     porting.add_argument(
+        "--target",
+        metavar="NAME",
+        choices=["qemu", "native"],
+        default=None,
+        help="where builds run: qemu|native (default: qemu)",
+    )
+    porting.add_argument(
         "--package",
         action="store_true",
         help="zip recipe + sources on success",
@@ -1514,6 +1988,11 @@ def main() -> int:
         "--setup-only",
         action="store_true",
         help="provision the build sandbox and exit",
+    )
+    sandbox.add_argument(
+        "--preflight",
+        action="store_true",
+        help="check the native machine and exit",
     )
     sandbox.add_argument(
         "--rebuild",
@@ -1563,6 +2042,44 @@ def main() -> int:
     if args.container:
         os.environ["ATESOR_CONTAINER"] = args.container
 
+    # The target is final now that the CLI overrides are in the
+    # environment. Rung 1 of the native preflight runs before any other
+    # action, so a bad configuration never reaches the cache fast path.
+    from src import preflight
+
+    if args.target and args.target != _TARGET_AT_IMPORT:
+        # argparse also accepts a short form such as "--targ". The early
+        # read at import time only knows the full name, so the workspace
+        # paths would belong to the other target.
+        print(
+            colored(
+                "ERROR: write --target in full, for example "
+                "--target native.",
+                "red",
+            )
+        )
+        return 1
+    reset_target_cache()
+    config_report = preflight.run_preflight(first=1, last=1)
+    if not config_report.passed:
+        print(config_report.render(paint=colored))
+        return 1
+    native = is_native()
+
+    if args.preflight:
+        if not native:
+            print(
+                colored(
+                    "--preflight checks the native machine only. Pass "
+                    "--target native, or set ATESOR_TARGET=native.",
+                    "yellow",
+                )
+            )
+            return 1
+        report = preflight.run_preflight()
+        print(report.render(verbose=True, paint=colored))
+        return 0 if report.passed else 1
+
     # Extract repo name early for per-repo logging. Must match the
     # derivation in create_initial_state exactly — the recipe cache is
     # keyed by the state's repo_name, so any divergence here makes
@@ -1609,19 +2126,34 @@ def main() -> int:
             )
         )
 
-    if args.cleanup:
+    # Native cleanup needs only rungs 2 to 8, so it still works on a
+    # full disk. It uses podman on the machine and never the local Docker.
+    if native and (args.cleanup or args.clean_image):
+        report = preflight.run_preflight(
+            first=2, last=preflight.CLEANUP_LAST_RUNG
+        )
+        if not report.passed:
+            print(report.render(paint=colored))
+            return 1
+        cleanup_native_container(remove_image=args.clean_image)
+        if not args.rebuild:
+            return 0
+
+    if args.cleanup and not native:
         cleanup_container(remove_image=args.clean_image)
         if not args.rebuild:
             return 0
 
-    if args.clean_image and not args.cleanup:
+    if args.clean_image and not args.cleanup and not native:
         cleanup_container(remove_image=True)
         if not args.rebuild:
             return 0
 
     # Handle workspace cleanup
     if args.clean_workspace:
-        cleanup_workspace()
+        cleaned = cleanup_workspace()
+        if native and "repos" in cleaned:
+            clean_native_repos()
         return 0
 
     infra_only = args.setup_only or (args.rebuild and not args.repo)
@@ -1630,6 +2162,7 @@ def main() -> int:
         and args.rebuild
         and args.platform == "auto"
         and not args.container
+        and not native
     )
 
     # Require repo URL before starting long-running setup or API checks
@@ -1700,6 +2233,14 @@ def main() -> int:
                 )
             return 0
 
+    # Native: rungs 2 to 11 run after the cache fast path and before the
+    # key check.
+    if native:
+        report = preflight.run_preflight(first=2)
+        print(report.render(paint=colored))
+        if not report.passed:
+            return 1
+
     # API keys are only required when we are actually running the agent.
     if args.repo and not args.setup_only:
         if not check_keys():
@@ -1708,6 +2249,11 @@ def main() -> int:
     # Set up Docker environment
     if args.rebuild:
         os.environ["REBUILD_IMAGE"] = "true"
+
+    # Native uses podman on the machine and never the local Docker. The
+    # container stops when the command ends.
+    if native:
+        return _run_native(args, infra_only)
 
     if not setup_docker_environment():
         return 1

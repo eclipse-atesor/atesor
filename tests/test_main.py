@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import logging
 import os
 import runpy
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1662,6 +1664,400 @@ class TestRebuildSandboxes(_MainTestCase):
             self.assertFalse(main.rebuild_all_sandboxes())
             self.assertNotIn("ATESOR_PLATFORM", main.os.environ)
             self.assertNotIn("ATESOR_CONTAINER", main.os.environ)
+
+
+_WORKDIR = "/home/u/atesor-ai"
+
+
+def _proc(code: int = 0, out: str = "", err: str = ""):
+    """Return a completed process for a faked podman call."""
+    return subprocess.CompletedProcess([], code, out, err)
+
+
+class _FakeMachine:
+    """Podman state on a fake native machine, for the sandbox helpers."""
+
+    def __init__(self, image=True, state=None, distro="debian") -> None:
+        self.image = image
+        self.state = state
+        self.distro = distro
+        self.arch = "riscv64"
+        self.build_code = 0
+        self.runs_after_create = True
+        self.calls = []
+
+    def image_exists(self, image):
+        """Report whether the image exists."""
+        self.calls.append(("image_exists", image))
+        return self.image
+
+    def build_image(self, image, text, on_line, timeout):
+        """Record the build and print one line."""
+        self.calls.append(("build_image", image, text, timeout))
+        on_line("STEP 1/9: FROM debian")
+        return self.build_code
+
+    def inspect_container(self, name):
+        """Return the container state."""
+        self.calls.append(("inspect_container", name))
+        return self.state
+
+    def create_container(self, name, image, workdir):
+        """Create the container."""
+        self.calls.append(("create_container", name, image, workdir))
+        status = "running" if self.runs_after_create else "exited"
+        self.state = main.sandbox.ContainerState(status, workdir)
+
+    def start_container(self, name):
+        """Start the container."""
+        self.calls.append(("start_container", name))
+        self.state = main.sandbox.ContainerState(
+            "running", self.state.workspace_source
+        )
+
+    def remove_container(self, name):
+        """Remove the container."""
+        self.calls.append(("remove_container", name))
+        self.state = None
+        return _proc()
+
+    def run_in_container(self, container, command, timeout=60):
+        """Answer the health checks."""
+        self.calls.append(("run_in_container", tuple(command)))
+        if command[0] == "cat":
+            return _proc(0, f"ID={self.distro}\n")
+        if command[0] == "uname":
+            return _proc(0, self.arch + "\n")
+        return _proc(0, "Container ready!\n" if command[0] == "echo" else "")
+
+    def names(self):
+        """Return the names of the calls, in order."""
+        return [call[0] for call in self.calls]
+
+
+class TestNativeEnvironment(_MainTestCase):
+    """Tests for the native container setup, stop and cleanup."""
+
+    _HELPERS = (
+        "image_exists",
+        "build_image",
+        "inspect_container",
+        "create_container",
+        "start_container",
+        "remove_container",
+        "run_in_container",
+    )
+
+    def _setup(self, machine, env=None, workdir=_WORKDIR):
+        """Run setup_native_environment() against a fake machine."""
+        from src import platforms
+
+        output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self._patched_main_paths())
+            stack.enter_context(
+                mock.patch.dict(main.os.environ, env or {}, clear=True)
+            )
+            for name in self._HELPERS:
+                stack.enter_context(
+                    mock.patch.object(
+                        main.sandbox, name, side_effect=getattr(machine, name)
+                    )
+                )
+            stack.enter_context(
+                mock.patch.object(main, "remote_workdir", return_value=workdir)
+            )
+            stack.enter_context(
+                mock.patch(
+                    "src.platforms.get_active_profile",
+                    return_value=platforms.DEBIAN_RISCV,
+                )
+            )
+            stack.enter_context(
+                mock.patch(
+                    "src.platforms.get_container_name", return_value="box"
+                )
+            )
+            from_env = stack.enter_context(
+                mock.patch.object(main.docker, "from_env")
+            )
+            stack.enter_context(contextlib.redirect_stdout(output))
+            result = main.setup_native_environment()
+        from_env.assert_not_called()
+        return result, output.getvalue()
+
+    def _running(self, source=_WORKDIR):
+        """Return the state of a running container."""
+        return main.sandbox.ContainerState("running", source)
+
+    def test_ready_machine_reuses_image_and_container(self) -> None:
+        """No build and no create when both exist and match."""
+        machine = _FakeMachine(state=self._running())
+        ok, out = self._setup(machine)
+        self.assertTrue(ok)
+        self.assertNotIn("build_image", machine.names())
+        self.assertNotIn("create_container", machine.names())
+        self.assertIn("Container architecture verified: riscv64 (native)", out)
+        self.assertIn(
+            (
+                "run_in_container",
+                (
+                    "mkdir",
+                    "-p",
+                    "/workspace/repos",
+                    "/workspace/output",
+                    "/workspace/logs",
+                    "/workspace/patches",
+                ),
+            ),
+            machine.calls,
+        )
+
+    def test_setup_names_the_machine(self) -> None:
+        """The first setup line says which machine Atesor uses."""
+        from src import target
+
+        env = {
+            "ATESOR_TARGET": "native",
+            "ATESOR_PLATFORM": "debian",
+            "ATESOR_SSH_HOST": "tester@board-1",
+        }
+        target.set_machine_name("board-os")
+        machine = _FakeMachine(state=self._running())
+        ok, out = self._setup(machine, env=env)
+        self.assertTrue(ok)
+        self.assertIn("on tester@board-1 (host board-os)...", out)
+
+    def test_missing_image_builds_dockerfile_native(self) -> None:
+        """The debian profile builds Dockerfile.native on the machine."""
+        machine = _FakeMachine(image=False)
+        ok, out = self._setup(machine)
+        self.assertTrue(ok)
+        build = [call for call in machine.calls if call[0] == "build_image"]
+        self.assertEqual(1, len(build))
+        _, image, text, timeout = build[0]
+        self.assertEqual("atesor-ai-sandbox-debian:latest", image)
+        with open(
+            os.path.join(main.APP_DIR, "Dockerfile.native"), encoding="utf-8"
+        ) as handle:
+            self.assertEqual(handle.read(), text)
+        self.assertEqual(main.NATIVE_BUILD_TIMEOUT, timeout)
+        self.assertIn("   STEP 1/9: FROM debian", out)
+        self.assertIn(
+            ("create_container", "box", image, _WORKDIR), machine.calls
+        )
+
+    def test_rebuild_flag_builds_an_existing_image(self) -> None:
+        """REBUILD_IMAGE=true builds even when the image exists."""
+        machine = _FakeMachine(state=self._running())
+        ok, _ = self._setup(machine, env={"REBUILD_IMAGE": "true"})
+        self.assertTrue(ok)
+        self.assertIn("build_image", machine.names())
+        self.assertNotIn("image_exists", machine.names())
+
+    def test_failed_build_stops_the_setup(self) -> None:
+        """A failed build creates no container."""
+        machine = _FakeMachine(image=False)
+        machine.build_code = 1
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertIn("podman exit 1", out)
+        self.assertNotIn("create_container", machine.names())
+
+    def test_build_time_limit_is_reported(self) -> None:
+        """A build that hits the time limit fails with its own message."""
+        machine = _FakeMachine(image=False)
+        machine.build_code = main.sandbox.BUILD_TIMED_OUT
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertIn("time limit", out)
+
+    def test_stale_mount_recreates_the_container(self) -> None:
+        """A container on another work directory is recreated."""
+        machine = _FakeMachine(state=self._running("/home/u/old"))
+        ok, _ = self._setup(machine)
+        self.assertTrue(ok)
+        names = machine.names()
+        self.assertLess(
+            names.index("remove_container"), names.index("create_container")
+        )
+
+    def test_stopped_container_is_started(self) -> None:
+        """An exited container with the right mount is started again."""
+        machine = _FakeMachine(
+            state=main.sandbox.ContainerState("exited", _WORKDIR)
+        )
+        ok, _ = self._setup(machine)
+        self.assertTrue(ok)
+        self.assertIn("start_container", machine.names())
+        self.assertNotIn("create_container", machine.names())
+
+    def test_container_that_never_runs_fails(self) -> None:
+        """Two failed starts end the setup."""
+        machine = _FakeMachine(image=True)
+        machine.runs_after_create = False
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertEqual(2, machine.names().count("create_container"))
+        self.assertIn("Failed to start container after 2 attempts", out)
+
+    def test_wrong_distro_fails(self) -> None:
+        """An alpine container is not accepted for the debian platform."""
+        machine = _FakeMachine(state=self._running(), distro="alpine")
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertIn("podman rm -f box", out)
+
+    def test_wrong_architecture_fails(self) -> None:
+        """A container that is not riscv64 fails the setup."""
+        machine = _FakeMachine(state=self._running())
+        machine.arch = "x86_64"
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertIn("'x86_64'", out)
+
+    def test_unreachable_machine_fails_cleanly(self) -> None:
+        """A transport error prints one error line and returns False."""
+        machine = _FakeMachine()
+        machine.image_exists = mock.Mock(
+            side_effect=main.sandbox.SandboxUnavailableError("no route")
+        )
+        ok, out = self._setup(machine)
+        self.assertFalse(ok)
+        self.assertIn("ERROR: no route", out)
+
+    def test_unknown_work_directory_fails(self) -> None:
+        """Without rung 10, the setup cannot mount the work directory."""
+        machine = _FakeMachine()
+        ok, out = self._setup(machine, workdir=None)
+        self.assertFalse(ok)
+        self.assertIn("rung 10", out)
+
+    def test_stop_reports_success_and_hides_failures(self) -> None:
+        """The stop prints on success and never raises."""
+        output = io.StringIO()
+        with (
+            mock.patch("src.platforms.get_container_name", return_value="box"),
+            contextlib.redirect_stdout(output),
+        ):
+            with mock.patch.object(
+                main.sandbox, "stop_container", return_value=_proc()
+            ) as stop:
+                main.stop_native_container()
+            stop.assert_called_once_with("box")
+            with mock.patch.object(
+                main.sandbox,
+                "stop_container",
+                side_effect=main.sandbox.SandboxUnavailableError("gone"),
+            ):
+                main.stop_native_container()
+            with mock.patch.object(
+                main.sandbox,
+                "stop_container",
+                return_value=_proc(125, err="Error: no such container box"),
+            ):
+                main.stop_native_container()
+        self.assertEqual(1, output.getvalue().count("stopped"))
+
+    def test_cleanup_removes_container_and_image(self) -> None:
+        """--clean-image removes the container, then the image."""
+        output = io.StringIO()
+        with (
+            mock.patch("src.platforms.get_container_name", return_value="box"),
+            mock.patch.object(
+                main.sandbox, "container_exists", return_value=True
+            ),
+            mock.patch.object(
+                main.sandbox, "remove_container", return_value=_proc()
+            ) as remove,
+            mock.patch.object(
+                main.sandbox,
+                "remove_image",
+                return_value=_proc(1, err="Error: x: image not known"),
+            ) as rmi,
+            contextlib.redirect_stdout(output),
+        ):
+            main.cleanup_native_container(remove_image=True)
+        remove.assert_called_once_with("box")
+        rmi.assert_called_once()
+        self.assertIn("Container cleaned up", output.getvalue())
+        self.assertIn("not found", output.getvalue())
+
+    def test_clean_repos_needs_the_work_directory(self) -> None:
+        """The machine repos go only after rungs 2 to 10 pass."""
+        from src import preflight
+
+        failed = preflight.PreflightReport([preflight.RungResult(4, False)])
+        passed = preflight.PreflightReport([preflight.RungResult(10, True)])
+        with (
+            mock.patch.object(main.sandbox, "run_raw") as run_raw,
+            mock.patch.object(main, "remote_workdir", return_value=_WORKDIR),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            run_raw.return_value = _proc()
+            with mock.patch.object(
+                preflight, "run_preflight", return_value=failed
+            ):
+                main.clean_native_repos()
+            run_raw.assert_not_called()
+            with mock.patch.object(
+                preflight, "run_preflight", return_value=passed
+            ) as ladder:
+                main.clean_native_repos()
+        ladder.assert_called_once_with(first=2, last=10)
+        run_raw.assert_called_once_with(
+            ["podman", "unshare", "rm", "-rf", "--", f"{_WORKDIR}/repos"],
+            timeout=600,
+        )
+
+
+class TestNativeDockerfiles(unittest.TestCase):
+    """Tests for the Dockerfile choice per platform and target."""
+
+    def _read(self, name: str) -> str:
+        """Return the text of a Dockerfile in the repository."""
+        with open(os.path.join(main.APP_DIR, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_choice_per_platform_and_target(self) -> None:
+        """Native debian and ubuntu use Dockerfile.native; qemu stays."""
+        from src.platforms import PROFILES
+
+        expected = {
+            "alpine": ("Dockerfile", "Dockerfile"),
+            "debian": ("Dockerfile.debian", "Dockerfile.native"),
+            "ubuntu": ("Dockerfile.debian", "Dockerfile.native"),
+        }
+        for name, (qemu, native) in expected.items():
+            with self.subTest(platform=name):
+                self.assertEqual(qemu, PROFILES[name].dockerfile)
+                self.assertEqual(native, PROFILES[name].native_dockerfile)
+
+    def test_native_dockerfile_keeps_the_toolchains(self) -> None:
+        """Dockerfile.native pins the same Go and Rust as the others."""
+        native = self._read("Dockerfile.native")
+        debian = self._read("Dockerfile.debian")
+        self.assertIn(
+            "FROM --platform=linux/riscv64 docker.io/library/debian:trixie",
+            native,
+        )
+        self.assertIn("Pin: release o=Debian", native)
+        for line in ("ENV GOTOOLCHAIN=local", "ENV GOFLAGS=-buildvcs=false"):
+            self.assertIn(line, native)
+        for arg in ("ARG GO_VERSION=", "ARG RUST_TOOLCHAIN="):
+            native_line = next(
+                line for line in native.splitlines() if line.startswith(arg)
+            )
+            self.assertIn(native_line, debian.splitlines())
+        # The build context is empty, so nothing may come from it.
+        for line in native.splitlines():
+            self.assertFalse(line.startswith(("COPY", "ADD")), line)
+
+    def test_alpine_base_name_is_fully_qualified(self) -> None:
+        """Podman needs a full image name without a short-name alias."""
+        self.assertIn(
+            "FROM docker.io/library/alpine:latest", self._read("Dockerfile")
+        )
 
 
 class TestHelpFormatter(_MainTestCase):

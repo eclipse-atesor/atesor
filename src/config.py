@@ -18,6 +18,8 @@ throughout the Atesor AI system.
 import os
 from pathlib import Path
 
+from .target import NATIVE, target_name_from_env
+
 
 def is_running_in_docker() -> bool:
     """Detect if running inside a Docker container."""
@@ -89,11 +91,16 @@ def get_workspace_root() -> str:
     workspace tree too (previously the in-docker shortcut silently
     ignored it, sending state to ``/workspace`` in CI/devcontainers).
     The bare ``/workspace`` default applies only inside the sandbox
-    container when no override is set.
+    container when no override is set. The native target uses
+    ``workspace-native`` instead, so the results of the two targets
+    never mix.
     """
     if is_running_in_docker() and not os.environ.get("ATESOR_HOME"):
         return "/workspace"
-    workspace = os.path.join(get_state_home(), "workspace")
+    name = "workspace"
+    if target_name_from_env() == NATIVE:
+        name = "workspace-native"
+    workspace = os.path.join(get_state_home(), name)
     os.makedirs(workspace, exist_ok=True)
     return workspace
 

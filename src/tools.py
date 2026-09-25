@@ -23,7 +23,10 @@ import subprocess
 import time
 from typing import Optional, Tuple
 
+from src import sandbox
+from src.sandbox import SandboxUnavailableError
 from src.state import CommandResult
+from src.target import is_native
 
 # Config values (_IN_DOCKER, WORKSPACE_ROOT) are imported lazily inside
 # functions to keep the module-level import surface minimal and avoid
@@ -513,8 +516,10 @@ def execute_command(
     start_time = time.time()
 
     # If we are ALREADY in Docker, we cannot use docker exec normally
-    # and we don't need to.
-    if _IN_DOCKER:
+    # and we don't need to. The native target reaches its container
+    # over ssh, so the check does not apply to it.
+    native = is_native()
+    if _IN_DOCKER and not native:
         use_docker = False
 
     # Validate command safety
@@ -541,7 +546,9 @@ def execute_command(
     try:
         # FIXED: Execute in Docker container by default
         if use_docker:
-            if not DockerConfig.is_container_running():
+            # On native, this probe would cost one more ssh call. The
+            # podman error of the command reports it instead (see below).
+            if not native and not DockerConfig.is_container_running():
                 logger.error(
                     f"Docker container "
                     f"'{DockerConfig.CONTAINER_NAME}' is not running"
@@ -557,21 +564,10 @@ def execute_command(
                     duration_seconds=0.0,
                 )
 
-            # Build docker exec command
-            docker_cmd = ["docker", "exec"]
-
-            # Inject per-call environment overrides (fail-fast git flags,
-            # locale, tokens). Applied before the container name, per
-            # `docker exec` calling convention.
-            if extra_env:
-                for env_key, env_val in extra_env.items():
-                    if _is_secret_env_key(str(env_key)):
-                        if host_env is None:
-                            host_env = os.environ.copy()
-                        host_env[str(env_key)] = str(env_val)
-                        docker_cmd.extend(["--env", str(env_key)])
-                    else:
-                        docker_cmd.extend(["--env", f"{env_key}={env_val}"])
+            # Per-call environment overrides (fail-fast git flags,
+            # locale, tokens) go to build_exec_argv(). It passes a
+            # secret by name only, never its value in an argv.
+            container_cwd = None
 
             # Add working directory if specified
             if cwd:
@@ -588,8 +584,6 @@ def execute_command(
                     if "workspace" in cwd:
                         parts = cwd.split("workspace", 1)
                         container_cwd = DockerConfig.WORKSPACE_PATH + parts[1]
-
-                docker_cmd.extend(["-w", container_cwd])
 
             # Add container name and command.
             # Wrap package-manager commands with flock to serialize
@@ -613,23 +607,43 @@ def execute_command(
                 f"timeout --signal=KILL {inner_timeout}s "
                 f"bash -c '{shell_quoted}'"
             )
-            docker_cmd.extend(
-                [DockerConfig.CONTAINER_NAME, "bash", "-c", exec_command]
+            container = DockerConfig.CONTAINER_NAME
+            call = sandbox.build_exec_argv(
+                container,
+                ["bash", "-c", exec_command],
+                env=extra_env,
+                workdir=container_cwd,
             )
+            docker_cmd = call.argv
+            # Carries the values for any name-only `--env` flags.
+            host_env = call.env
 
             logger.debug(
-                f"Executing in Docker: "
+                f"Executing in {sandbox.engine()}: "
                 f"{' '.join(docker_cmd[:5])}... (cwd: {cwd})"
             )
 
-            result = subprocess.run(
-                docker_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                # Carries the values for any name-only `--env` flags.
-                env=host_env,
-            )
+            if native:
+                # Handles the ssh transport errors; see src/sandbox.py.
+                result = sandbox.run_call(call, timeout)
+                if sandbox.not_running(result.returncode, result.stderr):
+                    message = f"Container '{container}' is not running"
+                    logger.error(message)
+                    return CommandResult(
+                        command=command,
+                        exit_code=1,
+                        stdout="",
+                        stderr=message,
+                        duration_seconds=time.time() - start_time,
+                    )
+            else:
+                result = subprocess.run(
+                    docker_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=host_env,
+                )
         else:
             # Execute on host (for git clone, etc.)
             logger.debug(f"Executing on host: {command[:100]}")
@@ -666,17 +680,20 @@ def execute_command(
                         f"after {delay:.0f}s: {command[:60]}"
                     )
                     time.sleep(delay)
-                    retry_result = subprocess.run(
-                        docker_cmd if use_docker else command,
-                        shell=not use_docker,
-                        cwd=None if use_docker else cwd,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                        # Preserve extra_env on host retries; docker
-                        # retries carry it inside docker_cmd already.
-                        env=host_env,
-                    )
+                    if use_docker and native:
+                        retry_result = sandbox.run_call(call, timeout)
+                    else:
+                        retry_result = subprocess.run(
+                            docker_cmd if use_docker else command,
+                            shell=not use_docker,
+                            cwd=None if use_docker else cwd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            # Preserve extra_env on host retries; docker
+                            # retries carry it inside docker_cmd already.
+                            env=host_env,
+                        )
                     if not _is_pkg_lock_error(retry_result):
                         result = retry_result
                         duration = time.time() - start_time
@@ -715,19 +732,20 @@ def execute_command(
                     command.strip().split()[0] if command.strip() else ""
                 )
                 if cmd_token:
-                    subprocess.run(
-                        [
-                            "docker",
-                            "exec",
-                            DockerConfig.CONTAINER_NAME,
-                            "pkill",
-                            "-9",
-                            "-f",
-                            cmd_token,
-                        ],
-                        capture_output=True,
-                        timeout=10,
+                    # The same argv prefix as the command: docker exec,
+                    # or ssh and podman exec on native.
+                    kill = sandbox.build_exec_argv(
+                        DockerConfig.CONTAINER_NAME,
+                        ["pkill", "-9", "-f", cmd_token],
                     )
+                    if kill.native:
+                        sandbox.run_call(kill, 10)
+                    else:
+                        subprocess.run(
+                            kill.argv,
+                            capture_output=True,
+                            timeout=10,
+                        )
             except Exception as kill_exc:  # pragma: no cover - best effort
                 logger.debug(
                     f"post-timeout pkill failed (non-fatal): {kill_exc}"
@@ -740,6 +758,11 @@ def execute_command(
             stderr=f"Command timed out after {timeout} seconds",
             duration_seconds=duration,
         )
+
+    except SandboxUnavailableError:
+        # The machine is unreachable. @agent_node escalates the run, so
+        # the fixer never sees a lost connection as a build error.
+        raise
 
     except Exception as e:
         duration = time.time() - start_time
