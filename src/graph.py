@@ -1706,6 +1706,11 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
             timeout=30,
             **call.run_kwargs(),
         )
+        if call.native:
+            # The script edits Makefiles, so the local mirror is stale.
+            from src import mirror
+
+            mirror.mark_stale()
         if result.stdout.strip():
             logger.info(f"top_builddir fixup: {result.stdout.strip()}")
         if result.returncode != 0 and result.stderr.strip():

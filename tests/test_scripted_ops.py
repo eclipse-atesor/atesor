@@ -560,6 +560,76 @@ class TestCloneResetsExistingRepo:
         )
 
 
+class TestNativeRepoChecks:
+    """On native, the clone checks run in the container, not on the host.
+
+    The host only holds the local mirror, which can be stale or empty.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _native(self, monkeypatch, tmp_path):
+        """Select a valid native config and silence the side checks."""
+        from src import target
+
+        env = {
+            "ATESOR_TARGET": "native",
+            "ATESOR_PLATFORM": "debian",
+            "ATESOR_SSH_HOST": "tester@board-1",
+            "XDG_CACHE_HOME": str(tmp_path),
+            "HOME": str(tmp_path),
+        }
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        target.reset_target_cache()
+        monkeypatch.setattr(
+            "src.scripted_ops.ScriptedOperations._ensure_container_healthy",
+            lambda _self: None,
+        )
+        monkeypatch.setattr(
+            "src.scripted_ops.ScriptedOperations._init_submodules_if_present",
+            lambda _self, _p: None,
+        )
+
+    def _clone(self, stub_execute_command, exists: bool) -> list:
+        """Clone on a fake machine where .git exists or not."""
+        commands: list = []
+
+        def fake(cmd, **kwargs):
+            """Answer test -e from the fake machine; pass the rest."""
+            commands.append(cmd)
+            if isinstance(cmd, list) and cmd[:2] == ["test", "-e"]:
+                return CommandResult(str(cmd), 0 if exists else 1, "", "", 0)
+            return CommandResult(str(cmd), 0, "", "", 0.0)
+
+        stub_execute_command("src.scripted_ops", fake)
+        ScriptedOperations().clone_or_update_repository(
+            "https://github.com/foo/bar.git", "bar"
+        )
+        return commands
+
+    def test_existing_clone_is_found_on_the_machine(
+        self, stub_execute_command
+    ) -> None:
+        """A .git folder on the machine selects the fetch and reset path."""
+        commands = self._clone(stub_execute_command, exists=True)
+        assert ["test", "-e", "/workspace/repos/bar/.git"] in commands
+        assert any("git reset --hard" in str(c) for c in commands)
+
+    def test_missing_clone_is_cloned(self, stub_execute_command) -> None:
+        """No .git folder on the machine selects a fresh clone."""
+        commands = self._clone(stub_execute_command, exists=False)
+        assert ["test", "-e", "/workspace/repos/bar/.git"] in commands
+        assert any("git clone" in str(c) for c in commands)
+
+    def test_container_path_refreshes_the_mirror(self) -> None:
+        """A host read of a repository path copies the repository first."""
+        ops = ScriptedOperations("/tmp/atesor-test-ws")
+        with mock.patch("src.scripted_ops.refresh_mirror") as refresh:
+            host = ops._to_host_path("/workspace/repos/bar/Makefile")
+        refresh.assert_called_once_with("/workspace/repos/bar/Makefile")
+        assert host == "/tmp/atesor-test-ws/repos/bar/Makefile"
+
+
 class _RepoBackedTestCase(unittest.TestCase):
     """Base TestCase with a repository-local scratch workspace."""
 

@@ -75,6 +75,23 @@ def _reset_target_cache() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# Isolate the native mirror state (which repositories are fresh)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_mirror_state() -> Iterator[None]:
+    """Forget which repositories the mirror copied, between tests."""
+    from src import mirror
+
+    mirror.reset()
+    try:
+        yield
+    finally:
+        mirror.reset()
+
+
+# ---------------------------------------------------------------------------
 # Safe helper: stub execute_command in a single module so tests
 # don't fork docker
 # ---------------------------------------------------------------------------

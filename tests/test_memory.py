@@ -5,6 +5,7 @@ import shutil
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from src.memory import (
@@ -1086,6 +1087,61 @@ class TestMemoryEdgeCases(unittest.TestCase):
             side_effect=RuntimeError("no profile"),
         ):
             self.assertEqual(memory._default_sandbox(), "alpine-riscv64")
+
+    def test_native_save_keeps_the_qemu_entry(self) -> None:
+        """A native save adds a -native entry and keeps the QEMU entry."""
+        import src.memory as memory
+
+        qemu_recipe = {
+            "repo_url": "https://github.com/madler/zlib",
+            "build_system": "cmake",
+            "architecture": "riscv64",
+            "sandbox": "debian-riscv64",
+            "last_built": "2026-09-01T10:00:00",
+            "build_plan": {"phases": []},
+        }
+        cache_file = self.test_dir / "recipe_cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "version": "2.0",
+                    "packages": {"zlib": {"debian-riscv64": qemu_recipe}},
+                }
+            )
+        )
+
+        with (
+            mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=SimpleNamespace(name="debian"),
+            ),
+        ):
+            with mock.patch.object(memory, "is_native", return_value=True):
+                native_before = memory.get_cached_recipe("zlib")
+                saved = memory.save_to_recipe_cache(
+                    repo_name="zlib",
+                    repo_url="https://github.com/madler/zlib",
+                    build_system="cmake",
+                    build_plan={"phases": []},
+                    dependencies=[],
+                    patches=[],
+                    artifacts=[],
+                    build_duration_seconds=3.0,
+                )
+                native = memory.get_cached_recipe("zlib")
+            with mock.patch.object(memory, "is_native", return_value=False):
+                qemu = memory.get_cached_recipe("zlib")
+
+        entries = json.loads(cache_file.read_text())["packages"]["zlib"]
+        self.assertIsNone(native_before)
+        self.assertTrue(saved)
+        self.assertEqual("debian-riscv64-native", native["sandbox"])
+        self.assertEqual(qemu_recipe, qemu)
+        self.assertEqual(
+            ["debian-riscv64", "debian-riscv64-native"], sorted(entries)
+        )
+        self.assertEqual(qemu_recipe, entries["debian-riscv64"])
 
     def test_get_cached_recipe_respects_architecture(self) -> None:
         """Recipes for a different architecture do not match."""

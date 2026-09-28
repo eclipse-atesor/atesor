@@ -625,7 +625,7 @@ def execute_command(
 
             if native:
                 # Handles the ssh transport errors; see src/sandbox.py.
-                result = sandbox.run_call(call, timeout)
+                result = _run_native_call(call, timeout)
                 if sandbox.not_running(result.returncode, result.stderr):
                     message = f"Container '{container}' is not running"
                     logger.error(message)
@@ -681,7 +681,7 @@ def execute_command(
                     )
                     time.sleep(delay)
                     if use_docker and native:
-                        retry_result = sandbox.run_call(call, timeout)
+                        retry_result = _run_native_call(call, timeout)
                     else:
                         retry_result = subprocess.run(
                             docker_cmd if use_docker else command,
@@ -774,6 +774,21 @@ def execute_command(
             stderr=str(e),
             duration_seconds=duration,
         )
+
+
+def _run_native_call(call: "sandbox.ExecCall", timeout: int):
+    """Run a native call, then mark the local mirror as stale.
+
+    Any command can change the repositories on the machine, so the next
+    host-side read must copy them again (see src/mirror.py).
+    """
+    # src.mirror imports src.config, which this module imports lazily.
+    from src import mirror
+
+    try:
+        return sandbox.run_call(call, timeout)
+    finally:
+        mirror.mark_stale()
 
 
 def _is_pkg_lock_error(result) -> bool:

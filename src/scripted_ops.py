@@ -31,7 +31,8 @@ from src.state import (
 )
 from src.tools import execute_command
 
-from .config import CACHE_DIR, REPOS_DIR, WORKSPACE_ROOT
+from .config import CACHE_DIR, REPOS_DIR, WORKSPACE_ROOT, refresh_mirror
+from .target import is_native
 
 logger = logging.getLogger(__name__)
 
@@ -287,11 +288,27 @@ class ScriptedOperations:
 
         Only the leading ``/workspace`` prefix is rewritten — a plain
         ``str.replace`` would also mangle any later ``workspace``
-        segment inside the path.
+        segment inside the path. On native, the local mirror of the
+        repository is refreshed first (see ``config.refresh_mirror``).
         """
         if path.startswith("/workspace") and not os.path.exists("/workspace"):
+            refresh_mirror(path)
             return self.workspace_root + path[len("/workspace") :]
         return path
+
+    def _exists_in_workspace(
+        self, container_path: str, host_path: str
+    ) -> bool:
+        """Return True when a path exists where the repositories live.
+
+        On native, the repositories are on the machine, so the check runs
+        in the container. On qemu, the host check is quicker.
+        """
+        if is_native():
+            return execute_command(
+                ["test", "-e", container_path], use_docker=True
+            ).success
+        return os.path.exists(host_path)
 
     def _to_container_path(self, path: str) -> str:
         """Translate host path to container path if necessary."""
@@ -465,8 +482,11 @@ class ScriptedOperations:
         # ------------------------------------------------------------
         self._ensure_container_healthy()
 
-        # Check if already exists (check on host for speed)
-        if os.path.exists(os.path.join(host_repo_path, ".git")):
+        # Check if already exists (on the host for qemu, for speed; in
+        # the container for native, where the repository lives)
+        if self._exists_in_workspace(
+            f"{container_repo_path}/.git", os.path.join(host_repo_path, ".git")
+        ):
             logger.info(f"Repository {name} already exists, resetting...")
             # STRATEGIC HARDENING (dasel regression, 2026-07-01): a
             # previous run's LLM may have authored broken files (e.g. a
@@ -558,7 +578,9 @@ class ScriptedOperations:
 
         # Configure git safe.directory to prevent "dubious ownership" errors
         # This is needed because the workspace is mounted from host
-        if result.success or os.path.exists(host_repo_path):
+        if result.success or self._exists_in_workspace(
+            container_repo_path, host_repo_path
+        ):
             safe_dir_cmd = (
                 f"git config --global --add safe.directory "
                 f"{container_repo_path}"

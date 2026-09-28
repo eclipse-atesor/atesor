@@ -18,7 +18,7 @@ throughout the Atesor AI system.
 import os
 from pathlib import Path
 
-from .target import NATIVE, target_name_from_env
+from .target import NATIVE, is_native, target_name_from_env
 
 
 def is_running_in_docker() -> bool:
@@ -182,10 +182,37 @@ def to_host_path(path: str) -> str:
     Returns:
         The equivalent host path, or ``path`` unchanged when it is not
         a container path (or when we ARE running inside the container).
+
+    Raises:
+        SandboxUnavailableError: On native, if the mirror copy fails.
     """
     if path.startswith("/workspace") and not os.path.exists("/workspace"):
+        refresh_mirror(path)
         return path.replace("/workspace", WORKSPACE_ROOT, 1)
     return path
+
+
+def refresh_mirror(path: str) -> None:
+    """Refresh the local copy of the repository that a path is in.
+
+    Only the native target has this copy (the mirror), because only
+    there the repositories live on another machine. On qemu, and for a
+    path outside ``/workspace/repos/<repo>``, the call does nothing.
+
+    Args:
+        path: A container path, for example ``/workspace/repos/zlib/x.c``.
+
+    Raises:
+        SandboxUnavailableError: If the mirror copy fails.
+    """
+    if not is_native():
+        return
+    # src.mirror imports this module, so this import waits for a call.
+    from . import mirror
+
+    repo = mirror.repo_of(path)
+    if repo:
+        mirror.pull(repo)
 
 
 __all__ = [
@@ -207,6 +234,7 @@ __all__ = [
     "LOGS_DIR",
     "PACKAGES_DIR",
     "to_host_path",
+    "refresh_mirror",
     "CONTAINER_NAME",
     "IMAGE_NAME",
     "_IN_DOCKER",

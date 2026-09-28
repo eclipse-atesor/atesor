@@ -10,6 +10,7 @@ Usage:
   python batch_test.py --list full                # run full catalog
   python batch_test.py --list full anew gron      # filter by name
   python batch_test.py --list path/to/custom.json # absolute / relative path
+  python batch_test.py --target native --platform debian  # your machine
 """
 
 import argparse
@@ -45,6 +46,9 @@ from src.platforms import PROFILES  # noqa: E402
 # None on exotic platforms, so fall back to a conservative 2.
 _MAX_AVAILABLE_WORKERS = os.cpu_count() or 2
 MAX_WORKERS = _MAX_AVAILABLE_WORKERS
+# On native, all workers share the machine, so its cores and memory set
+# the default: each worker gets one core and 4 GiB of memory.
+_NATIVE_GIB_PER_WORKER = 4
 # RLock so a thread that already holds the lock (e.g. a future _emit caller
 # inside a critical section) cannot self-deadlock.
 _print_lock = threading.RLock()
@@ -271,6 +275,49 @@ def _populate_container_pool(n: int) -> None:
         _container_pool.put(f"{_BASE_CONTAINER}-w{i + 1}")
 
 
+def _native_default_workers(cores: int, mem_gib: int) -> int:
+    """Return the default worker count for the native machine.
+
+    Args:
+        cores: The core count of the machine.
+        mem_gib: The memory of the machine, in whole GiB.
+
+    Returns:
+        ``max(1, min(cores, mem_gib // 4))``.
+    """
+    return max(1, min(cores, mem_gib // _NATIVE_GIB_PER_WORKER))
+
+
+def _read_machine_resources() -> tuple[str, int, int]:
+    """Read the host name, the cores and the memory of the machine.
+
+    One ssh call reads all three values, before any worker starts.
+
+    Returns:
+        The host name, the core count and the memory in whole GiB.
+
+    Raises:
+        RuntimeError: If the call fails or prints something else. A
+            transport error gives ``SandboxUnavailableError``, which is
+            a ``RuntimeError``.
+        subprocess.TimeoutExpired: If the call takes longer than 30 s.
+    """
+    result = sandbox.run_raw(
+        ["sh", "-c", "uname -n && nproc && grep '^MemTotal:' /proc/meminfo"],
+        timeout=30,
+    )
+    match = re.fullmatch(
+        r"(\S+)\n(\d+)\nMemTotal:\s+(\d+) kB\n?", result.stdout or ""
+    )
+    if result.returncode != 0 or not match:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"exit {result.returncode}: {target.redact(detail)}"
+        )
+    name, cores, mem_kib = match.groups()
+    return name, int(cores), int(mem_kib) // (1024 * 1024)
+
+
 # ----------------------------------------------------------------------------
 # Package-list loading
 # ----------------------------------------------------------------------------
@@ -410,6 +457,16 @@ def _version_lt(current: str, minimum: str) -> bool:
     return current_parsed < minimum_parsed
 
 
+def _target_args() -> list[str]:
+    """Return the ``--target`` flag for each ``main.py`` call.
+
+    On native, each call gets ``--target native``, so a child cannot
+    take another target from its own ``.env``. QEMU calls keep today's
+    argv. The environment gives them ATESOR_TARGET.
+    """
+    return ["--target", target.NATIVE] if target.is_native() else []
+
+
 def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
     """Run ``main.py --setup-only`` for a specific worker container."""
     cmd = [
@@ -421,6 +478,7 @@ def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
         "--container",
         container_name,
     ]
+    cmd.extend(_target_args())
     if rebuild:
         cmd.append("--rebuild")
     if _STREAM_SETUP:
@@ -709,6 +767,7 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
             ]
             if PLATFORM in {"alpine", "debian", "ubuntu"}:
                 cmd.extend(["--platform", PLATFORM])
+            cmd.extend(_target_args())
             if _PACKAGE_BUILDS:
                 cmd.append("--package")
 
@@ -792,12 +851,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=_MAX_AVAILABLE_WORKERS,
+        default=None,
         metavar="N",
         help=(
             f"Number of parallel worker containers. Must be in "
             f"1..{_MAX_AVAILABLE_WORKERS} (host CPU count). "
-            f"Default: {_MAX_AVAILABLE_WORKERS}."
+            f"Default: {_MAX_AVAILABLE_WORKERS}. On native, the limit is "
+            f"the core count of the machine, and the default is "
+            f"max(1, min(cores, GiB of memory // "
+            f"{_NATIVE_GIB_PER_WORKER}))."
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        choices=target.TARGETS,
+        default=None,
+        help=(
+            "Execution target of every main.py run. Overrides "
+            "ATESOR_TARGET, as in main.py. native runs the builds on the "
+            "riscv64 machine that .env names, for local runs. "
+            "Default: ATESOR_TARGET, else qemu."
         ),
     )
     parser.add_argument(
@@ -888,25 +961,55 @@ def main() -> int:
         # env and module state in sync so child processes agree with us.
         os.environ["ATESOR_PLATFORM"] = PLATFORM
 
+    # The --target flag wins over .env, as in main.py.
+    if args.target:
+        os.environ["ATESOR_TARGET"] = args.target
     # .env gives the target and the SSH settings to src.target. It loads
     # after the platform choice, so it cannot change the batch platform.
     load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+    target.reset_target_cache()
 
     global MAX_WORKERS
-    if args.workers < 1:
+    machine = ""
+    if target.is_native():
+        try:
+            name, cores, mem_gib = _read_machine_resources()
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(
+                f"[ERROR] Cannot read the cores and memory of "
+                f"{target.machine_label()}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "[ERROR] Check the machine with: "
+                "python3 main.py --target native --preflight",
+                file=sys.stderr,
+            )
+            return 1
+        target.set_machine_name(name)
+        machine = f"{target.machine_label()}, {cores} cores, {mem_gib} GiB"
+        limit = cores
+        limit_text = f"the {cores} cores of {target.machine_label()}"
+        workers = _native_default_workers(cores, mem_gib)
+    else:
+        limit = _MAX_AVAILABLE_WORKERS
+        limit_text = f"available CPU count ({_MAX_AVAILABLE_WORKERS})"
+        workers = _MAX_AVAILABLE_WORKERS
+    if args.workers is not None:
+        workers = args.workers
+    if workers < 1:
         print(
-            f"[ERROR] --workers must be >= 1 (got {args.workers}).",
+            f"[ERROR] --workers must be >= 1 (got {workers}).",
             file=sys.stderr,
         )
         return 2
-    if args.workers > _MAX_AVAILABLE_WORKERS:
+    if workers > limit:
         print(
-            f"[ERROR] --workers={args.workers} exceeds available CPU "
-            f"count ({_MAX_AVAILABLE_WORKERS}).",
+            f"[ERROR] --workers={workers} exceeds {limit_text}.",
             file=sys.stderr,
         )
         return 2
-    MAX_WORKERS = args.workers
+    MAX_WORKERS = workers
     _populate_container_pool(MAX_WORKERS)
 
     global _PACKAGE_BUILDS
@@ -1027,6 +1130,9 @@ def main() -> int:
         ),
         ("Logs", logs_disp),
     ]
+    if machine:
+        # After the Platform row.
+        rows[5:5] = [("Target", "native"), ("Machine", machine)]
     if _LIST_DESCRIPTION:
         rows.insert(2, ("Desc", _LIST_DESCRIPTION))
     title = "ATESOR AI - RISC-V PORTING AGENT "

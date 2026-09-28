@@ -881,6 +881,18 @@ class TestExecuteCommandNative(unittest.TestCase):
         self.assertEqual(1, res.exit_code)
         self.assertEqual("Container 'box' is not running", res.stderr)
 
+    def test_command_marks_the_mirror_stale(self) -> None:
+        """Any native command can change the tree, even a failed one."""
+        with (
+            mock.patch("src.sandbox.subprocess.run") as run,
+            mock.patch("src.mirror.mark_stale") as stale,
+        ):
+            run.return_value = SimpleNamespace(
+                returncode=2, stdout="", stderr="make: *** Error 2"
+            )
+            execute_command("make -j4")
+        stale.assert_called_once_with()
+
     def test_dropped_connection_escalates(self) -> None:
         """A transport error raises, so the fixer never sees it."""
         with mock.patch("src.sandbox.subprocess.run") as run:

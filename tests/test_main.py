@@ -1183,6 +1183,22 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("Build did not complete successfully", report)
         self.assertIn("Check dependencies", report)
 
+    def test_report_names_the_target_under_the_status(self) -> None:
+        """The line under Status says which target ran the build."""
+        state = {"repo_name": "demo", "build_status": "SUCCESS"}
+
+        with mock.patch.object(main, "is_native", return_value=False):
+            qemu_report = main.generate_detailed_report(state)
+        with mock.patch.object(main, "is_native", return_value=True):
+            native_report = main.generate_detailed_report(state)
+
+        self.assertIn(
+            "**Status**: SUCCESS  \n**Target**: qemu  \n", qemu_report
+        )
+        self.assertIn(
+            "**Status**: SUCCESS  \n**Target**: native  \n", native_report
+        )
+
     def test_save_porting_outputs_writes_state_recipe_report_and_patches(
         self,
     ) -> None:
@@ -1416,6 +1432,71 @@ class TestRunAgent(_MainTestCase):
         package_build.assert_called_once()
         self.assertEqual(
             "debian",
+            package_build.call_args.kwargs["platform_name"],
+        )
+
+    def test_run_agent_native_packaging_copies_the_tree_first(self) -> None:
+        """On native, a forced mirror copy comes before the zip."""
+        order = []
+        package_build = mock.MagicMock(
+            side_effect=lambda **kwargs: order.append("zip") or "pkg.zip"
+        )
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            yield {"Finish": state}
+
+        fake_app = _FakeApp(stream_factory)
+        fake_packager = SimpleNamespace(package_build=package_build)
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(fake_app),
+            mock.patch.dict(sys.modules, {"src.packager": fake_packager}),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile("debian"),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            mock.patch.object(main, "is_native", return_value=True),
+            mock.patch(
+                "src.mirror.pull",
+                side_effect=lambda repo, force: order.append(
+                    ("pull", repo, force)
+                ),
+            ),
+        ):
+            code = main.run_agent(_REPO_URL, package=True)
+
+        self.assertEqual(0, code)
+        self.assertEqual([("pull", "project", True), "zip"], order)
+
+    def test_run_agent_native_zip_name_ends_in_native(self) -> None:
+        """On native, the zip platform name is <profile>-native."""
+        package_build = mock.MagicMock(return_value="pkg.zip")
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            yield {"Finish": state}
+
+        fake_app = _FakeApp(stream_factory)
+        fake_packager = SimpleNamespace(package_build=package_build)
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(fake_app),
+            mock.patch.dict(sys.modules, {"src.packager": fake_packager}),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile("debian"),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            mock.patch.object(main, "is_native", return_value=True),
+            mock.patch("src.mirror.pull"),
+        ):
+            code = main.run_agent(_REPO_URL, package=True)
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "debian-native",
             package_build.call_args.kwargs["platform_name"],
         )
 
@@ -1982,6 +2063,22 @@ class TestNativeEnvironment(_MainTestCase):
         rmi.assert_called_once()
         self.assertIn("Container cleaned up", output.getvalue())
         self.assertIn("not found", output.getvalue())
+
+    def test_remove_native_repo_runs_rm_in_the_container(self) -> None:
+        """Only a plain repository name reaches rm -rf in the container."""
+        with (
+            mock.patch("src.platforms.get_container_name", return_value="box"),
+            mock.patch.object(
+                main.sandbox, "run_in_container", return_value=_proc()
+            ) as run,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            main.remove_native_repo("cJSON")
+            main.remove_native_repo("..")
+            main.remove_native_repo("a/b")
+        run.assert_called_once_with(
+            "box", ["rm", "-rf", "--", "/workspace/repos/cJSON"], timeout=300
+        )
 
     def test_clean_repos_needs_the_work_directory(self) -> None:
         """The machine repos go only after rungs 2 to 10 pass."""

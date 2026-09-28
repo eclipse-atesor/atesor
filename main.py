@@ -1110,11 +1110,46 @@ def clean_native_repos() -> None:
         )
 
 
+def remove_native_repo(repo_name: str) -> None:
+    """Remove one repository tree from the native work directory.
+
+    The run is over, so the tree on the machine is no longer needed. The
+    local mirror keeps its copy. A failure is logged, and the command
+    still ends.
+
+    Args:
+        repo_name: The repository name, as in ``/workspace/repos/<name>``.
+    """
+    from src import mirror
+    from src.platforms import get_container_name
+
+    path = f"/workspace/repos/{repo_name}"
+    # Never let a name such as ".." widen the removal.
+    if mirror.repo_of(path) != repo_name:
+        logger.warning(f"Not removing {path}: unsafe repository name")
+        return
+    try:
+        result = sandbox.run_in_container(
+            get_container_name(), ["rm", "-rf", "--", path], timeout=300
+        )
+    except Exception as exc:  # the cleanup must never hide the exit reason
+        logger.warning(f"Could not remove {path} on the machine: {exc}")
+        return
+    if result.returncode == 0:
+        print(colored(f"Removed {path} on {machine_label()}", "cyan"))
+    else:
+        logger.warning(
+            f"Could not remove {path} on the machine: "
+            f"{redact(result.stderr.strip())}"
+        )
+
+
 def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
     """Set up the native container, run the command, then stop it.
 
-    The container stops when the command ends: after a port, a failure,
-    an escalation, an exception or --setup-only.
+    After a port, the repository tree on the machine is removed. Then
+    the container stops. Both happen after a port, a failure, an
+    escalation or an exception. --setup-only only stops the container.
 
     Args:
         args: The parsed command-line arguments.
@@ -1123,6 +1158,9 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
     Returns:
         The exit code of the command.
     """
+    from src.state import derive_repo_name
+
+    ported = False
     try:
         if not setup_native_environment():
             return 1
@@ -1132,6 +1170,7 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
                 message = "\nRebuild complete!"
             print(colored(message, "green"))
             return 0
+        ported = True
         return run_agent(
             repo_url=args.repo,
             max_attempts=args.max_attempts,
@@ -1139,6 +1178,8 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
             package=args.package,
         )
     finally:
+        if ported:
+            remove_native_repo(derive_repo_name(args.repo))
         stop_native_container()
 
 
@@ -1200,11 +1241,13 @@ def generate_detailed_report(state: dict) -> str:
     tokens = (
         f"{state.get('api_tokens_in', 0)}/{state.get('api_tokens_out', 0)}"
     )
+    target_name = "native" if is_native() else "qemu"
     report = f"""# RISC-V Porting Report: {state.get("repo_name", "Unknown")}
 
 ## Executive Summary
 
 **Status**: {state.get("build_status", "UNKNOWN")}\u0020\u0020
+**Target**: {target_name}\u0020\u0020
 **Repository**: {state.get("repo_url", "N/A")}\u0020\u0020
 **Generated**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -1551,12 +1594,23 @@ def run_agent(
                     "batch_logs",
                     f"{final_state.repo_name}.log",
                 )
+                # A native zip ends in -<profile>-native.zip, so it never
+                # passes for a QEMU result.
+                platform_name = profile.name
+                if is_native():
+                    platform_name += "-native"
                 try:
+                    if is_native():
+                        # The build tree is on the machine. Copy its
+                        # final state into the mirror before the zip.
+                        from src import mirror
+
+                        mirror.pull(final_state.repo_name, force=True)
                     zip_path = package_build(
                         repo_name=final_state.repo_name,
                         repo_path=repo_path,
                         recipe_path=recipe_path,
-                        platform_name=profile.name,
+                        platform_name=platform_name,
                         packages_dir=PACKAGES_DIR,
                         repo_url=repo_url,
                         agent_log_path=agent_log_path,

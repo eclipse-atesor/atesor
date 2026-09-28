@@ -606,6 +606,7 @@ class TestMainPreflightWiring(unittest.TestCase):
             "stop_native_container": None,
             "cleanup_native_container": None,
             "clean_native_repos": None,
+            "remove_native_repo": None,
         }
         canned.update(values or {})
         mocks = {}
@@ -678,8 +679,9 @@ class TestMainPreflightWiring(unittest.TestCase):
     def test_repo_run_checks_the_cache_before_the_ladder(self) -> None:
         """Rungs 2 to 11 run after the fast path and before the keys.
 
-        Then the native container starts, the agent runs, and the
-        container stops. The local Docker setup never runs.
+        Then the native container starts, the agent runs, the tree on
+        the machine goes, and the container stops. The local Docker
+        setup never runs.
         """
         code, calls, mocks, _ = self._run_main(["--repo", _URL], self.env)
         self.assertEqual(0, code)
@@ -692,6 +694,7 @@ class TestMainPreflightWiring(unittest.TestCase):
                 ("check_keys",),
                 ("setup_native_environment",),
                 ("run_agent",),
+                ("remove_native_repo",),
                 ("stop_native_container",),
             ],
             order,
@@ -758,6 +761,19 @@ class TestMainPreflightWiring(unittest.TestCase):
                 values={"run_agent": RuntimeError("agent crashed")},
             )
         self.assertEqual(("stop_native_container",), self.calls[-1])
+
+    def test_native_port_removes_the_tree_after_a_crash(self) -> None:
+        """The tree on the machine goes, then the container stops."""
+        with self.assertRaises(RuntimeError):
+            self._run_main(
+                ["--repo", _URL],
+                self.env,
+                values={"run_agent": RuntimeError("agent crashed")},
+            )
+        self.assertEqual(
+            [("remove_native_repo",), ("stop_native_container",)],
+            self.calls[-2:],
+        )
 
     def test_native_clean_workspace_cleans_the_machine_repos(self) -> None:
         """Choosing repos/ also cleans repos/ on the machine."""
