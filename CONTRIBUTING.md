@@ -32,7 +32,13 @@ git clone https://github.com/akifejaz/atesor-ai
 cd atesor-ai
 pip install -r requirements.txt
 cp .env-example .env   # add your API key
+sh .github/scripts/setup_git_merge_driver.sh
 ```
+
+The last command sets up a merge driver in your clone only. With it, git
+merges `data/recipe_cache.json` by meaning (the newest recipe wins) instead
+of line by line. Without it, git stops at a conflict for that file; see
+`.gitattributes` for the manual steps.
 
 You need Docker with RISC-V emulation enabled on non-RISC-V hosts:
 
