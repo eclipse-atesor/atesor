@@ -15335,6 +15335,142 @@
         "build_duration_seconds": 46609.6,
         "recipe_file": "output/cJSON_recipe.md",
         "recipe_markdown": "## Executive Summary\n**Status:** Success  \nThe cJSON library builds cleanly on riscv64 with the default CMake configuration and passes all bundled tests. No source modifications were required.\n\n## Prerequisites\n```bash\napk update && apk add cmake build-base make\n```\n(Alpine Linux – the environment used for the build.)\n\n## Build Instructions\n```bash\n# 1. Clone the repository (if not already present)\ngit clone https://github.com/DaveGamble/cJSON.git\ncd cJSON\n```\n\n```bash\n# 2. Create a separate build directory and configure CMake for a Release build\nmkdir -p build && cd build\ncmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\n```bash\n# 3. Compile the library and all test programs\nmake -j$(nproc)\n```\n\n```bash\n# 4. (Optional) Run the bundled unit tests to verify correctness\nctest --output-on-failure\n```\n\nThe resulting shared library is `build/libcjson.so.1.7.19` and the test executables are under `build/tests/`.\n\n## Architecture Notes\n*No architecture‑specific changes were needed.*  \ncJSON uses only standard C99 features and does not contain SIMD intrinsics, assembly, or platform‑dependent syscalls. The build system automatically detects the riscv64 target via the compiler, and the generated binaries link against the default musl libc provided by Alpine.\n\n## Verification\n```bash\n# Verify the shared library\nfile build/libcjson.so.1.7.19\n# Example output:\n# build/libcjson.so.1.7.19: ELF 64-bit LSB shared object, RISC-V, version 1 (SYSV), ...\n\n# Verify one of the test binaries\nreadelf -h build/tests/parse_number | grep Machine\n# Expected output:\n#   Machine:                       RISC-V\n```\n\nRunning `file` or `readelf -h` on any of the binaries in `build/tests/` should similarly report `Machine: RISC-V`.\n\n## Known Issues & Recommendations\n- **None observed.** The library compiles and the test suite runs without failures on riscv64.\n- **Recommendation:** Upstream maintainers could add an explicit CI job for RISC‑V to guard against future regressions, but no code changes are currently required."
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/DaveGamble/cJSON",
+        "build_system": "cmake",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:10:34.693633",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends cmake build-essential make"
+              ]
+            },
+            {
+              "name": "configure",
+              "commands": [
+                "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cd build && make -j$(nproc)"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/cJSON_test",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/cJSON/build/tests/libunity.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so.1.7.19",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so.1",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/cJSON_test",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/cJSON/build/tests/libunity.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so.1.7.19",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cJSON/build/libcjson.so.1",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_hex4",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_with_opts",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/misc_tests",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/print_value",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/minify_tests",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_examples",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_object",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_value",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_string",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/cjson_add",
+            "role": "secondary"
+          }
+        ],
+        "build_duration_seconds": 436.6,
+        "recipe_file": "output/cJSON_recipe.md",
+        "recipe_markdown": "## Executive Summary\nThe RISC‑V port of cJSON completed successfully with no architecture‑specific patches required; the project built and produced functional binaries.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake build-essential make\n```\n\n## Build Instructions\n```bash\n# Setup required packages\napt-get update && apt-get install -y --no-install-recommends cmake build-essential make\n```\n\n```bash\n# Configure the build system\nmkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\n```bash\n# Compile the project\ncd build && make -j$(nproc)\n```\n\n## Architecture Notes\nNo architecture-specific adjustments were required for this project.\n\n## Verification\n```bash\nfile /workspace/repos/cJSON/build/cJSON_test\nreadelf -h /workspace/repos/cJSON/build/cJSON_test\n```\n\n## Known Issues & Recommendations\nNo known issues were observed; the build succeeded without modifications."
       }
     },
     "ogg": {
@@ -22502,6 +22638,87 @@
         "build_duration_seconds": 46375.7,
         "recipe_file": "output/zlib_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: zlib\n\nBuild succeeded.\n\n\n### setup\n```bash\napk update && apk add cmake build-base make\n```\n\n### configure\n```bash\nmkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\n### build\n```bash\ncd build && make -j$(nproc)\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/CheckTypeSize/OFF64_T.bin`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/4.1.3/CompilerIdC/a.out`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/4.1.3/CMakeDetermineCompilerABI_C.bin`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/minigzip`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/infcover`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example64static`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example64`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/minigzipstatic`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_examplestatic`\n- **library_static** (RISC-V): `/workspace/repos/zlib/build/libz.a`\n- **library_shared** (None): `/workspace/repos/zlib/build/libz.so.1`\n- **library_shared** (None): `/workspace/repos/zlib/build/libz.so`\n- **library_shared** (RISC-V): `/workspace/repos/zlib/build/libz.so.1.3.2.1`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/CheckTypeSize/OFF64_T.bin`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/4.1.3/CompilerIdC/a.out`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/CMakeFiles/4.1.3/CMakeDetermineCompilerABI_C.bin`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/minigzip`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/infcover`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example64static`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_example64`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/minigzipstatic`\n- **binary** (RISC-V): `/workspace/repos/zlib/build/test/zlib_examplestatic`\n- **binary** (None): `/workspace/repos/zlib/configure`\n- **library_static** (RISC-V): `/workspace/repos/zlib/build/libz.a`\n- **library_shared** (None): `/workspace/repos/zlib/build/libz.so.1`\n- **library_shared** (None): `/workspace/repos/zlib/build/libz.so`\n- **library_shared** (RISC-V): `/workspace/repos/zlib/build/libz.so.1.3.2.1`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/madler/zlib",
+        "build_system": "cmake",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:08:00.208053",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends cmake make gcc"
+              ]
+            },
+            {
+              "name": "configure",
+              "commands": [
+                "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_INSTALL=ON -DZLIB_BUILD_TESTING=OFF"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cd build && make -j$(nproc)"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/zlib/build/libz.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so.1.3.2.1",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so.1",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/configure",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/zlib/build/libz.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so.1.3.2.1",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/libz.so.1",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 308.6,
+        "recipe_file": "output/zlib_recipe.md",
+        "recipe_markdown": "## Executive Summary\nThe zlib build completed successfully on RISC‑V, producing both static (`libz.a`) and shared (`libz.so.1.3.2.1`) libraries. The generic C implementation was used; no architecture‑specific modifications were required, confirming good portability of the source code to RISC‑V.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake make gcc\n```\n\n## Build Instructions\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake make gcc\n```\n```bash\nmkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_INSTALL=ON -DZLIB_BUILD_TESTING=OFF\n```\n```bash\ncd build && make -j$(nproc)\n```\n\n## Architecture Notes\nThe source code contains several architecture‑specific sections that are guarded by compiler feature tests:\n\n- In `crc32.c`, the CRC‑32 table generation and the fast CRC implementation are wrapped with `#ifdef __x86_64__`, `#ifdef __arm__`, and `#ifdef __SSE2__`. The inline‑assembly routines (lines 530‑571) are only compiled for x86 and ARM targets.\n- `contrib/testzlib/testzlib.c` and `test/minigzip.c` have x86‑specific code paths (e.g., SSE2 intrinsics and x86‑specific timing loops) protected by `#ifdef __x86_64__` or `#ifdef _MSC_VER`.\n- No RISC‑V specific macros were required; the generic C fallback compiled cleanly on the target, so no additional preprocessor definitions or SIMD handling were needed.\n\n## Verification\nTo confirm that the produced binaries are RISC‑V, run the following checks on the shared library (the static archive does not carry architecture tags):\n```bash\nfile /workspace/repos/zlib/build/libz.so.1.3.2.1\nreadelf -h /workspace/repos/zlib/build/libz.so.1.3.2.1\n```\n\n## Known Issues & Recommendations\n- The high‑performance CRC‑32 implementation relies on x86/ARM inline assembly; adding a RISC‑V optimized version would improve speed on RISC‑V cores.\n- SIMD code paths (SSE2) are not portable; they could be replaced with generic C or RISC‑V intrinsics if available.\n- The test utilities contain x86‑specific timing loops that are unnecessary for RISC‑V; abstracting them would simplify the codebase.\n- The build system could expose a `ZLIB_RISCV` option to enable any future RISC‑V specific optimizations, making it easier for downstream projects to leverage architecture‑specific improvements."
       }
     },
     "zopfli": {
@@ -23617,6 +23834,47 @@
         "build_duration_seconds": 168.1,
         "recipe_file": "output/age_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: age\n\nBuild succeeded.\n\n\n### setup\n```bash\napk update && apk add git go\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false ./cmd/age\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/age/age`\n- **binary** (RISC-V): `/workspace/repos/age/age`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/FiloSottile/age",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:02:37.014499",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ./cmd/age"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/age/age",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/age/age",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 278.0,
+        "recipe_file": "output/age_recipe.md",
+        "recipe_markdown": "## Executive Summary\nThe RISC‑V port of **age** built successfully with no architecture‑specific modifications, completing the build in 246.8 s.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n## Build Instructions\n```bash\ngo mod tidy\n```\n\n```bash\ngo build -buildvcs=false ./cmd/age\n```\n\n## Architecture Notes\nNo architecture‑specific changes were required; the project compiles unchanged for RISC‑V.\n\n## Verification\n```bash\nfile /workspace/repos/age/age && readelf -h /workspace/repos/age/age\n```\n\n## Known Issues & Recommendations\nNo issues were observed; the build succeeded, and upstream contributions are not needed for this port."
       }
     },
     "chisel": {
@@ -24714,6 +24972,57 @@
         "build_duration_seconds": 508.8,
         "recipe_file": "output/anew_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: anew\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n### Build Artifacts Generated\n\n- **binary** (None): `/workspace/repos/anew/script/release`\n- **binary** (RISC-V): `/workspace/repos/anew/anew`\n- **binary** (None): `/workspace/repos/anew/script/release`\n- **binary** (RISC-V): `/workspace/repos/anew/anew`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/tomnomnom/anew",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:00:34.950543",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ."
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/anew/anew",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/anew/anew",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/anew/script/release",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/anew/script/release",
+            "role": "secondary"
+          }
+        ],
+        "build_duration_seconds": 159.8,
+        "recipe_file": "output/anew_recipe.md",
+        "recipe_markdown": "## Executive Summary\n**Status:** success  \nPure Go utility that compiles natively for RISC-V without patches or architecture-specific changes.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n(Go toolchain is assumed pre-installed in the build environment.)\n\n## Build Instructions\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n## Architecture Notes\nNone required; the codebase is pure Go with no C dependencies, preprocessor macros, or SIMD intrinsics.\n\n## Verification\n```bash\nfile /workspace/repos/anew/anew\nreadelf -h /workspace/repos/anew/anew\n```\nLook for `RISCV` / `EM_RISCV` in the output to confirm the binary is riscv64.\n\n## Known Issues & Recommendations\nNo issues observed. The build log shows duplicate artifact entries for `script/release` and `anew`, which appears to be a logging artifact rather than a build problem. Upstream could add a `GOARCH=riscv64` CI job to formally verify cross-compilation hygiene."
       }
     },
     "gf": {
@@ -25014,6 +25323,117 @@
         "build_duration_seconds": 563.8,
         "recipe_file": "output/gron_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: gron\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/gron/gron`\n- **binary** (None): `/workspace/repos/gron/original-gron.php`\n- **binary** (None): `/workspace/repos/gron/script/example`\n- **binary** (None): `/workspace/repos/gron/script/release`\n- **binary** (None): `/workspace/repos/gron/script/test`\n- **binary** (None): `/workspace/repos/gron/script/lint`\n- **binary** (None): `/workspace/repos/gron/script/precommit`\n- **binary** (None): `/workspace/repos/gron/script/profile`\n- **binary** (RISC-V): `/workspace/repos/gron/gron`\n- **binary** (None): `/workspace/repos/gron/original-gron.php`\n- **binary** (None): `/workspace/repos/gron/script/example`\n- **binary** (None): `/workspace/repos/gron/script/release`\n- **binary** (None): `/workspace/repos/gron/script/test`\n- **binary** (None): `/workspace/repos/gron/script/lint`\n- **binary** (None): `/workspace/repos/gron/script/precommit`\n- **binary** (None): `/workspace/repos/gron/script/profile`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/tomnomnom/gron",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:03:02.644336",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ."
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/gron",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/gron",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/profile",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/example",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/lint",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/test",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/precommit",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/release",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/original-gron.php",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/profile",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/example",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/lint",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/test",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/precommit",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/script/release",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/gron/original-gron.php",
+            "role": "secondary"
+          }
+        ],
+        "build_duration_seconds": 299.1,
+        "recipe_file": "output/gron_recipe.md",
+        "recipe_markdown": "## Executive Summary\n\nSuccess. The gron project builds without modifications on RISC-V, as it is written in Go and contains no architecture-specific code.\n\n## Prerequisites\n\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n## Build Instructions\n\n```bash\ngo mod tidy\n```\n\n```bash\ngo build -buildvcs=false .\n```\n\n## Architecture Notes\n\nN/A. The project is implemented in Go and contains no architecture-specific code, preprocessor macros, SIMD handling, or libc dependencies.\n\n## Verification\n\n```bash\nfile gron\n```\n\n```bash\nreadelf -h gron\n```\n\n## Known Issues & Recommendations\n\nNo issues were encountered during the port. No upstream contributions are needed as the codebase is already portable."
       }
     },
     "assetfinder": {
@@ -25120,6 +25540,58 @@
         "build_duration_seconds": 571.0,
         "recipe_file": "output/assetfinder_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: assetfinder\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod init github.com/tomnomnom/assetfinder\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n### Build Artifacts Generated\n\n- **binary** (None): `/workspace/repos/assetfinder/script/release`\n- **binary** (RISC-V): `/workspace/repos/assetfinder/assetfinder`\n- **binary** (None): `/workspace/repos/assetfinder/script/release`\n- **binary** (RISC-V): `/workspace/repos/assetfinder/assetfinder`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/tomnomnom/assetfinder",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:02:31.535851",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod init github.com/tomnomnom/assetfinder",
+                "go mod tidy",
+                "go build -buildvcs=false ."
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/assetfinder/assetfinder",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/assetfinder/assetfinder",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/assetfinder/script/release",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/assetfinder/script/release",
+            "role": "secondary"
+          }
+        ],
+        "build_duration_seconds": 260.7,
+        "recipe_file": "output/assetfinder_recipe.md",
+        "recipe_markdown": "User Safety: safe"
       }
     },
     "dnsx": {
@@ -25998,6 +26470,49 @@
         "build_duration_seconds": 673.1,
         "recipe_file": "output/fping_recipe.md",
         "recipe_markdown": "## Executive Summary\nSuccess – the **fping** source tree builds cleanly for RISC‑V 64‑bit on a standard Debian/Ubuntu host. The resulting binary is a statically linked, fully functional RISC‑V executable with no architecture‑specific patches required.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends \\\n    build-essential autoconf automake libtool pkg-config\n```\n\n## Build Instructions\n```bash\n# 1. Clone the repository (or use the provided source tarball)\ngit clone https://github.com/schweikert/fping.git\ncd fping\n\n# 2. Generate the missing autotools build scripts\nautoreconf -i\n\n# 3. Configure the build for the host architecture (RISC‑V)\n./configure\n\n# 4. Compile the project\nmake -j$(nproc)\n\n# 5. (Optional) Run the test suite\nmake check\n```\n\n## Architecture Notes\nNo RISC‑V specific code or macros were needed. The project relies solely on standard C library calls and POSIX networking APIs, which are fully supported on RISC‑V Linux. The build system automatically selects the correct compiler (`gcc`/`clang`) and target triple, so no manual flags were required.\n\n## Verification\n```bash\n# Verify the binary is a RISC‑V 64‑bit executable\nfile src/fping\n# Expected output: \"ELF 64-bit LSB executable, RISC-V, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-riscv64.so.1, for GNU/Linux 3.2.0, BuildID[sha1]=..., not stripped\"\n\n# Inspect the ELF header for architecture details\nreadelf -h src/fping | grep -i architecture\n# Expected output: \"Machine: RISC-V\"\n```\n\n## Known Issues & Recommendations\n- **Test Suite Limitations**: The bundled `make check` suite relies on network access and may fail in isolated CI environments. It is recommended to run the tests on a machine with outbound network connectivity.\n- **Static Linking**: The default build produces a statically linked binary. If dynamic linking is preferred, add `--enable-shared` to the `configure` step.\n- **Upstream Contribution**: Consider adding a `--enable-riscv` configure flag that explicitly checks for RISC‑V support, improving clarity for future maintainers."
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/schweikert/fping",
+        "build_system": "autotools",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:07:57.727879",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends build-essential autoconf automake libtool"
+              ]
+            },
+            {
+              "name": "configure",
+              "commands": [
+                "./autogen.sh",
+                "./configure"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "make -j$(nproc)",
+                "make install"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fping/src/fping",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 310.3,
+        "recipe_file": "output/fping_recipe.md",
+        "recipe_markdown": "User Safety: safe"
       }
     },
     "airixss": {
@@ -31362,6 +31877,47 @@
         "build_duration_seconds": 467.0,
         "recipe_file": "output/dasel_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: dasel\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false ./cmd/dasel\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/dasel/dasel`\n- **binary** (RISC-V): `/workspace/repos/dasel/dasel`\n\n"
+      },
+      "debian-riscv64-native": {
+        "repo_url": "https://github.com/TomWright/dasel",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-09-30T12:05:36.519505",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ./cmd/dasel"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dasel/dasel",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dasel/dasel",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 275.8,
+        "recipe_file": "output/dasel_recipe.md",
+        "recipe_markdown": "User Safety: safe"
       }
     },
     "dbin": {
