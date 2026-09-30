@@ -326,7 +326,12 @@ def run_raw(
     """
     if not target.is_native():
         return subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=timeout
+            list(argv),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
     call = ExecCall(remote_argv(shlex.join(argv)), native=True)
     return run_call(call, timeout)
@@ -352,7 +357,12 @@ def run_in_container(
     if call.native:
         return run_call(call, timeout)
     return subprocess.run(
-        call.argv, capture_output=True, text=True, timeout=timeout
+        call.argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
     )
 
 
@@ -520,14 +530,22 @@ def build_image(
     Raises:
         SandboxUnavailableError: If the ssh connection fails.
     """
+    remote_timeout = max(1, int(timeout))
     podman = shlex.join(["podman", "build", "--pull=always", "-t", image])
-    script = _BUILD_PRELUDE + podman + ' -f "$ctx/Containerfile" "$ctx"'
+    timed_podman = (
+        f"timeout --kill-after=30s --signal=TERM {remote_timeout}s "
+        f"{podman}"
+    )
+    script = _BUILD_PRELUDE + timed_podman
+    script += ' -f "$ctx/Containerfile" "$ctx"'
     proc = subprocess.Popen(
         remote_argv(script),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
     timed_out = threading.Event()
@@ -537,7 +555,7 @@ def build_image(
         timed_out.set()
         proc.kill()
 
-    timer = threading.Timer(timeout, stop_build)
+    timer = threading.Timer(remote_timeout + 90, stop_build)
     timer.start()
     tail: Deque[str] = collections.deque(maxlen=40)
     try:
@@ -556,7 +574,7 @@ def build_image(
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    if timed_out.is_set():
+    if timed_out.is_set() or code in (124, 137):
         return BUILD_TIMED_OUT
     kind = transport_error(code, "\n".join(tail))
     if kind:
@@ -593,6 +611,8 @@ def _run(call: ExecCall, timeout: float) -> "subprocess.CompletedProcess[str]":
         call.argv,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         **call.run_kwargs(),
     )

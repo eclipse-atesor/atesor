@@ -56,6 +56,7 @@ class _BatchTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         self.bt = _load_batch_module()
+        self.bt._shutdown_event.clear()
         self.bt.BATCH_LOGS_DIR = str(self.tmp / "logs")
         self.bt._USE_COLOR = False
 
@@ -135,6 +136,27 @@ class TestMainPyArgv(_BatchTestCase):
             success, _, _ = self.bt.run_agent(_URL, "zlib")
         self.assertTrue(success)
         return popen.call_args.args[0]
+
+    def test_child_gets_the_kill_deadline(self) -> None:
+        """main.py learns when the batch kills it, to size its tests."""
+        proc = mock.MagicMock(pid=4242, returncode=0)
+        self.bt._populate_container_pool(1)
+        with (
+            mock.patch.object(
+                self.bt.subprocess, "Popen", return_value=proc
+            ) as popen,
+            mock.patch.object(self.bt.time, "time", return_value=5000.0),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.bt.run_agent(_URL, "zlib")
+
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            env["ATESOR_RUN_DEADLINE"],
+            str(5000 + self.bt._AGENT_TIMEOUT_SECONDS),
+        )
+        # The rest of the environment is inherited unchanged.
+        self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
 
     def test_qemu_argv_is_unchanged(self) -> None:
         """QEMU calls keep today's argv, with no --target."""
@@ -225,7 +247,14 @@ class TestBatchMain(_BatchTestCase):
             "ATESOR_SSH_HOST": _ALIAS,
         }
 
-    def _run(self, *args: str, resources=("rv-box", 4, 25), error=None):
+    def _run(
+        self,
+        *args: str,
+        resources=("rv-box", 4, 25),
+        error=None,
+        run_result=None,
+        signal_handler=None,
+    ):
         """Run main() with the machine, the workers and .env faked.
 
         Returns:
@@ -244,6 +273,10 @@ class TestBatchMain(_BatchTestCase):
             probe = mock.MagicMock(return_value=resources)
         else:
             probe = mock.MagicMock(side_effect=error)
+        if run_result is None:
+            run_result = self.bt.PackageRunResult("zlib", "PASS", "ok", 1.0)
+        if signal_handler is None:
+            signal_handler = mock.MagicMock()
         out, err = io.StringIO(), io.StringIO()
         argv = ["batch_test.py", "--list", str(self.list_path), *args]
         with (
@@ -253,8 +286,10 @@ class TestBatchMain(_BatchTestCase):
             mock.patch.object(
                 bt, "_refresh_worker_pool_if_needed", return_value=True
             ),
-            mock.patch.object(bt, "run_agent", return_value=(True, "ok", 1.0)),
-            mock.patch.object(bt, "_install_signal_handlers"),
+            mock.patch.object(bt, "run_agent", return_value=run_result),
+            mock.patch.object(
+                bt, "_install_signal_handlers", signal_handler
+            ),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
@@ -351,6 +386,74 @@ class TestBatchMain(_BatchTestCase):
 
         self.assertEqual(0, code)
         probe.assert_called_once()
+
+    def test_same_basename_repos_share_a_batch_lock(self) -> None:
+        """Repos cloned to the same directory cannot run concurrently."""
+        # derive_repo_name gives both "zlib": one clone directory.
+        lock_a = self.bt._repo_lock("https://github.com/madler/zlib")
+        lock_b = self.bt._repo_lock("https://github.com/someone/zlib")
+        # Generic basenames get an owner prefix, so these two clone to
+        # hetznercloud-cli and urfave-cli and may run side by side.
+        lock_c = self.bt._repo_lock("https://github.com/hetznercloud/cli")
+        lock_d = self.bt._repo_lock("https://github.com/urfave/cli")
+
+        self.assertIs(lock_a, lock_b)
+        self.assertIsNot(lock_c, lock_d)
+        self.assertIsNot(lock_a, lock_c)
+
+    def test_platform_flag_wins_over_invalid_env(self) -> None:
+        """An explicit --platform ignores a bad inherited env value."""
+        os.environ["ATESOR_PLATFORM"] = "bogus"
+        code, _, err, _ = self._run("--platform", "debian")
+
+        self.assertEqual(0, code)
+        self.assertEqual("", err)
+        self.assertEqual("debian", os.environ["ATESOR_PLATFORM"])
+
+    def test_invalid_env_platform_fails_without_flag(self) -> None:
+        """A bad env platform is reported only when no flag overrides it."""
+        self.env_file["ATESOR_PLATFORM"] = "bogus"
+        code, _, err, _ = self._run()
+
+        self.assertEqual(2, code)
+        self.assertIn("Unknown ATESOR_PLATFORM='bogus'", err)
+
+    def test_unverified_result_is_not_counted_as_pass(self) -> None:
+        """main.py exit 3 maps to UNVERIFIED and fails the batch gate."""
+        result = self.bt.PackageRunResult(
+            "zlib",
+            self.bt.STATUS_UNVERIFIED,
+            "no ELF verified",
+            1.0,
+            3,
+        )
+        code, out, _, _ = self._run(run_result=result)
+
+        self.assertEqual(1, code)
+        self.assertIn("UNVERIFIED 1", out)
+        self.assertIn("PASS 0", out)
+        self.assertIn("PASS RATE        0.0%", out)
+
+    def test_soft_stop_returns_130_and_skips_gate(self) -> None:
+        """A requested shutdown returns 130 even with no failed packages."""
+        result = self.bt.PackageRunResult(
+            "zlib",
+            self.bt.STATUS_SKIPPED,
+            "Skipped: shutdown requested",
+            0.0,
+        )
+
+        def mark_shutdown(_future_map):
+            self.bt._shutdown_event.set()
+
+        code, out, _, _ = self._run(
+            run_result=result,
+            signal_handler=mark_shutdown,
+        )
+
+        self.assertEqual(130, code)
+        self.assertIn("SKIPPED 1", out)
+        self.assertIn("TOTAL 0", out)
 
 
 if __name__ == "__main__":

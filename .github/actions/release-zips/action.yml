@@ -19,11 +19,12 @@ description: |
 
   Per-package, per-platform dedupe across all monthly releases: before
   uploading, any existing asset matching
-  `<package>-<YYYYMMDD>-<HHMMSS>-<platform>.zip` for the same
-  `<package>` and `<platform>` is deleted from every monthly release
-  (base + overflows), so each (package, platform) keeps exactly one
+  `<owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<platform>.zip` for the same
+  owner-repo stem and platform is deleted from every monthly release
+  (base + overflows), so each repository/platform keeps exactly one
   asset across the whole month. Different platforms
-  (e.g. `foo-*-alpine.zip` vs `foo-*-debian.zip`) are independent.
+  (e.g. `owner-foo-*-alpine.zip` vs `owner-foo-*-debian.zip`) are
+  independent.
 
   Race-safe: parallel shards may all see the active release at e.g.
   990 assets and each try to upload 50. If `gh release upload` fails
@@ -88,7 +89,7 @@ runs:
         # Release notes (shared by base + overflow releases).
         notes="**Atesor AI** is a LangGraph multi-agent system that autonomously ports x86/ARM packages to **RISC-V (riscv64)**. Each package below was cloned from upstream, built natively inside a riscv64 Docker sandbox (Alpine/musl or Debian/glibc), fixed where it broke, and packaged with a reproducible recipe."
         notes+=$'\n\n'"Every \`*.zip\` asset contains the ported source tree, the porting \`build_recipe.md\`, and the per-package build logs. Assets are uploaded incrementally as CI jobs (and the nightly retry workflow) complete throughout **${month_label}** — no need to wait for a single \"green\" run."
-        notes+=$'\n\n'"Filename format: \`<package>-<YYYYMMDD>-<HHMMSS>-<alpine|debian>.zip\`."
+        notes+=$'\n\n'"Filename format: \`<owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<alpine|debian>.zip\`."
         notes+=$'\n\n'"GitHub caps each release at 1000 assets, so once a monthly release fills up the workflow rolls over to \`${month_prefix}-NN\` (\`${base_title} NN\`) — all overflow releases for the same month list the same packages, just split across releases."
 
         # ---- helpers ---------------------------------------------------
@@ -130,16 +131,34 @@ runs:
             if ! gh release create "$tag" \
                 --repo "$GH_REPO" \
                 --title "$title" \
-                --notes "$notes" 2>/tmp/gh_create.err; then
+                --notes "$notes" 2>gh_create.err; then
               if release_exists "$tag"; then
                 echo "Release $tag created concurrently by another shard."
               else
-                cat /tmp/gh_create.err >&2
+                cat gh_create.err >&2
                 return 1
               fi
             fi
+            rm -f gh_create.err
             echo "::endgroup::"
           fi
+        }
+        legacy_stem_for_zip() {
+          ZIP_PATH="$1" python3 - <<'PY'
+        import json
+        import os
+        import zipfile
+
+        path = os.environ["ZIP_PATH"]
+        try:
+            with zipfile.ZipFile(path) as zf:
+                with zf.open("manifest.json") as fh:
+                    manifest = json.load(fh)
+        except Exception:
+            raise SystemExit(0)
+        legacy = manifest.get("legacy_package_stem") or ""
+        print(legacy)
+        PY
         }
 
         # ---- enumerate existing month releases (base + overflows) -----
@@ -190,12 +209,18 @@ runs:
             pkg="${BASH_REMATCH[1]}"
             platform="${BASH_REMATCH[4]}"
             pattern="^${pkg}-[0-9]{8}-[0-9]{6}-${platform}\.zip$"
+            legacy_pkg="$(legacy_stem_for_zip "$zip")"
+            legacy_pattern=""
+            if [[ -n "$legacy_pkg" && "$legacy_pkg" != "$pkg" ]]; then
+              legacy_pattern="^${legacy_pkg}-[0-9]{8}-[0-9]{6}-${platform}\.zip$"
+            fi
             while IFS= read -r asset; do
               [[ -z "$asset" ]] && continue
               # Skip the exact filename we're about to upload — `--clobber`
               # below handles the same-name overwrite atomically.
               [[ "$asset" == "$fname" ]] && continue
-              if [[ "$asset" =~ $pattern ]]; then
+              if [[ "$asset" =~ $pattern ]] || \
+                  [[ -n "$legacy_pattern" && "$asset" =~ $legacy_pattern ]]; then
                 echo "  - $tag: removing stale asset $asset (superseded by $fname)"
                 gh release delete-asset "$tag" "$asset" \
                   --repo "$GH_REPO" --yes || \

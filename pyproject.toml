@@ -8,3 +8,7 @@ target-version = ["py310"]
 # stdlib -> third-party -> local, blank-line separated; black-compatible.
 profile = "black"
 line_length = 79
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

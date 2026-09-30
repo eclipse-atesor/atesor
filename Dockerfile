@@ -52,8 +52,16 @@ RUN apk add --no-cache \
 
 # Install Go from the official riscv64 tarball instead of `apk add go`.
 ARG GO_VERSION=1.26.5
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
-    | tar -xz -C /usr/local \
+ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
+# SHA256 source: https://go.dev/dl/?mode=json&include=all
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
+        -o /opt/atesor-downloads/go.tar.gz \
+    && echo "${GO_SHA256}  /opt/atesor-downloads/go.tar.gz" \
+        | sha256sum -c - \
+    && tar -xzf /opt/atesor-downloads/go.tar.gz -C /usr/local \
+    && rm -f /opt/atesor-downloads/go.tar.gz \
     && /usr/local/go/bin/go version
 
 # Install a pinned Rust toolchain via rustup instead of `apk add rust cargo`.

@@ -64,6 +64,11 @@ class TestSystemKnowledgeSummary(unittest.TestCase):
         # ALPINE_RISCV.extra_notes includes "musl libc" mention
         self.assertIn("musl libc", out)
 
+    def test_alpine_summary_keeps_libexecinfo_warning(self) -> None:
+        """Alpine knowledge warns not to install removed libexecinfo."""
+        out = get_system_knowledge_summary(ALPINE_RISCV)
+        self.assertIn("libexecinfo was REMOVED", out)
+
     def test_summary_includes_package_map_entries(self) -> None:
         """Test summary includes package map entries."""
         out = get_system_knowledge_summary(ALPINE_RISCV)

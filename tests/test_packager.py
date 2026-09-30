@@ -51,13 +51,119 @@ class TestPackageBuild(unittest.TestCase):
         return package_build(**kwargs)
 
     def test_filename_format(self) -> None:
-        """Filename uses repo, timestamp, platform, and zip suffix."""
-        zp = self._build()
-        base = os.path.basename(zp)
-        self.assertTrue(base.startswith(f"{self.repo_name}-"))
-        self.assertTrue(base.endswith("-debian.zip"))
-        # repo-YYYYMMDD-HHMMSS-platform.zip = 4 segments split by '-'.
-        self.assertEqual(len(base[: -len(".zip")].split("-")), 4)
+        """Filename uses the owner-repo stem, timestamp and platform.
+
+        The planners parse exactly this shape; the owner prefix keeps
+        repositories with the same name apart.
+        """
+        import re
+
+        base = os.path.basename(self._build())
+        self.assertRegex(
+            base, r"^owasp-amass-amass-\d{8}-\d{6}-debian\.zip$"
+        )
+        # Without a URL the repository name stays the stem.
+        legacy = os.path.basename(self._build(repo_url=None))
+        self.assertIsNotNone(
+            re.fullmatch(r"amass-\d{8}-\d{6}-debian\.zip", legacy)
+        )
+
+    def test_manifest_v2_records_stems_verdict_and_hashes(self) -> None:
+        """The zip says what was verified and pins each output by hash."""
+        import hashlib
+
+        os.makedirs(os.path.join(self.repo_path, "build"))
+        tool = os.path.join(self.repo_path, "build", "amass")
+        with open(tool, "wb") as fh:
+            fh.write(b"\x7fELF riscv64 payload")
+        container_root = "/workspace/repos/amass"
+        verification = {
+            "status": "verified",
+            "verified": True,
+            "reason": "2 riscv64 ELF build output(s) verified by header",
+            "source_commit": "d" * 40,
+            "counts": {"riscv64": 2, "foreign": 0, "prebuilt_foreign": 0},
+            "riscv64": [
+                {
+                    "path": f"{container_root}/build/amass",
+                    "type": "binary",
+                    "arch": "riscv64",
+                    "abi": "lp64d",
+                    "size": 21,
+                },
+                {
+                    "path": "/usr/local/bin/amass",
+                    "type": "binary",
+                    "arch": "riscv64",
+                    "abi": "lp64d",
+                    "size": 21,
+                },
+            ],
+        }
+        zp = self._build(
+            verification=verification,
+            curated_artifacts=[
+                {"filepath": f"{container_root}/build/amass",
+                 "role": "primary"}
+            ],
+            container_repo_path=container_root,
+        )
+        with zipfile.ZipFile(zp) as zf:
+            m = json.loads(zf.read("manifest.json"))
+
+        self.assertEqual(m["schema_version"], 2)
+        self.assertEqual(m["package_stem"], "owasp-amass-amass")
+        self.assertEqual(m["legacy_package_stem"], "amass")
+        self.assertEqual(m["verification"]["status"], "verified")
+        self.assertTrue(m["verification"]["verified"])
+        self.assertEqual(m["verification"]["source_commit"], "d" * 40)
+        inside, outside = m["artifacts"]
+        with open(tool, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        self.assertEqual(inside["sha256"], digest)
+        self.assertTrue(inside["in_zip"])
+        self.assertEqual(inside["path_in_zip"], "build/amass")
+        self.assertEqual(inside["role"], "primary")
+        self.assertFalse(outside["in_zip"])
+        self.assertNotIn("sha256", outside)
+        # created_at carries its UTC offset.
+        self.assertRegex(m["created_at"], r"[+-]\d{2}:\d{2}$")
+
+    def test_manifest_records_package_test_summary(self) -> None:
+        """The zip carries the test result without the output tail."""
+        tests = {
+            "status": "passed",
+            "framework": "ctest",
+            "command": "ctest --test-dir build --output-on-failure",
+            "exit_code": 0,
+            "duration_seconds": 12.0,
+            "output_tail": "100% tests passed",
+        }
+        with zipfile.ZipFile(self._build(package_tests=tests)) as zf:
+            m = json.loads(zf.read("manifest.json"))
+
+        self.assertEqual(m["package_tests"]["status"], "passed")
+        self.assertEqual(m["package_tests"]["framework"], "ctest")
+        self.assertNotIn("output_tail", m["package_tests"])
+
+    def test_failed_write_leaves_no_zip_and_no_part_file(self) -> None:
+        """A write killed half-way never looks like a finished zip."""
+        with mock.patch(
+            "src.packager._add_repo_tree", side_effect=OSError("disk full")
+        ):
+            with self.assertRaises(OSError):
+                self._build()
+
+        self.assertEqual(os.listdir(self.packages_dir), [])
+
+    def test_manifest_without_verification_says_not_run(self) -> None:
+        """A zip made without a verdict does not claim verification."""
+        with zipfile.ZipFile(self._build()) as zf:
+            m = json.loads(zf.read("manifest.json"))
+
+        self.assertEqual(m["verification"]["status"], "not run")
+        self.assertFalse(m["verification"]["verified"])
+        self.assertEqual(m["artifacts"], [])
 
     def test_layout_recipe_at_root_and_repo_subtree(self) -> None:
         """Zip contains root recipe, manifest, and repo files."""
@@ -193,6 +299,49 @@ class TestPackageBuild(unittest.TestCase):
             msg=f"unexpected .log entries: {names}",
         )
         self.assertEqual(manifest["logs_in_zip"], [])
+
+
+class TestLegacyPackageStem(unittest.TestCase):
+    """The legacy stem must equal the zip stem that old releases used."""
+
+    def test_matches_derive_repo_name_for_every_catalog_url(self) -> None:
+        """Old zips were named by derive_repo_name; the copy must agree."""
+        import glob
+
+        from src.packager import legacy_package_stem
+        from src.state import derive_repo_name
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        urls = set()
+        pattern = os.path.join(root, ".github", "packages", "*.json")
+        for path in glob.glob(pattern):
+            with open(path, encoding="utf-8") as fh:
+                for entry in json.load(fh).get("packages", []):
+                    if isinstance(entry, dict) and entry.get("url"):
+                        urls.add(entry["url"])
+        urls.update(
+            {
+                "https://github.com/Picocrypt/CLI",
+                "https://gitlab.com/gitlab-org/cli.git",
+                "https://github.com/x/.hidden",
+                "",
+            }
+        )
+        self.assertGreater(len(urls), 100)
+        for url in sorted(urls):
+            with self.subTest(url=url):
+                self.assertEqual(
+                    legacy_package_stem(url), derive_repo_name(url)
+                )
+
+    def test_ambiguous_basenames_match_state(self) -> None:
+        """The copied ambiguous-name set equals the one in src.state."""
+        from src import packager, state
+
+        self.assertEqual(
+            packager._LEGACY_AMBIGUOUS_BASENAMES,
+            state._AMBIGUOUS_BASENAMES,
+        )
 
 
 class TestPackagerEdgeCases(unittest.TestCase):

@@ -28,6 +28,7 @@ from src.tools import (
     _is_pkg_lock_error,
     apply_patch,
     execute_command,
+    masks_failure,
     write_file,
 )
 
@@ -46,6 +47,7 @@ class TestCommandValidatorSafe(unittest.TestCase):
         "cmake -B build -S .",
         "cmake --build build",
         "make -j$(nproc)",
+        "cmake -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/install",
         "ninja -C build",
         "meson setup builddir",
         "cargo build --release",
@@ -87,7 +89,13 @@ class TestCommandValidatorSafe(unittest.TestCase):
         "curl -L -o foo https://example.com/foo",
         # Env var assignment
         "CFLAGS=-O2 make -j4",
+        'CFLAGS="$(pkg-config --cflags zlib)" make',
         "DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
+        "export PATH=$(go env GOPATH)/bin:$PATH",
+        "echo $((2+3))",
+        "python3 -c 'print(1)' arg1 arg2",
+        "flock -w 120 /tmp/lock sh -c 'apk add zlib-dev'",
+        "timeout --kill-after=30s --signal=TERM 60s make",
         # Shell control flow
         "if [ -f foo ]; then echo yes; fi",
         "for f in *.c; do gcc -c $f; done",
@@ -144,6 +152,12 @@ class TestCommandValidatorDangerous(unittest.TestCase):
         # Unknown commands fail closed
         ("nmap -sP 192.168.1.0/24", "unknown"),
         ("blahblah --foo", "unknown"),
+        ("echo $(id)", "unsafe substitution"),
+        ("X=$(id)", "unsafe assignment substitution"),
+        ("env X=1 id", "unsafe env tail"),
+        ("bash -c 'id'", "unsafe bash -c"),
+        ("sh -ec 'id'", "unsafe sh -c"),
+        ("echo `id`", "unsafe backticks"),
     ]
 
     def test_dangerous_commands_blocked(self) -> None:
@@ -198,6 +212,34 @@ class TestCommandValidatorSegments(unittest.TestCase):
         segments = self.validator.split_segments("make && ninja || echo no")
         self.assertEqual(segments, ["make", "ninja", "echo no"])
 
+    def test_redirections_are_not_split(self) -> None:
+        """2>&1 and friends are redirections, not background operators.
+
+        Splitting them left a segment "1" that no pattern allows, so
+        every build command with 2>&1 was refused.
+        """
+        for command in (
+            "make -j4 2>&1",
+            "./configure > config.log 2>&1",
+            "make >&2",
+            "make &> build.log",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.validator.split_segments(command), [command]
+                )
+                self.assertTrue(self.validator.is_safe(command)[0])
+
+    def test_background_operator_still_splits(self) -> None:
+        """A real & still starts a segment that must pass on its own."""
+        self.assertEqual(
+            self.validator.split_segments("sleep 1 & id"), ["sleep 1", "id"]
+        )
+        self.assertFalse(self.validator.is_safe("sleep 1 & id")[0])
+        self.assertFalse(
+            self.validator.is_safe("echo x &> /etc/apt/sources.list")[0]
+        )
+
     def test_unknown_tail_segment_is_reported(self) -> None:
         """A safe prefix cannot hide an unknown command in a chain."""
         ok, reason = self.validator.is_safe("make && nmap 127.0.0.1")
@@ -244,6 +286,69 @@ class TestCommandValidatorSegments(unittest.TestCase):
         """Redirection-looking text inside quotes is harmless."""
         ok, reason = self.validator.is_safe_single("grep 'a > b' file.txt")
         self.assertTrue(ok, reason)
+
+
+class TestMasksFailure(unittest.TestCase):
+    """Tests for build-phase failure masking detection."""
+
+    POSITIVE = [
+        ("make || true", "||"),
+        ("make || :", "||"),
+        ("make || /bin/true", "||"),
+        ("make || exit 0", "||"),
+        ("make || echo failed", "||"),
+        ("make || printf '%s\\n' failed", "||"),
+        ("make || return 0", "||"),
+        ("make; true", "trailing"),
+        ("make; :", "trailing"),
+        ("make; exit 0", "trailing"),
+        ("set +e; make", "set +e"),
+        # No pipefail: the pipeline exits with tee, not with make.
+        ("make | tee build.log", "pipe"),
+        ("make -j4 2>&1 | tail -n 50", "pipe"),
+    ]
+
+    NEGATIVE = [
+        "make && ctest",
+        "make || exit 1",
+        "make || false",
+        "make || (exit 1)",
+        "make || { echo msg; exit 1; }",
+        "make || { echo msg >&2; false; }",
+        "set -o pipefail; make | tee build.log",
+        "grep -r foo . | head",
+        "true",
+        "echo 'make || true'",
+    ]
+
+    def test_masking_cases_are_reported(self) -> None:
+        """Known masking patterns return a reason."""
+        for command, text in self.POSITIVE:
+            with self.subTest(command=command):
+                reason = masks_failure(command)
+                self.assertIsNotNone(reason)
+                self.assertIn(text, reason)
+
+    def test_non_masking_cases_are_ignored(self) -> None:
+        """Non-masking shell constructs stay allowed."""
+        for command in self.NEGATIVE:
+            with self.subTest(command=command):
+                self.assertIsNone(masks_failure(command))
+
+
+class TestCommandOutputDecoding(unittest.TestCase):
+    """Tests for non-UTF-8 subprocess output."""
+
+    def test_host_command_replaces_invalid_utf8(self) -> None:
+        """Invalid bytes keep the real exit code and output tail."""
+        command = (
+            "python3 -c \"import sys; "
+            "sys.stdout.buffer.write(bytes([0xff, 0xfe])); "
+            "sys.exit(3)\""
+        )
+        result = execute_command(command, use_docker=False)
+        self.assertEqual(3, result.exit_code)
+        self.assertEqual("��", result.stdout)
 
 
 # ===========================================================================

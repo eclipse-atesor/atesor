@@ -81,6 +81,7 @@ _PORT_RE = re.compile(r"^[0-9]{1,5}$")
 # "%" tokens in the generated config file.
 _PATH_VALUE_RE = re.compile(r"^[^\s\"'%]+$")
 _WORKDIR_RE = re.compile(r"^[A-Za-z0-9._/~-]+$")
+_SAFE_PHYSICAL_WORKDIR_RE = re.compile(r"^/[A-Za-z0-9._/+-]+$")
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 _cached_config: Optional["TargetConfig"] = None
@@ -292,6 +293,8 @@ def close_connection() -> None:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -420,6 +423,11 @@ def set_remote_workdir(path: str) -> None:
     """
     global _resolved_workdir
     _resolved_workdir = path
+
+
+def is_safe_remote_workdir(path: str) -> bool:
+    """Return True when a physical remote workdir is shell-safe."""
+    return bool(_SAFE_PHYSICAL_WORKDIR_RE.match(path))
 
 
 def set_machine_name(name: str) -> None:

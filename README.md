@@ -44,8 +44,9 @@ Output is a reproducible Markdown recipe a human or CI can replay, plus the read
 2. **Planner** drafts a high-level `TaskPlan` from that analysis.
 3. **Supervisor** routes work between Scout, Builder, and Fixer, watches for error loops, and decides when to escalate.
 4. **Builder** runs the build natively on RISC-V via QEMU/binfmt. **Fixer** patches whatever breaks. **Scout** answers targeted questions about the source tree.
-5. **Artifact scanner** verifies the produced binaries are real `riscv64` ELF files - not silent x86 fallthroughs.
-6. **Recipe** is written to disk and cached, keyed by `(package, sandbox)`. A later cache hit re-renders `{repo}_recipe.md` from that entry and skips the pipeline entirely.
+5. **Artifact scanner** reads the ELF header of every build output and of every member of every static archive. One x86-64, aarch64 or riscv32 output fails the port, even next to riscv64 ones. A build whose commands pass but that proves no riscv64 output is reported as **not verified** (exit code 3).
+6. **Package tests** (`make check`, `ctest`, `meson test`, `go test`, `cargo test`) run once after a successful build, with a time limit. The result goes in the report and the zip manifest; it never fails the port.
+7. **Recipe** is written to disk and cached, keyed by `(package, sandbox)`. Only verified ports are cached or learned. A later cache hit re-renders `{repo}_recipe.md` from that entry and skips the pipeline entirely.
 
 The supervisor → executor loop is built on [LangGraph](https://github.com/langchain-ai/langgraph), with a single `AgentState` carried between nodes.
 
@@ -213,7 +214,7 @@ Native results and QEMU results never mix:
 |---|---|---|
 | State directory | `workspace/` | `workspace-native/` |
 | Recipe cache key | `<platform>-riscv64` | `<platform>-riscv64-native` |
-| Zip name | `<repo>-<time>-<platform>.zip` | `<repo>-<time>-<platform>-native.zip` |
+| Zip name | `<owner>-<repo>-<time>-<platform>.zip` | `<owner>-<repo>-<time>-<platform>-native.zip` |
 | Report line | `**Target**: qemu` | `**Target**: native` |
 
 ---
@@ -391,7 +392,7 @@ NOTE: When using the pre-build binary (atesor-ai) the state home is `$ATESOR_HOM
 | `$WS/output/{repo}_report_*.md` | Detailed build report (per run) |
 | `$WS/output/{repo}_state_*.json` | Full `AgentState` snapshot |
 | `$WS/output/{repo}_patches_*/` | Patches applied during the run |
-| `$WS/packages/{repo}-*-{platform}.zip` | Packaged artifact (with `--package`) |
+| `$WS/packages/{owner}-{repo}-*-{platform}.zip` | Packaged artifact (with `--package`); `manifest.json` holds the verification verdict, the riscv64 outputs with SHA-256, the source commit and the package test result |
 | `$WS/logs/agent_{repo}.log` | Per-repo DEBUG log |
 | `$WS/logs/agent-call_{repo}.log` | Full LLM call audit trail (prompt + response + cost) |
 | `data/recipe_cache.json` | Successful builds, keyed by `{package: {sandbox: recipe}}` |
@@ -399,8 +400,31 @@ NOTE: When using the pre-build binary (atesor-ai) the state home is `$ATESOR_HOM
 
 A cache hit short-circuits the pipeline - it re-renders `{repo}_recipe.md`
 from the cached recipe and skips all LLM and Docker work - unless `--force`
-is set. Cache entries are per-sandbox; Alpine and Debian builds populate
-separate keys.
+is set. The run prints `CACHED (not rebuilt)`. Cache entries are
+per-sandbox; Alpine and Debian builds populate separate keys, and an entry
+counts only when its repository URL matches. A new entry keeps the
+verification verdict and the source commit of its build. An entry without
+a verified verdict (every entry written before verification existed)
+prints `NOT VERIFIED` and exits with code 3.
+
+`main.py --repo` exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Success: riscv64 output verified by its ELF headers |
+| 1 | Failure (build, verification, setup, or keys) |
+| 2 | The build succeeded but packaging (`--package`) failed |
+| 3 | The build commands succeeded but no riscv64 output was proven (for example a header-only library, or a scan that stopped at its file limit); not cached or learned. Also a cache hit whose entry has no verified verdict |
+| 130 | Interrupted |
+
+`batch_test.py` reports PASS (0), UNVERIFIED (3) and FAIL (anything else)
+separately. The pass rate counts verified passes only.
+
+The package test phase uses at most 600 s. Set
+`ATESOR_PACKAGE_TEST_TIMEOUT` to change the limit. `batch_test.py` gives
+each run its kill time in `ATESOR_RUN_DEADLINE` (epoch seconds); the phase
+then keeps 420 s of that time for the report and the zip. A limit under
+60 s skips the phase, so `ATESOR_PACKAGE_TEST_TIMEOUT=0` turns it off.
 
 ---
 
@@ -411,7 +435,7 @@ separate keys.
 - **Parallel batch runs** - `batch_test.py` allocates one container per worker (`atesor-ai-sandbox-w0..wN`) to avoid `apk`/`apt` lock contention.
 - **Few-shot memory** - agents learn from past successes; up to 100 examples per agent, retrieved by keyword/regex.
 - **Recipe cache** - successful builds are replayable and skip the LLM entirely.
-- **ELF verification** - every produced binary is checked with `file` to confirm `RISC-V ELF`.
+- **ELF verification** - the ELF header of every build output (`EM_RISCV`, 64-bit class) is read in the sandbox; committed prebuilt binaries are reported but do not decide the verdict.
 - **Cost-aware** - every LLM call is logged with token estimate and cost; hard cap at $1.00 per package.
 - **Safe execution** - every shell command goes through a regex whitelist and runs inside the sandbox.
 

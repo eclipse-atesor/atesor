@@ -16,6 +16,7 @@ Also covers the polymorphic loader in
 import importlib.util
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 
@@ -44,6 +45,16 @@ slice_pkgs = _load(
     ".github/scripts/slice_pkgs.py",
     "slice_pkgs_mod",
 )
+
+
+def _entry_tuple(entry):
+    """Return comparable fields from a missing_pkgs PackageEntry."""
+    return (
+        entry.name,
+        entry.package_stem,
+        entry.legacy_package_stem,
+        entry.legacy_unique,
+    )
 
 
 class TestReleasedNames(unittest.TestCase):
@@ -136,6 +147,47 @@ class TestComputePlan(unittest.TestCase):
         self.assertEqual(remaining, ["c", "b", "d"])
         self.assertEqual(total, 1)
         self.assertEqual(groups, [0])
+
+    def test_new_owner_repo_stem_skips_released_package(self) -> None:
+        """Owner-prefixed zip names are the primary release keys."""
+        remaining, total, _ = plan_remaining.compute_plan(
+            ["hc-cli", "urfave-cli"],
+            {"hetznercloud-cli"},
+            group_size=50,
+            stem_of={
+                "hc-cli": "hetznercloud-cli",
+                "urfave-cli": "urfave-cli",
+            },
+            legacy_stem_of={"hc-cli": "cli", "urfave-cli": "cli"},
+            legacy_unique={"hc-cli": False, "urfave-cli": False},
+        )
+        self.assertEqual(remaining, ["urfave-cli"])
+        self.assertEqual(total, 1)
+
+    def test_unique_legacy_stem_skips_released_package(self) -> None:
+        """Old basename zips count only when the basename is unique."""
+        remaining, total, _ = plan_remaining.compute_plan(
+            ["zlib", "hc-cli", "urfave-cli"],
+            {"zlib", "cli"},
+            group_size=50,
+            stem_of={
+                "zlib": "madler-zlib",
+                "hc-cli": "hetznercloud-cli",
+                "urfave-cli": "urfave-cli",
+            },
+            legacy_stem_of={
+                "zlib": "zlib",
+                "hc-cli": "cli",
+                "urfave-cli": "cli",
+            },
+            legacy_unique={
+                "zlib": True,
+                "hc-cli": False,
+                "urfave-cli": False,
+            },
+        )
+        self.assertEqual(remaining, ["hc-cli", "urfave-cli"])
+        self.assertEqual(total, 1)
 
     def test_no_skips_when_release_empty(self) -> None:
         """Empty released set leaves all declared packages in one shard."""
@@ -260,8 +312,11 @@ class TestMissingPkgsPolymorphicLoader(unittest.TestCase):
         )
         try:
             self.assertEqual(
-                missing_pkgs._load_packages(path),
-                [("a", "a"), ("b", "b-repo")],
+                [_entry_tuple(e) for e in missing_pkgs._load_packages(path)],
+                [
+                    ("a", "x-a", "a", True),
+                    ("b", "x-b-repo", "b-repo", True),
+                ],
             )
         finally:
             os.unlink(path)
@@ -271,12 +326,25 @@ class TestMissingPkgsPolymorphicLoader(unittest.TestCase):
         # remaining-<platform>.json shape, written by plan_remaining.py.
         # The optional "stems" map overrides zip stems per name.
         path = self._write_json(
-            {"packages": ["x", "y", "z"], "stems": {"y": "y-binaries"}}
+            {
+                "packages": ["x", "y", "z"],
+                "stems": {
+                    "y": {
+                        "package_stem": "org-y",
+                        "legacy_package_stem": "y-binaries",
+                        "legacy_unique": True,
+                    },
+                },
+            }
         )
         try:
             self.assertEqual(
-                missing_pkgs._load_packages(path),
-                [("x", "x"), ("y", "y-binaries"), ("z", "z")],
+                [_entry_tuple(e) for e in missing_pkgs._load_packages(path)],
+                [
+                    ("x", "x", None, False),
+                    ("y", "org-y", "y-binaries", True),
+                    ("z", "z", None, False),
+                ],
             )
         finally:
             os.unlink(path)
@@ -295,8 +363,11 @@ class TestMissingPkgsPolymorphicLoader(unittest.TestCase):
         )
         try:
             self.assertEqual(
-                missing_pkgs._load_packages(path),
-                [("ok", "ok"), ("also-ok", "also-ok")],
+                [_entry_tuple(e) for e in missing_pkgs._load_packages(path)],
+                [
+                    ("ok", "ok", "ok", True),
+                    ("also-ok", "also-ok", None, False),
+                ],
             )
         finally:
             os.unlink(path)
@@ -310,7 +381,11 @@ class TestPlanRemainingWritesArtifact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "remaining-alpine.json")
             plan_remaining._write_remaining(
-                out, ["a", "b", "c"], stem_of={"b": "b-binaries"}
+                out,
+                ["a", "b", "c"],
+                stem_of={"a": "org-a", "b": "org-b", "c": "org-c"},
+                legacy_stem_of={"a": "a", "b": "b-binaries", "c": "c"},
+                legacy_unique={"a": True, "b": True, "c": True},
             )
             with open(out) as fh:
                 data = json.load(fh)
@@ -318,14 +393,63 @@ class TestPlanRemainingWritesArtifact(unittest.TestCase):
                 data,
                 {
                     "packages": ["a", "b", "c"],
-                    "stems": {"b": "b-binaries"},
+                    "stems": {
+                        "a": {
+                            "package_stem": "org-a",
+                            "legacy_package_stem": "a",
+                            "legacy_unique": True,
+                        },
+                        "b": {
+                            "package_stem": "org-b",
+                            "legacy_package_stem": "b-binaries",
+                            "legacy_unique": True,
+                        },
+                        "c": {
+                            "package_stem": "org-c",
+                            "legacy_package_stem": "c",
+                            "legacy_unique": True,
+                        },
+                    },
                 },
             )
             # And the loader missing-pkgs uses must see the same names
             # plus the divergent stem for zip matching.
             self.assertEqual(
-                missing_pkgs._load_packages(out),
-                [("a", "a"), ("b", "b-binaries"), ("c", "c")],
+                [_entry_tuple(e) for e in missing_pkgs._load_packages(out)],
+                [
+                    ("a", "org-a", "a", True),
+                    ("b", "org-b", "b-binaries", True),
+                    ("c", "org-c", "c", True),
+                ],
+            )
+
+
+class TestMissingPkgsBuiltMatching(unittest.TestCase):
+    """missing_pkgs matches new stems and unique legacy stems."""
+
+    def test_new_or_unique_legacy_stem_counts_as_built(self) -> None:
+        """Ambiguous legacy stems do not hide missing packages."""
+        built = {"hetznercloud-cli", "zlib", "cli"}
+        cases = [
+            (missing_pkgs.PackageEntry("hc", "hetznercloud-cli"), True),
+            (missing_pkgs.PackageEntry("z", "madler-zlib", "zlib", True),
+             True),
+            (missing_pkgs.PackageEntry("cli-a", "owner-a-cli", "cli",
+                                       False), False),
+        ]
+        for entry, expected in cases:
+            with self.subTest(entry=entry):
+                self.assertEqual(missing_pkgs._is_built(entry, built),
+                                 expected)
+
+    def test_built_names_extracts_new_owner_repo_stem(self) -> None:
+        """Built-name parsing keeps the owner-repo stem intact."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "hetznercloud-cli-20260930-120000-debian.zip").touch()
+            self.assertEqual(
+                missing_pkgs._built_names(directory, "debian"),
+                {"hetznercloud-cli"},
             )
 
 

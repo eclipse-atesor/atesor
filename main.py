@@ -1209,7 +1209,9 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
         print(colored(f"Porting recipe saved: {recipe_path}", "green"))
 
     # 2. Save detailed build report
-    report = generate_detailed_report(state.to_dict())
+    report_data = state.to_dict()
+    report_data["execution_duration"] = state.get_execution_duration()
+    report = generate_detailed_report(report_data)
     report_path = os.path.join(
         output_dir, f"{repo_name}_report_{timestamp}.md"
     )
@@ -1236,17 +1238,103 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
         )
 
 
+def _verification_section(verification: dict) -> str:
+    """Render the artifact verification verdict for the report."""
+    if not verification:
+        return (
+            "## Artifact Verification\n\n"
+            "*The artifact scan did not run.*\n\n"
+        )
+    counts = verification.get("counts", {})
+    lines = [
+        "## Artifact Verification",
+        "",
+        f"**Verdict**: {verification.get('status', 'unknown')}\u0020\u0020",
+        f"**Reason**: {verification.get('reason') or 'N/A'}\u0020\u0020",
+        "**Source commit**: "
+        f"{verification.get('source_commit') or 'unknown'}",
+        "",
+        "| riscv64 outputs | Other-arch outputs | Committed foreign files |",
+        "|---|---|---|",
+        f"| {counts.get('riscv64', 0)} | {counts.get('foreign', 0)} "
+        f"| {counts.get('prebuilt_foreign', 0)} |",
+        "",
+    ]
+    for title, key in (
+        ("riscv64 build outputs", "riscv64"),
+        ("Build outputs for another architecture", "foreign"),
+        ("Committed non-riscv64 files (not judged)", "prebuilt_foreign"),
+    ):
+        items = verification.get(key) or []
+        if not items:
+            continue
+        lines.append(f"### {title}")
+        lines.append("")
+        for art in items[:20]:
+            abi = f", {art['abi']}" if art.get("abi") else ""
+            lines.append(
+                f"- `{art.get('path')}` ({art.get('arch')}, "
+                f"{art.get('type')}{abi}, {art.get('size', 0)} bytes)"
+            )
+        if len(items) > 20:
+            lines.append(f"- ...and {len(items) - 20} more")
+        lines.append("")
+    for title, key in (
+        ("ABI warnings", "abi_warnings"),
+        ("Expected artifacts not found", "expected_missing"),
+    ):
+        items = verification.get(key) or []
+        if items:
+            lines.append(f"### {title}")
+            lines.append("")
+            lines.extend(f"- {item}" for item in items[:20])
+            lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _package_tests_section(tests: dict) -> str:
+    """Render the non-gating package test result for the report."""
+    lines = ["## Package Tests (not gating)", ""]
+    if not tests:
+        lines.append("*The package tests did not run.*")
+        return "\n".join(lines) + "\n\n"
+    lines.append(f"**Result**: {tests.get('status', 'unknown')}\u0020\u0020")
+    if tests.get("command"):
+        lines.append(
+            f"**Command**: `{tests['command']}` "
+            f"(exit {tests.get('exit_code')}, "
+            f"{tests.get('duration_seconds', 0)}s of "
+            f"{tests.get('timeout_seconds', '?')}s)"
+        )
+    if tests.get("reason"):
+        lines.append(f"**Reason**: {tests['reason']}")
+    tail = (tests.get("output_tail") or "").strip()
+    if tail:
+        lines += ["", "```", tail[-1500:], "```"]
+    return "\n".join(lines) + "\n\n"
+
+
 def generate_detailed_report(state: dict) -> str:
     """Generate a comprehensive detailed report."""
     tokens = (
         f"{state.get('api_tokens_in', 0)}/{state.get('api_tokens_out', 0)}"
     )
     target_name = "native" if is_native() else "qemu"
+    status = state.get("build_status", "UNKNOWN")
+    verification = state.get("artifact_verification") or {}
+    verdict = verification.get("status")
+    status_text = status
+    if status == "SUCCESS":
+        status_text = (
+            "SUCCESS (riscv64 output verified)"
+            if verdict == "verified"
+            else "SUCCESS, NOT VERIFIED (no riscv64 output proven)"
+        )
     report = f"""# RISC-V Porting Report: {state.get("repo_name", "Unknown")}
 
 ## Executive Summary
 
-**Status**: {state.get("build_status", "UNKNOWN")}\u0020\u0020
+**Status**: {status_text}\u0020\u0020
 **Target**: {target_name}\u0020\u0020
 **Repository**: {state.get("repo_url", "N/A")}\u0020\u0020
 **Generated**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -1257,7 +1345,7 @@ def generate_detailed_report(state: dict) -> str:
 
 | Metric | Value |
 |--------|-------|
-| Build Status | {state.get("build_status", "N/A")} |
+| Build Status | {status_text} |
 | Total Duration | {state.get("execution_duration", 0):.1f}s |
 | Attempts Made | {state.get("attempt_count", 0)} |
 | API Calls | {state.get("api_calls_made", 0)} |
@@ -1265,6 +1353,12 @@ def generate_detailed_report(state: dict) -> str:
 | LLM Tokens (in/out) | {tokens} |
 | Cost (from token usage) | ${state.get("api_cost_usd", 0):.4f} |
 
+---
+
+{_verification_section(verification)}
+---
+
+{_package_tests_section(state.get("package_tests") or {})}
 ---
 
 ## Build System Analysis
@@ -1344,14 +1438,18 @@ def generate_detailed_report(state: dict) -> str:
                     "*Truncated (full patch available in separate file)*\n\n"
                 )
 
-    # Error history
-    error_log = state.get("error_log", [])
-    if error_log:
+    # Error history (serialized ErrorRecords are dicts)
+    error_history = state.get("error_history", [])
+    if error_history:
         report += "---\n\n## Error Resolution History\n\n"
 
-        for i, error in enumerate(error_log, 1):
-            category = getattr(error, "category", "Unknown")
-            message = getattr(error, "message", "N/A")
+        for i, error in enumerate(error_history, 1):
+            if isinstance(error, dict):
+                category = error.get("category", "Unknown")
+                message = error.get("message") or "N/A"
+            else:
+                category = getattr(error, "category", "Unknown")
+                message = getattr(error, "message", "N/A")
 
             report += f"### Error {i}: {category}\n\n"
             report += f"```\n{message[:300]}\n```\n\n"
@@ -1359,16 +1457,27 @@ def generate_detailed_report(state: dict) -> str:
     # Recommendations
     report += "---\n\n## Recommendations\n\n"
 
-    status = state.get("build_status")
-    if status == "SUCCESS":
+    if status == "SUCCESS" and verdict == "verified":
         report += """
-- Build completed successfully for RISC-V
+- The build produced riscv64 machine code, proven by its ELF headers
 - Test the binary on actual RISC-V hardware or QEMU
 - Consider submitting patches upstream if modifications were needed
 - Add RISC-V to your CI/CD pipeline
 """
+    elif status == "SUCCESS":
+        reason = verification.get("reason") or "the artifact scan did not run"
+        report += f"""
+- The build commands succeeded, but no riscv64 output was proven
+- Reason: {reason}
+- For a header-only or scripts-only package, check the install tree
+- Otherwise check that the build plan builds the main targets
+"""
     elif status == "ESCALATED":
-        escalation_reason = state.get("escalation_reason", "Unknown")
+        escalation_reason = (
+            state.get("escalation_reason")
+            or state.get("last_error")
+            or "Unknown"
+        )
         report += f"""
 - Manual intervention required
 - Reason: {escalation_reason}
@@ -1384,7 +1493,7 @@ def generate_detailed_report(state: dict) -> str:
 """
 
     report += "\n---\n\n"
-    report += "*Report generated by RISC-V Porting Foundry v1.0*\n"
+    report += "*Report generated by Atesor AI*\n"
 
     return report
 
@@ -1557,13 +1666,46 @@ def run_agent(
         final_status = final_state.build_status
 
         if final_status == BuildStatus.SUCCESS:
-            logger.info("PORTING SUCCESSFUL!")
+            verified = final_state.is_verified_success
+            verdict = final_state.artifact_verification or {}
+            if verified:
+                logger.info("PORTING SUCCESSFUL!")
+                print(
+                    colored(
+                        "\nPORTING SUCCESSFUL! (riscv64 output verified)",
+                        "green",
+                        attrs=["bold"],
+                    )
+                )
+            else:
+                # Exit 3: the commands passed but no riscv64 output was
+                # proven. Batch runs count this apart from a pass, and
+                # the result is never cached or learned.
+                reason = verdict.get("reason") or "artifact scan did not run"
+                logger.warning(f"PORTING FINISHED, NOT VERIFIED: {reason}")
+                print(
+                    colored(
+                        "\nPORTING FINISHED, NOT VERIFIED",
+                        "yellow",
+                        attrs=["bold"],
+                    )
+                )
+                print(colored(f"   {reason}", "yellow"))
+            tests = final_state.package_tests or {}
+            if tests:
+                detail = tests.get("framework") or tests.get("reason", "")
+                print(
+                    colored(
+                        f"   Package tests (not gating): "
+                        f"{tests.get('status')} ({detail})",
+                        "white",
+                    )
+                )
             logger.info(
                 f"Recipe generated at: "
                 f"{OUTPUT_DIR}/{final_state.repo_name}_recipe.md"
             )
 
-            print(colored("\nPORTING SUCCESSFUL!", "green", attrs=["bold"]))
             print(
                 colored(
                     f"   Recipe generated at: "
@@ -1615,6 +1757,10 @@ def run_agent(
                         repo_url=repo_url,
                         agent_log_path=agent_log_path,
                         batch_log_path=batch_log_path,
+                        verification=final_state.artifact_verification,
+                        curated_artifacts=final_state.curated_artifacts,
+                        container_repo_path=final_state.repo_path,
+                        package_tests=final_state.package_tests,
                     )
                 except Exception as exc:
                     logger.error("Packaging failed: %s", exc, exc_info=True)
@@ -1629,7 +1775,7 @@ def run_agent(
                 logger.info(f"Package generated at: {zip_path}")
                 print(colored(f"   Package generated at: {zip_path}", "white"))
 
-            return 0
+            return 0 if verified else 3
         else:
             logger.info("PORTING STOPPED / FAILED")
             logger.info(f"Final Status: {final_status.value}")
@@ -2238,15 +2384,38 @@ def _main() -> int:
     if args.repo and not args.setup_only and not args.force:
         from src.memory import get_cached_recipe, materialize_cached_recipe
 
-        cached = get_cached_recipe(repo_name)
+        # The URL check stops a cache entry of another repository with
+        # the same name from answering for this one.
+        cached = get_cached_recipe(repo_name, repo_url=args.repo)
         if cached:
-            print(
-                colored(
-                    f"\n✓ Found cached recipe for '{repo_name}'",
-                    "green",
-                    attrs=["bold"],
+            # Only an entry with a verified verdict proves riscv64 output.
+            # Entries written before verification existed have none.
+            verdict = cached.get("verification") or {}
+            verified = verdict.get("status") == "verified"
+            if verified:
+                print(
+                    colored(
+                        f"\nCACHED (not rebuilt): recipe for '{repo_name}' "
+                        "from an earlier verified run",
+                        "green",
+                        attrs=["bold"],
+                    )
                 )
-            )
+            else:
+                why = (
+                    f"its build was not verified ({verdict['status']})"
+                    if verdict.get("status")
+                    else "it was recorded before riscv64 output "
+                    "verification existed"
+                )
+                print(
+                    colored(
+                        f"\nCACHED (not rebuilt), NOT VERIFIED: recipe for "
+                        f"'{repo_name}'; {why}",
+                        "yellow",
+                        attrs=["bold"],
+                    )
+                )
             print(
                 colored(
                     f"  Build system: {cached.get('build_system', '?')}",
@@ -2258,6 +2427,13 @@ def _main() -> int:
                     f"  Last built: {cached.get('last_built', '?')}", "white"
                 )
             )
+            if verdict.get("source_commit"):
+                print(
+                    colored(
+                        f"  Source commit: {verdict['source_commit']}",
+                        "white",
+                    )
+                )
             # Materialize the recipe into the output dir so the user has a
             # real file to open, regenerated from the cache on every hit.
             recipe_path = materialize_cached_recipe(
@@ -2285,7 +2461,16 @@ def _main() -> int:
                         "yellow",
                     )
                 )
-            return 0
+            if not verified:
+                print(
+                    colored(
+                        "  Exit code 3: no riscv64 output is proven for "
+                        "this entry. Re-run with --force to build and "
+                        "verify it.",
+                        "yellow",
+                    )
+                )
+            return 0 if verified else 3
 
     # Native: rungs 2 to 11 run after the cache fast path and before the
     # key check.

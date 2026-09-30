@@ -183,6 +183,14 @@ class TestLoadTarget(unittest.TestCase):
                 cfg = target.load_target(_native(ATESOR_REMOTE_WORKDIR=value))
                 self.assertFalse(cfg.is_valid)
 
+    def test_physical_workdir_characters_are_checked(self) -> None:
+        """Physical workdirs must be absolute and rsync-safe."""
+        self.assertTrue(target.is_safe_remote_workdir("/home/u/atesor-ai"))
+        self.assertTrue(target.is_safe_remote_workdir("/mnt/disk+1/a_b.c"))
+        for value in ("~/atesor-ai", "/home/u/atesor ai", "/home/u/a;b"):
+            with self.subTest(value=value):
+                self.assertFalse(target.is_safe_remote_workdir(value))
+
 
 class TestTargetFlag(unittest.TestCase):
     """Tests for the early --target read that main.py runs."""

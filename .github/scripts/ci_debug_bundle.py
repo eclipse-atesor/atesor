@@ -15,9 +15,11 @@ What it collects (and where each piece comes from):
 
       [12/47] ⏱ TIMEOUT cloudlist  1h 00m 10s  output/batch_logs/cloudlist.log
       [37/47] ✘ FAIL    nginx      3m 38s      output/batch_logs/nginx.log
+      [ 7/47] ? UNVER   headers    8.2s        output/batch_logs/headers.log
       [ 1/47] ✔ PASS    anew       4m 37s      output/batch_logs/anew.log
 
-  We parse those lines to derive per-shard PASS/FAIL/TIMEOUT lists.
+  We parse those lines to derive per-shard PASS/UNVERIFIED/FAIL/TIMEOUT
+  lists.
 * **Per-package log files** — the workflow's ``collect-full-shard-logs``
   job aggregates every ``output/batch_logs/<pkg>.log`` from every
   shard into two tiny (~8MB each) artifacts:
@@ -65,8 +67,8 @@ from typing import Iterable
 # duplicate one-shot " TIMEOUT pkg killing process group …" lines.
 PKG_LINE_RE = re.compile(
     r"\[\s*(?P<idx>\d+)\s*/\s*(?P<total>\d+)\s*\]\s+"
-    r"(?P<icon>[\u2714\u2718\u23f1])\s+"
-    r"(?P<status>PASS|FAIL|TIMEOUT)\s+"
+    r"(?P<icon>[\u2714\u2718\u23f1\?↷])\s+"
+    r"(?P<status>PASS|UNVER|UNVERIFIED|FAIL|TIMEOUT|SKIPPED|SKIP)\s+"
     r"(?P<pkg>\S+)\s+"
     r"(?P<duration>.+?)\s+"
     r"(?P<log>output/batch_logs/\S+\.log)\s*$"
@@ -77,8 +79,10 @@ PKG_LINE_RE = re.compile(
 BATCH_TOTALS_RE = re.compile(
     r"TOTAL\s+(?P<total>\d+)\s+"
     r"PASS\s+(?P<pass_>\d+)\s+"
+    r"(?:UNVERIFIED\s+(?P<unverified>\d+)\s+)?"
     r"FAIL\s+(?P<fail>\d+)\s+"
     r"TIMEOUT\s+(?P<timeout>\d+)"
+    r"(?:\s+SKIPPED\s+(?P<skipped>\d+))?"
 )
 
 # "atesor-debian-full (shard 0/15)"  → platform=debian, shard=0, total=15
@@ -110,6 +114,15 @@ CI_FLAG_RES = [
 ]
 
 
+def _normalize_status(status: str) -> str:
+    """Return the canonical batch status spelling."""
+    if status == "UNVER":
+        return "UNVERIFIED"
+    if status == "SKIP":
+        return "SKIPPED"
+    return status
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -121,7 +134,7 @@ class PackageResult:
 
     idx: int
     total: int
-    status: str  # PASS / FAIL / TIMEOUT
+    status: str  # PASS / UNVERIFIED / FAIL / TIMEOUT / SKIPPED
     package: str
     duration: str
     log_path: str  # output/batch_logs/<pkg>.log (relative path in CI)
@@ -347,7 +360,7 @@ def parse_shard_log(
                 PackageResult(
                     idx=int(m.group("idx")),
                     total=int(m.group("total")),
-                    status=m.group("status"),
+                    status=_normalize_status(m.group("status")),
                     package=pkg,
                     duration=m.group("duration").strip(),
                     log_path=m.group("log"),
@@ -360,8 +373,10 @@ def parse_shard_log(
             totals = {
                 "total": int(m.group("total")),
                 "pass": int(m.group("pass_")),
+                "unverified": int(m.group("unverified") or 0),
                 "fail": int(m.group("fail")),
                 "timeout": int(m.group("timeout")),
+                "skipped": int(m.group("skipped") or 0),
             }
             continue
 
@@ -484,31 +499,42 @@ def build_report(
 
     # Aggregate failure index across platforms
     total_fail = total_timeout = total_pass = total_total = 0
+    total_unverified = total_skipped = 0
     fail_pkgs: dict[str, list[tuple[str, int]]] = defaultdict(list)
     timeout_pkgs: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    unverified_pkgs: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for s in shards:
         if s.batch_totals:
             total_total += s.batch_totals["total"]
             total_pass += s.batch_totals["pass"]
+            total_unverified += s.batch_totals.get("unverified", 0)
             total_fail += s.batch_totals["fail"]
             total_timeout += s.batch_totals["timeout"]
+            total_skipped += s.batch_totals.get("skipped", 0)
         for p in s.packages:
             if p.status == "FAIL":
                 fail_pkgs[s.platform].append((p.package, s.shard))
             elif p.status == "TIMEOUT":
                 timeout_pkgs[s.platform].append((p.package, s.shard))
+            elif p.status == "UNVERIFIED":
+                unverified_pkgs[s.platform].append((p.package, s.shard))
 
     md.append("## Aggregate totals (across all shards)")
     md.append("")
     md.append(
         f"- TOTAL={total_total}  PASS={total_pass}  "
-        f"FAIL={total_fail}  TIMEOUT={total_timeout}"
+        f"UNVERIFIED={total_unverified}  FAIL={total_fail}  "
+        f"TIMEOUT={total_timeout}  SKIPPED={total_skipped}"
     )
     md.append("")
     for plat in sorted(by_platform):
         f = sorted({p for p, _ in fail_pkgs[plat]})
         t = sorted({p for p, _ in timeout_pkgs[plat]})
+        u = sorted({p for p, _ in unverified_pkgs[plat]})
         md.append(f"### {plat}")
+        md.append(
+            f"- Unverified ({len(u)}): {', '.join(u) if u else '—'}"
+        )
         md.append(f"- Failing ({len(f)}): {', '.join(f) if f else '—'}")
         md.append(f"- Timeout ({len(t)}): {', '.join(t) if t else '—'}")
         md.append("")
@@ -520,6 +546,9 @@ def build_report(
         for s in by_platform[platform]:
             f_pkgs = [p.package for p in s.packages if p.status == "FAIL"]
             t_pkgs = [p.package for p in s.packages if p.status == "TIMEOUT"]
+            u_pkgs = [
+                p.package for p in s.packages if p.status == "UNVERIFIED"
+            ]
             md.append(
                 f"### shard {s.shard}/{s.shard_total} — "
                 f"{s.conclusion or s.status}"
@@ -535,10 +564,16 @@ def build_report(
                 bt = s.batch_totals
                 md.append(
                     f"- **Batch totals**: TOTAL={bt['total']}  "
-                    f"PASS={bt['pass']}  FAIL={bt['fail']}  "
-                    f"TIMEOUT={bt['timeout']}"
+                    f"PASS={bt['pass']}  "
+                    f"UNVERIFIED={bt.get('unverified', 0)}  "
+                    f"FAIL={bt['fail']}  TIMEOUT={bt['timeout']}  "
+                    f"SKIPPED={bt.get('skipped', 0)}"
                 )
             md.append(f"- **CI log**: `{s.log_file}`")
+            md.append(
+                f"- **Unverified packages ({len(u_pkgs)})**: "
+                f"{', '.join(u_pkgs) if u_pkgs else '—'}"
+            )
             md.append(
                 f"- **Failing packages ({len(f_pkgs)})**: "
                 f"{', '.join(f_pkgs) if f_pkgs else '—'}"
@@ -555,12 +590,12 @@ def build_report(
                     md.append(f"    - … ({len(s.ci_errors)-8} more)")
             if s.ci_flags:
                 md.append(f"- **CI flags**: {', '.join(s.ci_flags)}")
-            if f_pkgs or t_pkgs:
+            if f_pkgs or t_pkgs or u_pkgs:
                 md.append("")
                 md.append("  | pkg | status | duration | local logs |")
                 md.append("  |---|---|---|---|")
                 for p in s.packages:
-                    if p.status == "PASS":
+                    if p.status in {"PASS", "SKIPPED"}:
                         continue
                     local = debug_root / "issues" / platform / p.package
                     if local.exists():
@@ -728,7 +763,7 @@ def main() -> int:
             except subprocess.CalledProcessError as exc:
                 print(f"        warn: download failed: {exc}")
 
-    # Index log files per platform; copy logs for each failing/timeout pkg.
+    # Index log files per platform; copy logs for each non-pass package.
     indexes = {
         plat: index_log_files([root])
         for plat, root in platform_log_roots.items()
@@ -737,7 +772,7 @@ def main() -> int:
     failures_index: list[dict] = []
     for s in shards:
         for p in s.packages:
-            if p.status == "PASS":
+            if p.status in {"PASS", "SKIPPED"}:
                 continue
             dest_dir = debug_root / "issues" / s.platform / p.package
             dest_dir.mkdir(parents=True, exist_ok=True)
@@ -783,9 +818,13 @@ def main() -> int:
 
     n_fail = sum(1 for f in failures_index if f["status"] == "FAIL")
     n_timeout = sum(1 for f in failures_index if f["status"] == "TIMEOUT")
+    n_unverified = sum(
+        1 for f in failures_index if f["status"] == "UNVERIFIED"
+    )
     print()
     print(f"Done. Bundle: {debug_root}")
     print(f"  shards parsed : {len(shards)}")
+    print(f"  unverified    : {n_unverified}")
     print(f"  failing pkgs  : {n_fail}")
     print(f"  timeout pkgs  : {n_timeout}")
     print(f"  open          : {debug_root / 'REPORT.md'}")

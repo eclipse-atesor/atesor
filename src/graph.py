@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 import shlex
 import subprocess
 from pathlib import Path
@@ -29,7 +30,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
-from .artifact_scanner import ArtifactScanner
+from .artifact_scanner import UNVERIFIED, WRONG_ARCH, ArtifactScanner
 from .evidence import collect_build_evidence, error_context_excerpts
 from .knowledge import get_system_knowledge_summary
 from .llm_helpers import (
@@ -63,7 +64,12 @@ from .state import (
     create_error_record,
     should_escalate,
 )
-from .tools import apply_patch, execute_command
+from .tools import (
+    BUILD_STEP_RE,
+    apply_patch,
+    execute_command,
+    masks_failure,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -122,6 +128,38 @@ def _is_within_repo(candidate: str, repo_path: str) -> bool:
     except OSError:
         return False
     return target == root or target.startswith(root + os.sep)
+
+
+def _contained_write_cmd(repo_path: str, target: str, content: str) -> str:
+    """Return a sandbox command that writes ``content`` to ``target``.
+
+    The containment test runs where the write happens.
+    ``_is_within_repo`` resolves container paths on the host, so it
+    cannot see a symlink inside the sandbox, and the shell redirect
+    that writes the file follows one: a repo file ``out`` that links to
+    ``/etc/apk/repositories`` would let a fix overwrite it. Here
+    ``realpath -m`` resolves every link in the sandbox first, and the
+    write goes to the resolved path only when that stays inside the
+    repository. A refused write exits with status 3.
+
+    Args:
+        repo_path: The repository root, as a sandbox path.
+        target: The file to write, as a sandbox path.
+        content: The file content.
+
+    Returns:
+        A bash command for ``execute_command(..., validate=False)``.
+    """
+    encoded = base64.b64encode(content.encode()).decode()
+    return (
+        f"root=$(realpath -- {shlex.quote(repo_path)}) && "
+        f"dest=$(realpath -m -- {shlex.quote(target)}) && "
+        'case "$dest" in "$root"/*) ;; *) '
+        'echo "refusing to write outside the repository: $dest" >&2; '
+        "exit 3;; esac && "
+        'mkdir -p -- "$(dirname -- "$dest")" && '
+        f'echo {shlex.quote(encoded)} | base64 -d > "$dest"'
+    )
 
 
 def invoke_llm(
@@ -1103,6 +1141,44 @@ SCOUT_PROMPT = (
 )
 
 
+# BUILD_STEP_RE (src/tools.py) names the build and test steps.
+
+
+def _rewind_after_verify_failure(state: AgentState) -> None:
+    """Make the builder compile a fix that follows a verify failure.
+
+    After a build failure the builder resumes at the failed phase, and
+    the failed command has no cached success, so the fix is built. After
+    a verify failure every phase is done and every command has a cached
+    success, so nothing would run. Rewind to the first phase with a
+    build step and forget the cached results from there on. Earlier
+    phases, such as ``go mod init``, do not run again: they are not
+    safe to repeat.
+
+    Args:
+        state: The agent state after the fixer applied a change.
+    """
+    plan = state.build_plan
+    if not plan or not plan.phases:
+        return
+    if state.last_successful_phase < plan.phases[-1].id:
+        return
+    start = next(
+        (
+            index
+            for index, phase in enumerate(plan.phases)
+            if any(BUILD_STEP_RE.search(c) for c in phase.commands)
+        ),
+        len(plan.phases) - 1,
+    )
+    state.last_successful_phase = (
+        plan.phases[start - 1].id if start > 0 else 0
+    )
+    for phase in plan.phases[start:]:
+        for command in phase.commands:
+            state.forget_command_result(command)
+
+
 def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
     """Validate BuildPlan for hallucinations and common issues."""
     hallucination_patterns = [
@@ -1128,6 +1204,15 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
 
     for phase in plan.phases:
         for cmd in phase.commands:
+            # A build step that cannot fail turns a broken build into a
+            # reported success (`make || true`, `make; true`).
+            masked = masks_failure(cmd)
+            if masked and BUILD_STEP_RE.search(cmd):
+                return (
+                    False,
+                    f"Build command hides a failing step ({masked}): "
+                    f"'{cmd}'",
+                )
             for pattern in hallucination_patterns:
                 if pattern in cmd:
                     return (
@@ -1675,10 +1760,11 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
     Args:
         docker_repo_path: Path to the repository inside the container.
     """
-    try:
-        from src import sandbox
-        from src.platforms import get_container_name
+    from src import sandbox
+    from src.platforms import get_container_name
+    from src.sandbox import SandboxUnavailableError
 
+    try:
         container = get_container_name()
         # Shell script: walk subdirs, find Makefiles using
         # $(top_builddir) that don't already define it, and inject
@@ -1697,15 +1783,23 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
             "  fi; "
             "done"
         )
-        # docker exec on qemu; ssh and podman exec on native.
+        # docker exec on qemu; ssh and podman exec on native. Native
+        # goes through sandbox.run_call() so transient SSH transport
+        # errors are retried and a real drop raises
+        # SandboxUnavailableError instead of being reported as a
+        # best-effort fixup miss (a dropped connection can leave the
+        # sed half-applied and mask a real build failure).
         call = sandbox.build_exec_argv(container, ["sh", "-c", script])
-        result = subprocess.run(
-            call.argv,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            **call.run_kwargs(),
-        )
+        if call.native:
+            result = sandbox.run_call(call, timeout=30)
+        else:
+            result = subprocess.run(
+                call.argv,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                **call.run_kwargs(),
+            )
         if call.native:
             # The script edits Makefiles, so the local mirror is stale.
             from src import mirror
@@ -1718,6 +1812,10 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
                 f"_fixup_top_builddir_in_submakefiles stderr: "
                 f"{result.stderr.strip()}"
             )
+    except SandboxUnavailableError:
+        # Sandbox loss is a real transport failure, not a best-effort
+        # fixup miss. Let @agent_node escalate the run.
+        raise
     except Exception as exc:
         logger.warning(f"_fixup_top_builddir_in_submakefiles: {exc}")
 
@@ -2102,24 +2200,45 @@ def _download_go_toolchain_cmd(version: str) -> str:
     what our sandbox images already do at build time; replicating that
     at runtime is fast, deterministic, and works on every distro.
 
+    The command never leaves the sandbox without a working Go: it
+    checks the archive against the SHA-256 that Go publishes next to
+    it, unpacks into a staging directory, runs the staged ``go
+    version``, and only then swaps it into ``/usr/local/go``. A failed
+    final move puts the old toolchain back.
+
     Args:
         version: The Go version string to install, e.g. ``"1.25.0"``.
 
     Returns:
         A shell command string that, when executed inside the sandbox,
-        replaces ``/usr/local/go`` with the requested version. Includes
-        a sanity check (``go version``) so a partial download is
-        surfaced as a non-zero exit.
+        replaces ``/usr/local/go`` with the requested version.
+
+    Raises:
+        ValueError: If ``version`` is not a plain Go version. It comes
+            from go.mod and is put into a shell command.
     """
+    if not re.fullmatch(
+        r"\d+\.\d+(?:\.\d+)?(?:(?:rc|beta)\d+)?", version or ""
+    ):
+        raise ValueError(f"not a Go version: {version!r}")
     tarball = f"go{version}.linux-riscv64.tar.gz"
     url = f"https://go.dev/dl/{tarball}"
+    sum_url = f"https://dl.google.com/go/{tarball}.sha256"
     tmp = f"/tmp/{tarball}"
+    stage = "/usr/local/.go-staging"
     return (
         f"set -e && "
         f"curl -fsSL -o {tmp} {url} && "
-        f"rm -rf /usr/local/go && "
-        f"tar -xzf {tmp} -C /usr/local && "
-        f"rm -f {tmp} && "
+        f'echo "$(curl -fsSL {sum_url})  {tmp}" | sha256sum -c - && '
+        f"rm -rf {stage} && mkdir -p {stage} && "
+        f"tar -xzf {tmp} -C {stage} && "
+        f"{stage}/go/bin/go version && "
+        f"rm -rf /usr/local/go.old && "
+        f"if [ -d /usr/local/go ]; then "
+        f"mv /usr/local/go /usr/local/go.old; fi && "
+        f"if ! mv {stage}/go /usr/local/go; then "
+        f"mv /usr/local/go.old /usr/local/go; exit 1; fi && "
+        f"rm -rf /usr/local/go.old {stage} {tmp} && "
         f"/usr/local/go/bin/go version"
     )
 
@@ -2619,7 +2738,11 @@ def builder_node(state: AgentState) -> AgentState:
                         state, f"cmake-cache:{command[:80]}"
                     )
                 ):
-                    build_dir = None
+                    # Two paths for one directory: the host path to test
+                    # that it exists, the container path for the rm that
+                    # runs in the sandbox (the host path does not exist
+                    # there, so an rm of it removed nothing).
+                    container_build_dir = None
                     for marker in (
                         "mkdir -p build && cd build",
                         "mkdir build && cd build",
@@ -2627,17 +2750,20 @@ def builder_node(state: AgentState) -> AgentState:
                         "cmake -S . -B build",
                     ):
                         if marker in optimized_cmd:
-                            build_dir = os.path.join(
-                                _to_host_path(state.repo_path), "build"
-                            )
+                            container_build_dir = f"{state.repo_path}/build"
                             break
-                    if build_dir and os.path.isdir(build_dir):
+                    host_build_dir = (
+                        _to_host_path(container_build_dir)
+                        if container_build_dir
+                        else None
+                    )
+                    if host_build_dir and os.path.isdir(host_build_dir):
                         logger.warning(
                             "CMake compiler-cache conflict detected; "
                             "deleting build/ and retrying with explicit "
                             "CMAKE_C_COMPILER"
                         )
-                        rm_cmd = f"rm -rf {build_dir}"
+                        rm_cmd = f"rm -rf {shlex.quote(container_build_dir)}"
                         execute_command(
                             rm_cmd, cwd=state.repo_path, use_docker=True
                         )
@@ -2820,9 +2946,13 @@ def builder_node(state: AgentState) -> AgentState:
                             "Go version too old, downloading Go "
                             f"{_gv_needed} tarball into /usr/local"
                         )
+                        # Built here from a checked version, not by an
+                        # LLM, so the LLM command whitelist does not
+                        # apply; it rejected /usr/local/go/bin/go and
+                        # sha256sum, so this recovery never ran before.
                         _gv_cmd = _download_go_toolchain_cmd(_gv_needed)
                         _gv_inst = execute_command(
-                            _gv_cmd, cwd=state.repo_path
+                            _gv_cmd, cwd=state.repo_path, validate=False
                         )
                         state.log_scripted_op("install_go_version")
                         if _gv_inst.success:
@@ -2948,116 +3078,12 @@ def builder_node(state: AgentState) -> AgentState:
         ):
             _fixup_top_builddir_in_submakefiles(state.repo_path)
 
-    # All phases completed - NOW VERIFY THE BUILD PRODUCED ARTIFACTS
-    logger.info("All build phases completed - verifying artifacts...")
-
-    # Determine where to look for build artifacts based on build system
-    build_system = (
-        state.build_plan.build_system if state.build_plan else "unknown"
-    )
-
-    # Check multiple possible artifact locations
-    artifact_dirs = [state.repo_path]  # Always check repo root
-
-    # Add build-system-specific directories
-    build_subdir = os.path.join(state.repo_path, "build")
-    if build_system in ["cmake", "meson"]:
-        artifact_dirs.insert(
-            0, build_subdir
-        )  # Check build/ first for cmake/meson
-
-    # Also check common output directories
-    for subdir in ["bin", "dist", "target/release", "output"]:
-        artifact_dirs.append(os.path.join(state.repo_path, subdir))
-
-    artifacts_found = False
-    for artifact_dir in artifact_dirs:
-        check_cmd = f"test -d {artifact_dir}"
-        check_result = execute_command(check_cmd, cwd=state.repo_path)
-
-        if not check_result.success:
-            continue
-
-        logger.info(f"Checking for artifacts in: {artifact_dir}")
-        scanner = ArtifactScanner(artifact_dir, cwd=state.repo_path)
-        artifacts = scanner.scan()
-
-        is_valid, message = scanner.verify_build_success()
-        logger.info(f"Artifact verification in {artifact_dir}: {message}")
-
-        if is_valid:
-            # Record all artifacts in state
-            for artifact in artifacts:
-                state.add_build_artifact(
-                    filepath=artifact["filepath"],
-                    artifact_type=artifact["type"],
-                    architecture=artifact["architecture"],
-                )
-
-            summary = scanner.get_summary()
-            logger.info(
-                f"Build artifacts summary: "
-                f"{json.dumps(summary, indent=2, default=str)}"
-            )
-            state.context_cache["artifact_summary"] = summary
-            artifacts_found = True
-            break
-
-    if not artifacts_found:
-        # For Go projects, check if any binary was produced in the repo root
-        if build_system == "go":
-            find_cmd = (
-                f"find {state.repo_path} -maxdepth 1 -type f -executable"
-            )
-            find_result = execute_command(find_cmd, cwd=state.repo_path)
-            if find_result.success and find_result.stdout.strip():
-                logger.info(f"Go binary found: {find_result.stdout.strip()}")
-                for binary_path in find_result.stdout.strip().split("\n"):
-                    binary_path = binary_path.strip()
-                    if binary_path:
-                        # Verify it's a RISC-V binary
-                        file_cmd = f"file {binary_path}"
-                        file_result = execute_command(
-                            file_cmd, cwd=state.repo_path
-                        )
-                        if (
-                            file_result.success
-                            and "RISC-V" in file_result.stdout
-                        ):
-                            state.add_build_artifact(
-                                filepath=binary_path,
-                                artifact_type="binary",
-                                architecture="riscv64",
-                            )
-                            artifacts_found = True
-                            logger.info(
-                                f"Verified RISC-V binary: {binary_path}"
-                            )
-                        elif (
-                            file_result.success and "ELF" in file_result.stdout
-                        ):
-                            # ELF binary on RISC-V host is likely RISC-V
-                            state.add_build_artifact(
-                                filepath=binary_path,
-                                artifact_type="binary",
-                                architecture="riscv64",
-                            )
-                            artifacts_found = True
-                            logger.info(
-                                f"Found ELF binary (assumed RISC-V on "
-                                f"native host): {binary_path}"
-                            )
-
-    if not artifacts_found:
-        logger.warning(
-            "No build artifacts found, but all phases completed successfully"
-        )
-        # Don't fail the build - phases completed successfully,
-        # artifacts may be installed elsewhere.
-        logger.info("Treating as success since all build commands succeeded")
-
+    # Every command succeeded. Whether the build produced riscv64
+    # machine code is decided in one place, verify_node, which the
+    # subgraph always runs next. The scan that used to sit here
+    # duplicated it and recorded any ELF file as riscv64.
     state.build_status = BuildStatus.SUCCESS
-    logger.info("Build completed successfully with artifact verification!")
+    logger.info("All build phases completed; verifying artifacts next")
 
     # Close the fix-attempt feedback loop: any fix applied before this
     # successful build evidently worked. Without this, every attempt
@@ -3729,30 +3755,28 @@ def fixer_node(state: AgentState) -> AgentState:
                     )
                     continue
 
-                dir_path = os.path.dirname(full_file_path)
-                if dir_path:
-                    mkdir_result = execute_command(
-                        f"mkdir -p {shlex.quote(dir_path)}",
-                        cwd=state.repo_path,
-                        use_docker=True,
-                    )
-                    if not mkdir_result.success:
-                        logger.warning(
-                            f"Failed to create directory: {dir_path}"
-                        )
-
-                # Use base64 encoding to safely transfer LLM-generated content
-                encoded = base64.b64encode(file_content.encode()).decode()
+                # Built by Atesor with quoted arguments and base64
+                # content, so the LLM whitelist does not apply.
                 write_result = execute_command(
-                    f"echo {shlex.quote(encoded)} | base64 -d "
-                    f"> {shlex.quote(full_file_path)}",
+                    _contained_write_cmd(
+                        state.repo_path, full_file_path, file_content
+                    ),
                     cwd=state.repo_path,
                     use_docker=True,
+                    validate=False,
                 )
 
                 if write_result.success:
                     changes_made.append(f"Created file: {file_path}")
                     logger.info(f"Created file: {file_path}")
+                elif write_result.exit_code == 3:
+                    logger.error(
+                        f"Refusing create_file through a symlink out of "
+                        f"the repo: {file_path}"
+                    )
+                    changes_made.append(
+                        f"REJECTED create_file outside repo: {file_path}"
+                    )
                 else:
                     logger.error(
                         f"Failed to create file {file_path}: "
@@ -3840,10 +3864,14 @@ def fixer_node(state: AgentState) -> AgentState:
             strategy=strategy["description"],
             changes_made=changes_made,
             success=False,  # Will be updated after rebuild
+            error_message=state.last_error or "",
         )
         state.add_fix_attempt(fix_attempt)
 
         logger.info(f"Fix applied: {len(changes_made)} changes")
+
+        if any(not c.startswith("REJECTED") for c in changes_made):
+            _rewind_after_verify_failure(state)
 
         # Reset to pending so supervisor can try building again
         state.build_status = BuildStatus.PENDING
@@ -3976,6 +4004,16 @@ def _save_learning_data(state: AgentState):
                 logger.warning(f"Artifact curation failed (non-fatal): {e}")
                 state.curated_artifacts = []
 
+        # Only a proven riscv64 port may teach later runs. An unverified
+        # or wrong-arch "success" in the cache or the few-shot store
+        # would be replayed as if it had worked.
+        if not state.is_verified_success:
+            logger.info(
+                f"Not learning from {repo}: build is "
+                f"{state.verification_status or 'not verified'}"
+            )
+            return
+
         # --- Scout learning ---
         if state.build_plan and state.build_plan.phases:
             scout_data = {
@@ -4011,8 +4049,8 @@ def _save_learning_data(state: AgentState):
                     "build_system": bs,
                     "repo_name": repo,
                     "error_pattern": (
-                        re.escape((state.last_error or "")[:80])
-                        if state.last_error
+                        re.escape(fix.error_message[:80])
+                        if fix.error_message
                         else ""
                     ),
                     # ``changes_made`` records "Executed: <cmd>" /
@@ -4068,22 +4106,159 @@ def _save_learning_data(state: AgentState):
                         for p in state.build_plan.phases
                     ]
                 },
-                dependencies=[],
-                patches=[
-                    f.strategy
-                    for f in (state.fixes_attempted or [])
-                    if f.success
-                ],
+                dependencies=(
+                    sorted(set(state.dependencies.system_packages))
+                    if state.dependencies
+                    else []
+                ),
+                # The diffs that were applied, not strategy descriptions.
+                patches=list(state.patches_generated),
                 artifacts=state.curated_artifacts
                 or state.build_artifacts
                 or [],
                 build_duration_seconds=duration,
                 recipe_markdown=state.porting_recipe or None,
+                verification=state.artifact_verification,
             )
 
         logger.info(f"Auto-learning complete for {repo}")
     except Exception as e:
         logger.warning(f"Auto-learning failed (non-fatal): {e}")
+
+
+# The package's own tests run once after a successful build and never
+# decide the port (user decision 2026-09-30: non-gating). In a batch
+# run the limit is cut so that the tests end _TEST_RESERVE seconds
+# before the batch kill (ATESOR_RUN_DEADLINE, epoch seconds): the
+# summarizer and curator LLM calls, the outputs, the native mirror copy
+# and the zip still need that time. Under _TEST_MIN seconds the phase
+# is skipped; ATESOR_PACKAGE_TEST_TIMEOUT=0 turns it off.
+PACKAGE_TEST_TIMEOUT = 600
+_TEST_RESERVE = 420
+_TEST_MIN = 60
+_TEST_OUTPUT_TAIL = 3000
+
+
+def _package_test_timeout(state: AgentState) -> int:
+    """Return the seconds the package tests may use; 0 means skip."""
+    raw = os.environ.get("ATESOR_PACKAGE_TEST_TIMEOUT", "").strip()
+    try:
+        limit = int(raw) if raw else PACKAGE_TEST_TIMEOUT
+    except ValueError:
+        limit = PACKAGE_TEST_TIMEOUT
+    deadline = os.environ.get("ATESOR_RUN_DEADLINE", "").strip()
+    if deadline:
+        try:
+            remaining = float(deadline) - time.time() - _TEST_RESERVE
+            limit = min(limit, int(remaining))
+        except ValueError:
+            pass
+    return limit if limit >= _TEST_MIN else 0
+
+
+def _detect_test_command(state: AgentState) -> Optional[tuple]:
+    """Return ``(framework, command)`` for the package's tests, or None.
+
+    Looks at the configured build tree first (CTest, Meson), then at
+    the language build files, then at a ``check`` or ``test`` target in
+    the top Makefile.
+    """
+    root = _to_host_path(state.repo_path)
+    build_system = (
+        state.build_plan.build_system if state.build_plan else ""
+    ).lower()
+
+    def has(*parts: str) -> bool:
+        return os.path.exists(os.path.join(root, *parts))
+
+    for build_dir in ("build", "_build", "builddir"):
+        if has(build_dir, "CTestTestfile.cmake"):
+            return (
+                "ctest",
+                f"ctest --test-dir {build_dir} --output-on-failure",
+            )
+        if has(build_dir, "meson-info"):
+            return (
+                "meson test",
+                f"meson test -C {build_dir} --print-errorlogs",
+            )
+    if has("go.mod") and (build_system == "go" or not has("Makefile")):
+        return ("go test", "go test ./...")
+    if has("Cargo.toml") and (
+        build_system in ("cargo", "rust") or not has("Makefile")
+    ):
+        return ("cargo test", "cargo test --release")
+    makefile = os.path.join(root, "Makefile")
+    if os.path.isfile(makefile):
+        try:
+            with open(makefile, encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+        for target in ("check", "test"):
+            if re.search(rf"^{target}\s*:", text, re.MULTILINE):
+                return (f"make {target}", f"make {target}")
+    return None
+
+
+def _run_package_tests(state: AgentState) -> Dict[str, Any]:
+    """Run the package's own test suite once and describe the outcome.
+
+    Never raises: the phase must not turn a finished port into an
+    escalation. The build status is not changed.
+
+    Returns:
+        A dict with ``status`` (passed, failed, timeout, skipped or
+        error) and, when tests ran, the framework, command, exit code,
+        duration and output tail.
+    """
+    try:
+        timeout = _package_test_timeout(state)
+        if timeout <= 0:
+            return {
+                "status": "skipped",
+                "reason": "disabled, or no time left in the run budget",
+            }
+        detected = _detect_test_command(state)
+        if not detected:
+            return {
+                "status": "skipped",
+                "reason": (
+                    "no test suite found (ctest, meson test, go test, "
+                    "cargo test, make check or make test)"
+                ),
+            }
+        framework, command = detected
+        logger.info(f"Running package tests: {command} (<= {timeout}s)")
+        started = time.time()
+        result = execute_command(
+            command, cwd=state.repo_path, timeout=timeout
+        )
+        duration = round(time.time() - started, 1)
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+        # 137: the in-sandbox timeout --signal=KILL; -1: the host limit.
+        # Exit 137 is also an OOM kill, so the elapsed time decides.
+        timed_out = result.exit_code in (137, -1) and (
+            duration >= timeout - 35
+        )
+        if result.exit_code == 0:
+            status = "passed"
+        elif timed_out:
+            status = "timeout"
+        else:
+            status = "failed"
+        return {
+            "status": status,
+            "framework": framework,
+            "command": command,
+            "exit_code": result.exit_code,
+            "duration_seconds": duration,
+            "timeout_seconds": timeout,
+            "output_tail": output[-_TEST_OUTPUT_TAIL:],
+        }
+    except Exception as exc:
+        logger.warning(f"Package tests could not run: {exc}")
+        return {"status": "error", "reason": str(exc)[:300]}
 
 
 @agent_node(AgentRole.SUMMARIZER)
@@ -4093,6 +4268,10 @@ def finish_node(state: AgentState) -> AgentState:
 
     state.build_status = BuildStatus.SUCCESS
     state.current_phase = "finished"
+
+    if state.package_tests is None:
+        state.package_tests = _run_package_tests(state)
+        logger.info(f"Package tests: {state.package_tests['status']}")
 
     # Prepare context for summarizer
     arch_issues = (
@@ -4156,6 +4335,21 @@ def finish_node(state: AgentState) -> AgentState:
 
     build_steps += artifacts_info
 
+    # The guide must say whether the riscv64 output was proven; a
+    # build whose commands passed is not yet a verified port.
+    verification = state.artifact_verification or {}
+    verdict = verification.get("status", "not run")
+    verdict_reason = verification.get("reason", "")
+    verdict_text = verdict + (f": {verdict_reason}" if verdict_reason else "")
+    build_steps += f"\n**Artifact verification:** {verdict_text}\n"
+    tests = state.package_tests or {}
+    tests_text = tests.get("status", "not run")
+    if tests.get("command"):
+        tests_text += f" (`{tests['command']}`, exit {tests.get('exit_code')})"
+    elif tests.get("reason"):
+        tests_text += f": {tests['reason']}"
+    build_steps += f"\n**Package tests (not gating):** {tests_text}\n"
+
     # Create prompt
     prompt = SUMMARIZER_PROMPT.format(
         repo_name=state.repo_name,
@@ -4203,7 +4397,8 @@ def finish_node(state: AgentState) -> AgentState:
         # Fallback recipe
         state.porting_recipe = (
             f"# RISC-V Porting Recipe: {state.repo_name}\n\n"
-            f"Build succeeded.\n\n{build_steps}"
+            f"The build commands succeeded. Artifact verification: "
+            f"{verdict_text}.\n\n{build_steps}"
         )
 
     # Auto-learning: save successful patterns
@@ -4226,7 +4421,9 @@ def finish_node(state: AgentState) -> AgentState:
 
 def route_init_to_next(state: AgentState) -> str:
     """After init: go to the analyst, or escalate if init failed."""
-    if state.build_status == BuildStatus.FAILED:
+    # ESCALATED means init_node crashed (agent_node wrapper). The clone
+    # may be missing, so the analyst must not run.
+    if state.build_status in (BuildStatus.FAILED, BuildStatus.ESCALATED):
         logger.warning("Initialization failed; forcing escalation")
         return "escalate_node"
     return "analyst_node"
@@ -4271,6 +4468,12 @@ def route_supervisor_to_next(state: AgentState) -> str:
     if state.build_status == BuildStatus.SUCCESS:
         return "finish_node"
 
+    # A node that crashed marks the run ESCALATED (agent_node wrapper).
+    # Sending that back to scout or fixer would hide the crash and burn
+    # attempts on an infrastructure fault the LLM cannot fix.
+    if state.build_status == BuildStatus.ESCALATED:
+        return "escalate_node"
+
     should_esc, esc_reason = should_escalate(state)
     if should_esc:
         logger.warning(f"Escalating: {esc_reason}")
@@ -4314,6 +4517,8 @@ def route_build_result(state: AgentState) -> str:
     """Route a build result: verify, attempt a fix, or exit."""
     if state.build_status == BuildStatus.SUCCESS:
         return "verify_node"
+    if state.build_status == BuildStatus.ESCALATED:
+        return "__end__"
     if state.attempt_count >= state.max_attempts:
         logger.warning(
             f"Subgraph: max attempts ({state.max_attempts}) exceeded "
@@ -4325,7 +4530,7 @@ def route_build_result(state: AgentState) -> str:
 
 def route_verify_result(state: AgentState) -> str:
     """Route a verify result: exit as success, or go to fix."""
-    if state.build_status == BuildStatus.SUCCESS:
+    if state.build_status in (BuildStatus.SUCCESS, BuildStatus.ESCALATED):
         return "__end__"
     if state.attempt_count >= state.max_attempts:
         logger.warning(
@@ -4344,6 +4549,8 @@ def route_verify_result(state: AgentState) -> str:
 
 def route_fix_result(state: AgentState) -> str:
     """After a fix: retry build, or exit subgraph as failure."""
+    if state.build_status == BuildStatus.ESCALATED:
+        return "__end__"
     if state.build_status == BuildStatus.FAILED:
         logger.warning("Subgraph: fix resulted in FAILED status — exiting")
         return "__end__"
@@ -4641,154 +4848,80 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
 # ============================================================================
 
 
-def _locate_expected_artifacts(
-    state: AgentState, expected: List[str]
-) -> List[tuple]:
-    """Search the sandbox for the analyst's expected artifact names.
+# The state keeps at most this many riscv64 outputs. The curator sends
+# the list to an LLM, and the old scanner kept at most 60 (20 per kind).
+# The verification summary keeps the full counts.
+_MAX_RECORDED_ARTIFACTS = 60
 
-    Covers the common case where a build installs its outputs outside
-    the repo tree (``make install`` → /usr/local) and the repo scan
-    finds nothing.
 
-    Args:
-        state: Current agent state.
-        expected: Artifact file names from ``PackageAnalysis``.
+def _artifacts_to_record(riscv64: List[Any], expected: List[str]) -> List[Any]:
+    """Return the riscv64 outputs to record, expected names first."""
 
-    Returns:
-        List of ``(path, file_output)`` tuples for every match found.
-    """
-    hits: List[tuple] = []
-    for name in expected[:5]:
-        name = str(name).strip()
-        # Basenames only — a path-ish or globby "expectation" is an
-        # LLM artifact, not a file name.
-        if not name or "/" in name or any(c in name for c in "*?[]$`"):
-            continue
-        result = execute_command(
-            f"find {shlex.quote(state.repo_path)} /usr/local/bin "
-            f"/usr/local/lib -maxdepth 6 -type f -name "
-            f"{shlex.quote(name)} 2>/dev/null | head -3",
-            cwd=state.repo_path,
-            use_docker=True,
-        )
-        for path in (result.stdout or "").strip().splitlines():
-            path = path.strip()
-            if not path:
-                continue
-            file_result = execute_command(
-                f"file {shlex.quote(path)}",
-                cwd=state.repo_path,
-                use_docker=True,
-            )
-            hits.append((path, (file_result.stdout or "").strip()))
-    return hits
+    def is_expected(artifact: Any) -> bool:
+        name = artifact.path.rsplit("/", 1)[-1]
+        return any(name == e or name.startswith(e + ".") for e in expected)
+
+    first = [a for a in riscv64 if is_expected(a)]
+    rest = [a for a in riscv64 if not is_expected(a)]
+    return (first + rest)[:_MAX_RECORDED_ARTIFACTS]
 
 
 @agent_node(AgentRole.BUILDER)
 def verify_node(state: AgentState) -> AgentState:
-    """Post-build artifact verification. Seals build success or routes to fix.
+    """Seal a build as verified, or send a wrong-arch build to the fixer.
 
-    Outcomes:
-        * RISC-V artifacts found → SUCCESS.
-        * Artifacts found but for a DIFFERENT architecture (x86/ARM
-          fallthrough) → FAILED with an ARCHITECTURE error. This is the
-          silent-regression case the scanner exists to catch; it must
-          not pass as success.
-        * Nothing scannable found → keep the builder's SUCCESS verdict
-          (many packages `make install` their artifacts elsewhere, or
-          only produce scripts) but record the caveat for the report.
+    The ELF header of every build output is the evidence (see
+    ``src/artifact_scanner.py``). Outcomes:
+        * verified: riscv64 build outputs, and none for another
+          architecture → SUCCESS.
+        * wrong_arch: any build output for another architecture
+          (x86-64, aarch64, riscv32, a mixed static archive) → FAILED
+          with an ARCHITECTURE error for the fixer. One foreign output
+          fails the port even when the others are riscv64.
+        * unverified: no riscv64 output could be proven (header-only
+          libraries, scripts, or a scan that could not run) → SUCCESS
+          that the report, the exit code (3) and the zip manifest mark
+          as unverified, and that is never cached or learned.
     """
     logger.info("Verifying build artifacts...")
-    scanner = ArtifactScanner(state.repo_path, cwd=state.repo_path)
-    artifacts = scanner.scan()
-    is_valid, message = scanner.verify_build_success()
-    logger.info(f"Verification: {message}")
-
-    if is_valid:
-        for artifact in artifacts:
-            state.add_build_artifact(
-                filepath=artifact["filepath"],
-                artifact_type=artifact["type"],
-                architecture=artifact.get("architecture"),
-            )
-        state.build_status = BuildStatus.SUCCESS
-        return state
-
-    summary = scanner.get_summary()
-    wrong_arch = [
-        arch for arch in summary.get("by_architecture", {}) if arch != "RISC-V"
-    ]
-    if wrong_arch:
-        # Build "succeeded" but produced non-riscv64 binaries — a real
-        # failure that the fixer must see (and that must never be
-        # reported as a successful port).
-        state.build_status = BuildStatus.FAILED
-        state.add_error(
-            create_error_record(
-                message=(
-                    f"Artifact verification failed: {message}. "
-                    f"Non-RISC-V architectures found: "
-                    f"{', '.join(wrong_arch)}"
-                ),
-                category=ErrorCategory.ARCHITECTURE,
-            )
-        )
-        return state
-
-    # No ELF artifacts in the repo scan. Before tolerating, look for
-    # the artifacts the analyst said this build must produce — they may
-    # have been installed outside the repo tree (make install).
     expected = (
         state.package_analysis.expected_artifacts
         if state.package_analysis
         else []
     )
-    if expected:
-        hits = _locate_expected_artifacts(state, expected)
-        riscv_hits = [(p, d) for p, d in hits if "RISC-V" in d]
-        wrong_arch = [
-            (p, d) for p, d in hits if "ELF" in d and "RISC-V" not in d
-        ]
-        if riscv_hits:
-            for path, _desc in riscv_hits:
-                state.add_build_artifact(
-                    filepath=path,
-                    artifact_type="binary",
-                    architecture="RISC-V",
-                )
-            logger.info(
-                f"Verified {len(riscv_hits)} expected artifact(s) found "
-                f"outside the repo scan"
-            )
-            state.build_status = BuildStatus.SUCCESS
-            return state
-        if wrong_arch:
-            state.build_status = BuildStatus.FAILED
-            state.add_error(
-                create_error_record(
-                    message=(
-                        "Expected artifacts exist but are not RISC-V: "
-                        + ", ".join(
-                            f"{p} ({d[:60]})" for p, d in wrong_arch[:3]
-                        )
-                    ),
-                    category=ErrorCategory.ARCHITECTURE,
-                )
-            )
-            return state
-
-    # Nothing scannable anywhere — tolerate (scripts-only repos) but
-    # leave a caveat, including which expected artifacts never showed
-    # up, for the recipe/report.
-    logger.warning(
-        "No verifiable ELF artifacts found; keeping build success "
-        "verdict but flagging as unverified"
+    verdict = ArtifactScanner(state.repo_path).scan(
+        expected_names=expected,
+        since=state.execution_start_time.timestamp(),
     )
-    state.context_cache["artifact_verification"] = {
-        "verified": False,
-        "reason": message,
-        "expected_missing": list(expected),
-    }
+    state.artifact_verification = verdict.to_dict()
+    # The latest scan is the truth; a rebuild after a fix rescans.
+    state.build_artifacts = []
+
+    if verdict.status == WRONG_ARCH:
+        state.build_status = BuildStatus.FAILED
+        state.add_error(
+            create_error_record(
+                message=f"Artifact verification failed: {verdict.reason}",
+                category=ErrorCategory.ARCHITECTURE,
+            )
+        )
+        return state
+
+    recorded = _artifacts_to_record(verdict.riscv64, list(expected))
+    for artifact in recorded:
+        state.add_build_artifact(
+            filepath=artifact.path,
+            artifact_type=artifact.type,
+            architecture=artifact.arch,
+        )
+    total = len(verdict.riscv64) + verdict.unlisted_riscv64
+    if total > len(recorded):
+        logger.info(
+            f"Recorded {len(recorded)} of {total} riscv64 build outputs; "
+            "the verification summary keeps the full count"
+        )
+    if verdict.status == UNVERIFIED:
+        logger.warning(f"Build not verified: {verdict.reason}")
     state.build_status = BuildStatus.SUCCESS
     return state
 

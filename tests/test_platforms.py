@@ -42,6 +42,22 @@ class TestProfileHelpers(unittest.TestCase):
         """Test resolve known canonical maps to distro name."""
         self.assertEqual(ALPINE_RISCV.resolve("zlib"), "zlib-dev")
         self.assertEqual(DEBIAN_RISCV.resolve("zlib"), "zlib1g-dev")
+        self.assertEqual(ALPINE_RISCV.resolve("boost"), "boost-dev")
+        self.assertEqual(DEBIAN_RISCV.resolve("boost"), "libboost-dev")
+        self.assertEqual(ALPINE_RISCV.resolve("qt5base"), "qt5-qtbase-dev")
+        self.assertEqual(DEBIAN_RISCV.resolve("qt5base"), "qtbase5-dev")
+
+    def test_no_alpine_libexecinfo_package_resolution(self) -> None:
+        """Alpine must not suggest removed libexecinfo packages."""
+        self.assertNotIn("libexecinfo", ALPINE_RISCV.package_map)
+        self.assertEqual(
+            ALPINE_RISCV.resolve("libexecinfo"),
+            "libexecinfo",
+        )
+
+    def test_debian_libjpeg_turbo_uses_portable_dev_package(self) -> None:
+        """Debian and Ubuntu share libjpeg-dev across jammy/trixie."""
+        self.assertEqual(DEBIAN_RISCV.resolve("libjpeg-turbo"), "libjpeg-dev")
 
     def test_resolve_unknown_falls_back_to_input(self) -> None:
         """Test resolve unknown falls back to input."""
@@ -105,6 +121,49 @@ class TestDetectPlatform(unittest.TestCase):
             )
             self.assertIs(detect_platform("dummy"), DEBIAN_RISCV)
             mrun.assert_not_called()  # override short-circuits the docker call
+
+    def test_env_platform_used_without_container_override(self) -> None:
+        """ATESOR_PLATFORM wins when no container override exists."""
+        os.environ["ATESOR_PLATFORM"] = "debian"
+        with mock.patch("src.platforms.subprocess.run") as mrun:
+            self.assertIs(detect_platform(), DEBIAN_RISCV)
+            mrun.assert_not_called()
+
+    def test_env_platform_wins_over_a_missing_worker_container(
+        self,
+    ) -> None:
+        """Batch passes --platform and --container together.
+
+        The worker container does not exist yet when the profile is
+        chosen; its failed inspection must not turn debian into alpine.
+        """
+        os.environ["ATESOR_PLATFORM"] = "debian"
+        with mock.patch.dict(
+            os.environ, {"ATESOR_CONTAINER": "atesor-ai-sandbox-debian-w1"}
+        ):
+            with mock.patch("src.platforms.subprocess.run") as mrun:
+                mrun.return_value = SimpleNamespace(
+                    returncode=1, stdout="", stderr="No such container"
+                )
+                self.assertIs(detect_platform(), DEBIAN_RISCV)
+                mrun.assert_not_called()
+
+    def test_env_container_is_inspected_without_a_platform(self) -> None:
+        """With no platform given, ATESOR_CONTAINER says what to read."""
+        with mock.patch.dict(os.environ, {"ATESOR_CONTAINER": "box"}):
+            with mock.patch("src.platforms.subprocess.run") as mrun:
+                mrun.return_value = SimpleNamespace(
+                    returncode=0, stdout="ID=debian\n", stderr=""
+                )
+                self.assertIs(detect_platform(), DEBIAN_RISCV)
+                self.assertEqual(mrun.call_args[0][0][2], "box")
+
+    def test_native_never_runs_a_local_docker_exec(self) -> None:
+        """On native the container is on the machine, not local."""
+        with mock.patch.dict(os.environ, {"ATESOR_TARGET": "native"}):
+            with mock.patch("src.platforms.subprocess.run") as mrun:
+                self.assertIs(detect_platform(), ALPINE_RISCV)
+                mrun.assert_not_called()
 
     def test_invalid_env_override_ignored(self) -> None:
         """Test invalid env override ignored."""

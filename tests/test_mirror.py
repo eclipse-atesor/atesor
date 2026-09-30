@@ -123,14 +123,13 @@ class TestPull(_MirrorCase):
         mirror.pull("zlib", force=True)
         self.assertEqual(3, run.call_count)
 
-    def test_warning_exits_do_not_raise(self) -> None:
-        """The rsync exits 23 and 24 are warnings; the copy is fresh."""
-        run = self.rsync([_done(23, "rsync: permission denied"), _done(24)])
-        mirror.pull("zlib")
-        mirror.mark_stale()
-        mirror.pull("zlib")
-        self.assertEqual(2, run.call_count)
-        self.assertFalse(mirror.is_stale("zlib"))
+    def test_partial_transfer_exits_raise(self) -> None:
+        """Partial rsync failures leave a stale mirror; the copy raises."""
+        self.rsync([_done(23, "rsync: permission denied")])
+        with self.assertRaises(SandboxUnavailableError) as ctx:
+            mirror.pull("zlib")
+        self.assertIn("rsync exit 23", str(ctx.exception))
+        self.assertTrue(mirror.is_stale("zlib"))
 
     def test_other_exits_raise_without_the_address(self) -> None:
         """Any other failure stops the run, and hides the address."""
@@ -162,6 +161,15 @@ class TestPull(_MirrorCase):
         run = self.rsync([_done()])
         with self.assertRaises(SandboxUnavailableError):
             mirror.pull("zlib")
+        run.assert_not_called()
+
+    def test_unsafe_physical_work_directory_raises(self) -> None:
+        """An unsafe physical workdir is refused before rsync runs."""
+        target.set_remote_workdir("/home/tester/atesor ai")
+        run = self.rsync([_done()])
+        with self.assertRaises(SandboxUnavailableError) as ctx:
+            mirror.pull("zlib")
+        self.assertIn("physical work directory is unsafe", str(ctx.exception))
         run.assert_not_called()
 
     def test_unsafe_names_are_refused(self) -> None:

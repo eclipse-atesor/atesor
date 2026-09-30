@@ -80,6 +80,204 @@ def _strip_quoted(command: str) -> str:
     return "".join(out)
 
 
+def _is_assignment_word(word: str) -> bool:
+    """Return True when ``word`` is a shell assignment prefix."""
+    name, sep, _value = word.partition("=")
+    return bool(sep) and bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
+
+
+def _is_arithmetic_substitution(text: str) -> bool:
+    """Return True when a ``$((...))`` body is arithmetic-like."""
+    if "$(" in text or "`" in text:
+        return False
+    return bool(
+        re.match(r"^[A-Za-z0-9_$+\-*/%<>=!&|^~?:,.\s()]+$", text)
+    )
+
+
+def _shell_words(command: str) -> list:
+    """Split shell words, returning an empty list on malformed quoting."""
+    import shlex
+
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return []
+
+
+def _split_segments_with_ops(command: str) -> list:
+    """Split shell text into ``(operator, segment)`` pairs.
+
+    The operator is the separator that came before the segment. Quoted
+    regions, parentheses and brace groups stay intact.
+    """
+    pairs = []
+    buf = []
+    quote = None
+    escaped = False
+    paren_depth = 0
+    brace_depth = 0
+    op = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            buf.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")" and paren_depth:
+            paren_depth -= 1
+        elif ch == "{" and _brace_boundary(command, i):
+            brace_depth += 1
+        elif ch == "}" and brace_depth and _brace_boundary(command, i):
+            brace_depth -= 1
+        if paren_depth == 0 and brace_depth == 0:
+            two = command[i : i + 2]
+            if two in ("&&", "||"):
+                _append_segment_pair(pairs, op, buf)
+                buf = []
+                op = two
+                i += 2
+                continue
+            # Redirections, not operators: 2>&1, >&2, &>log, >|log.
+            if (ch == "&" and buf and buf[-1] in "<>") or two in (
+                "&>",
+            ) or (ch == "|" and buf and buf[-1] == ">"):
+                buf.append(ch)
+                i += 1
+                continue
+            if two == "|&":
+                _append_segment_pair(pairs, op, buf)
+                buf = []
+                op = "|"
+                i += 2
+                continue
+            if ch in ";|&\n":
+                _append_segment_pair(pairs, op, buf)
+                buf = []
+                op = ch
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    _append_segment_pair(pairs, op, buf)
+    return pairs
+
+
+def _append_segment_pair(pairs: list, op: str, buf: list) -> None:
+    """Append one non-empty operator/segment pair."""
+    segment = "".join(buf).strip()
+    if segment:
+        pairs.append((op, segment))
+
+
+def _brace_boundary(command: str, index: int) -> bool:
+    """Return True when a brace is a shell grouping token."""
+    before = command[index - 1] if index > 0 else " "
+    after = command[index + 1] if index + 1 < len(command) else " "
+    return before.isspace() or after.isspace() or before in ";|&()"
+
+
+# Build and test steps whose failure must fail the phase. Shared with
+# graph.validate_build_plan; a masked optional step such as Atesor's
+# own `cp /usr/share/gettext/m4/*.m4 m4/ 2>/dev/null || true` is fine.
+BUILD_STEP_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:"
+    r"make|gmake|ninja|ctest|"
+    r"cmake\s+--build|meson\s+(?:compile|test)|"
+    r"go\s+(?:build|test|install)|cargo\s+(?:build|test|install)|"
+    r"\./configure"
+    r")\b"
+)
+
+
+def masks_failure(command: str) -> Optional[str]:
+    """Return why a command hides failures, if it does.
+
+    Args:
+        command: A build-phase shell command.
+
+    Returns:
+        A short reason when the command can turn a failed build step
+        into exit status 0, otherwise None.
+    """
+    if re.search(
+        r"(^|[;&|\n])\s*set\s+\+e(?:\s|$|[;&|\n])",
+        _strip_quoted(command),
+    ):
+        return "set +e disables immediate failure handling"
+
+    pairs = _split_segments_with_ops(command)
+    if len(pairs) == 1 and pairs[0][1] in ("true", ":"):
+        return None
+
+    # Nothing sets pipefail around build commands, so a pipeline exits
+    # with its last command: `make | tail` passes when make fails.
+    pipefail = re.search(r"\bpipefail\b", _strip_quoted(command))
+    previous = None
+    for op, segment in pairs:
+        words = _shell_words(segment)
+        if op == "||" and _or_tail_masks_failure(segment, words):
+            return f"failure is masked by '|| {segment[:40]}'"
+        if op in (";", "\n") and _trailing_success_segment(words):
+            return f"trailing '{segment}' can hide an earlier failure"
+        if (
+            op == "|"
+            and not pipefail
+            and previous is not None
+            and BUILD_STEP_RE.search(previous)
+        ):
+            return (
+                f"the pipe into '{segment[:40]}' hides the exit status "
+                f"of '{previous[:40]}'"
+            )
+        previous = segment
+    return None
+
+
+def _or_tail_masks_failure(segment: str, words: list) -> bool:
+    """Return True when the right side of ``||`` exits successfully."""
+    if not words:
+        return False
+    first = words[0]
+    if first in ("true", ":", "/bin/true", "echo", "printf"):
+        return True
+    if first in ("exit", "return") and len(words) > 1 and words[1] == "0":
+        return True
+    stripped = segment.strip()
+    if stripped.startswith("{") or stripped.startswith("("):
+        return False
+    return False
+
+
+def _trailing_success_segment(words: list) -> bool:
+    """Return True when a semicolon tail reports success unconditionally."""
+    if not words:
+        return False
+    if words[0] in ("true", ":"):
+        return True
+    return len(words) > 1 and words[0] == "exit" and words[1] == "0"
+
+
 class CommandValidator:
     """Smart command validation that allows legitimate operations.
 
@@ -109,6 +307,13 @@ class CommandValidator:
         r"^cmake(\s+.*)?$",
         r"^make(\s+.*)?$",
         r"^ninja(\s+.*)?$",
+        r"^nproc$",
+        r"^getconf\s+",
+        r"^pkg-config\s+",
+        r"^dirname\s+",
+        r"^basename\s+",
+        r"^realpath\s+",
+        r"^readlink\s+",
         # Configure/bootstrap scripts: catch ./configure, ./Configure,
         # ./config, ./buildconf, ./buildconf.sh, ./autogen.sh,
         # ./bootstrap[.sh], ./setup, etc. Some upstreams (openssl, curl)
@@ -125,9 +330,9 @@ class CommandValidator:
         r"^cargo(\s+.*)?$",
         r"^npm(\s+.*)?$",
         r"^pip(\s+.*)?$",
-        r"^python(\s+.*)?$",
-        r"^python3(\s+.*)?$",
-        r"^perl(\s+.*)?$",
+        r"^python(?:\s+[\s\S]*)?$",
+        r"^python3(?:\s+[\s\S]*)?$",
+        r"^perl(?:\s+[\s\S]*)?$",
         r"^go(\s+.*)?$",
         r"^git(\s+.*)?$",
         # Package management
@@ -154,6 +359,7 @@ class CommandValidator:
         r"^mkdir\s+-p\s+",
         r"^cd\s+",
         r"^pwd",
+        r"^mktemp\s+",
         # Text processing
         r"^echo\s+",
         r"^printf\s+",
@@ -164,6 +370,8 @@ class CommandValidator:
         # Environment and Shell
         r"^export\s+",
         r"^env\s+",
+        r"^nice(\s+.*)?$",
+        r"^nohup\s+",
         # Variable assignments. Lower-case names are allowed because
         # internal helper scripts use them (e.g. `_rc=$?` in the static
         # archive probe); segment validation makes this safe.
@@ -199,6 +407,7 @@ class CommandValidator:
         r"^uname\s+",
         r"^test\s+",
         r"^base64\s+",
+        r"^readelf\s+",
         r"^sleep\s+\d",  # backoff retries
         r"^ln\s+",  # symlinks (gosec used ln -s)
         r"^ldconfig(\s+.*)?$",
@@ -323,6 +532,22 @@ class CommandValidator:
                 buf = []
                 i += 2
                 continue
+            # Redirections, not operators: 2>&1, >&2, &>log, >|log.
+            # Splitting them left a segment "1" that no pattern allows,
+            # so every command with 2>&1 was refused.
+            if (
+                (ch == "&" and buf and buf[-1] in "<>")
+                or command.startswith("&>", i)
+                or (ch == "|" and buf and buf[-1] == ">")
+            ):
+                buf.append(ch)
+                i += 1
+                continue
+            if command.startswith("|&", i):
+                segments.append("".join(buf))
+                buf = []
+                i += 2
+                continue
             if ch in ";|&\n":
                 segments.append("".join(buf))
                 buf = []
@@ -333,7 +558,9 @@ class CommandValidator:
         segments.append("".join(buf))
         return [s.strip() for s in segments if s.strip()]
 
-    def is_safe(self, command: str) -> Tuple[bool, str]:
+    def is_safe(
+        self, command: str, _depth: int = 0, _context: str = "command"
+    ) -> Tuple[bool, str]:
         """Check if a command is safe to execute.
 
         EVERY segment of a chained command must match the whitelist.
@@ -345,6 +572,9 @@ class CommandValidator:
         Returns:
             (is_safe, reason)
         """
+        if _depth > 5:
+            return False, f"Validation nesting is too deep in {_context}"
+
         # Check dangerous patterns first, against the whole string so
         # cross-segment forms (``curl … | sh``) and substitutions
         # (``$(curl … | sh)``) are still caught.
@@ -357,6 +587,9 @@ class CommandValidator:
             return False, "Empty command"
 
         for segment in segments:
+            ok, reason = self._validate_nested(segment, _depth)
+            if not ok:
+                return False, reason
             if not any(
                 re.match(pattern, segment) for pattern in self.SAFE_COMMANDS
             ):
@@ -376,6 +609,284 @@ class CommandValidator:
                 )
 
         return True, "All segments match safe command patterns"
+
+    def _validate_nested(
+        self, segment: str, depth: int
+    ) -> Tuple[bool, str]:
+        """Validate commands hidden inside one shell segment."""
+        for label, inner in self._extract_substitutions(segment):
+            ok, reason = self.is_safe(inner, depth + 1, label)
+            if not ok:
+                return False, f"Unsafe {label}: {reason}"
+
+        words = _shell_words(segment)
+        if not words:
+            return False, "Malformed shell quoting"
+
+        tail = self._command_after_assignment_prefix(words)
+        if tail and tail != segment:
+            ok, reason = self.is_safe(tail, depth + 1, "assignment tail")
+            if not ok:
+                return False, reason
+
+        wrappers = self._extract_wrapper_commands(words)
+        for label, inner in wrappers:
+            ok, reason = self.is_safe(inner, depth + 1, label)
+            if not ok:
+                return False, f"Unsafe {label}: {reason}"
+        return True, "nested commands are safe"
+
+    def _extract_substitutions(self, segment: str) -> list:
+        """Return command substitutions in a segment."""
+        found = []
+        quote = None
+        escaped = False
+        i = 0
+        while i < len(segment):
+            ch = segment[i]
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\" and quote != "'":
+                escaped = True
+                i += 1
+                continue
+            if quote == "'":
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if quote == '"' and ch == '"':
+                quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                i += 1
+                continue
+            if segment.startswith("$((", i):
+                end = self._find_arithmetic_end(segment, i + 3)
+                if end == -1:
+                    found.append(("arithmetic substitution", ""))
+                    i += 3
+                    continue
+                body = segment[i + 3 : end]
+                if not _is_arithmetic_substitution(body):
+                    found.append(("arithmetic substitution", body))
+                i = end + 2
+                continue
+            if segment.startswith("$(", i):
+                end = self._find_matching_paren(segment, i + 2)
+                if end == -1:
+                    found.append(("command substitution", ""))
+                    i += 2
+                    continue
+                found.append(("command substitution", segment[i + 2 : end]))
+                i = end + 1
+                continue
+            if ch == "`":
+                end = self._find_backtick_end(segment, i + 1)
+                if end == -1:
+                    found.append(("backtick substitution", ""))
+                    i += 1
+                    continue
+                found.append(("backtick substitution", segment[i + 1 : end]))
+                i = end + 1
+                continue
+            i += 1
+        return found
+
+    def _find_matching_paren(self, text: str, start: int) -> int:
+        """Return the index of the matching close parenthesis."""
+        quote = None
+        escaped = False
+        depth = 1
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\" and quote != "'":
+                escaped = True
+                i += 1
+                continue
+            if quote == "'":
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if quote == '"' and ch == '"':
+                quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+            elif text.startswith("$(", i):
+                depth += 1
+                i += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return -1
+
+    def _find_arithmetic_end(self, text: str, start: int) -> int:
+        """Return the start index of the closing ``))``."""
+        depth = 1
+        i = start
+        while i < len(text) - 1:
+            if text.startswith("((", i):
+                depth += 1
+                i += 2
+                continue
+            if text.startswith("))", i):
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += 2
+                continue
+            i += 1
+        return -1
+
+    def _find_backtick_end(self, text: str, start: int) -> int:
+        """Return the index of the closing backtick."""
+        escaped = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == "`":
+                return i
+        return -1
+
+    def _command_after_assignment_prefix(self, words: list) -> str:
+        """Return a command after leading assignment words, if present."""
+        import shlex
+
+        index = 0
+        while index < len(words) and _is_assignment_word(words[index]):
+            index += 1
+        if index == 0 or index >= len(words):
+            return ""
+        return shlex.join(words[index:])
+
+    def _extract_wrapper_commands(self, words: list) -> list:
+        """Return commands executed by shell-like wrappers."""
+        import shlex
+
+        if not words:
+            return []
+        name = words[0]
+        if name in ("sh", "bash"):
+            inner = self._shell_c_script(words)
+            return [("shell -c script", inner)] if inner else []
+        if name == "env":
+            tail = self._env_tail(words)
+            return [("env command", tail)] if tail else []
+        if name == "timeout":
+            tail = self._timeout_tail(words)
+            return [("timeout command", tail)] if tail else []
+        if name == "flock":
+            tail = self._flock_tail(words)
+            return [("flock command", tail)] if tail else []
+        if name == "xargs":
+            tail = self._xargs_tail(words)
+            return [("xargs command", tail)] if tail else []
+        if name in ("nice", "nohup") and len(words) > 1:
+            return [(f"{name} command", shlex.join(words[1:]))]
+        return []
+
+    def _shell_c_script(self, words: list) -> str:
+        """Return the script passed to ``sh -c`` or ``bash -c``."""
+        index = 1
+        while index < len(words):
+            word = words[index]
+            if not word.startswith("-") or word == "-":
+                return ""
+            if "c" in word[1:]:
+                return words[index + 1] if index + 1 < len(words) else ""
+            index += 1
+        return ""
+
+    def _env_tail(self, words: list) -> str:
+        """Return the command run by ``env``."""
+        import shlex
+
+        index = 1
+        while index < len(words):
+            word = words[index]
+            if word == "-i" or re.match(r"^-[0A-Za-z]+$", word):
+                index += 1
+                continue
+            if word.startswith("--"):
+                index += 1
+                continue
+            if _is_assignment_word(word):
+                index += 1
+                continue
+            return shlex.join(words[index:])
+        return ""
+
+    def _timeout_tail(self, words: list) -> str:
+        """Return the command run by ``timeout``."""
+        import shlex
+
+        index = 1
+        options_with_arg = {"--kill-after", "--signal", "-k", "-s"}
+        while index < len(words) and words[index].startswith("-"):
+            word = words[index]
+            index += 1
+            if word in options_with_arg and index < len(words):
+                index += 1
+        if index < len(words):
+            index += 1
+        return shlex.join(words[index:]) if index < len(words) else ""
+
+    def _flock_tail(self, words: list) -> str:
+        """Return the command run by ``flock``."""
+        import shlex
+
+        index = 1
+        options_with_arg = {"-E", "-w", "--conflict-exit-code", "--timeout"}
+        while index < len(words) and words[index].startswith("-"):
+            word = words[index]
+            index += 1
+            if word in options_with_arg and index < len(words):
+                index += 1
+        if index < len(words):
+            index += 1
+        return shlex.join(words[index:]) if index < len(words) else ""
+
+    def _xargs_tail(self, words: list) -> str:
+        """Return the command run by ``xargs``, if it gives one."""
+        import shlex
+
+        index = 1
+        options_with_arg = {
+            "-E",
+            "-I",
+            "-n",
+            "-P",
+            "-s",
+            "--max-args",
+            "--max-procs",
+            "--max-chars",
+            "--replace",
+        }
+        while index < len(words) and words[index].startswith("-"):
+            word = words[index]
+            index += 1
+            if word in options_with_arg and index < len(words):
+                index += 1
+        return shlex.join(words[index:]) if index < len(words) else ""
 
     def is_safe_single(self, command: str) -> Tuple[bool, str]:
         """Validate an LLM-authored command as a SINGLE invocation.
@@ -463,6 +974,8 @@ class DockerConfig(metaclass=_DockerConfigMeta):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             return result.stdout.strip() == "true"
@@ -641,6 +1154,8 @@ def execute_command(
                     docker_cmd,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     env=host_env,
                 )
@@ -658,6 +1173,8 @@ def execute_command(
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env=host_env,
             )
@@ -689,6 +1206,8 @@ def execute_command(
                             cwd=None if use_docker else cwd,
                             capture_output=True,
                             text=True,
+                            encoding="utf-8",
+                            errors="replace",
                             timeout=timeout,
                             # Preserve extra_env on host retries; docker
                             # retries carry it inside docker_cmd already.

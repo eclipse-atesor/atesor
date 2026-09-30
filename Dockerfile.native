@@ -48,18 +48,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Go and Rust versions match Dockerfile and Dockerfile.debian. The agent
 # and _MIN_TOOLCHAIN in batch_test.py expect them.
 ARG GO_VERSION=1.26.5
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
-    | tar -xz -C /usr/local \
+ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
+# SHA256 source: https://go.dev/dl/?mode=json&include=all
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
+        -o /opt/atesor-downloads/go.tar.gz \
+    && echo "${GO_SHA256}  /opt/atesor-downloads/go.tar.gz" \
+        | sha256sum -c - \
+    && tar -xzf /opt/atesor-downloads/go.tar.gz -C /usr/local \
+    && rm -f /opt/atesor-downloads/go.tar.gz \
     && /usr/local/go/bin/go version
 
 ARG RUST_TOOLCHAIN=1.90.0
-RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
-    && sh /tmp/rustup-init.sh -y \
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256=09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100d165c98a8fd7a7
+# SHA256 source: https://static.rust-lang.org/rustup/archive/1.28.2/riscv64gc-unknown-linux-gnu/rustup-init.sha256
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/riscv64gc-unknown-linux-gnu/rustup-init" \
+        -o /opt/atesor-downloads/rustup-init \
+    && echo "${RUSTUP_SHA256}  /opt/atesor-downloads/rustup-init" \
+        | sha256sum -c - \
+    && chmod +x /opt/atesor-downloads/rustup-init \
+    && /opt/atesor-downloads/rustup-init -y \
         --profile minimal \
         --default-toolchain ${RUST_TOOLCHAIN} \
     && /root/.cargo/bin/rustc --version \
     && /root/.cargo/bin/cargo --version \
-    && rm -f /tmp/rustup-init.sh
+    && rm -f /opt/atesor-downloads/rustup-init
 
 # Hard guard: refuse any apt-install of the distro Go toolchain, so an
 # LLM-suggested `apt install golang...` fails at once instead of
@@ -87,10 +104,12 @@ ENV GOTOOLCHAIN=local
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Workspace structure matches the other sandboxes. On the machine,
-# /workspace is a bind mount of the work directory.
+# /workspace is a bind mount of the work directory. No VOLUME declaration
+# here: podman would materialize an image volume for /workspace/output
+# and nest it inside the bind mount, so writes into output/ would live in
+# container storage instead of the host work directory, and `podman rm
+# --volumes` would then wipe them.
 WORKDIR /workspace
 RUN mkdir -p /workspace/repos /workspace/output /workspace/logs /workspace/patches
-
-VOLUME /workspace/output
 
 CMD ["tail", "-f", "/dev/null"]

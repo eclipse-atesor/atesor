@@ -91,15 +91,19 @@ def get_workspace_root() -> str:
     workspace tree too (previously the in-docker shortcut silently
     ignored it, sending state to ``/workspace`` in CI/devcontainers).
     The bare ``/workspace`` default applies only inside the sandbox
-    container when no override is set. The native target uses
-    ``workspace-native`` instead, so the results of the two targets
-    never mix.
+    container, for the qemu target, when no override is set. The native
+    target always uses ``workspace-native``, even from a container: its
+    repositories live on the machine, and the local mirror of them must
+    not land in the container's own ``/workspace`` tree.
     """
-    if is_running_in_docker() and not os.environ.get("ATESOR_HOME"):
+    native = target_name_from_env() == NATIVE
+    if (
+        is_running_in_docker()
+        and not native
+        and not os.environ.get("ATESOR_HOME")
+    ):
         return "/workspace"
-    name = "workspace"
-    if target_name_from_env() == NATIVE:
-        name = "workspace-native"
+    name = "workspace-native" if native else "workspace"
     workspace = os.path.join(get_state_home(), name)
     os.makedirs(workspace, exist_ok=True)
     return workspace
@@ -181,14 +185,37 @@ def to_host_path(path: str) -> str:
 
     Returns:
         The equivalent host path, or ``path`` unchanged when it is not
-        a container path (or when we ARE running inside the container).
+        a container path (or when we ARE running inside the container
+        with a QEMU target).
 
     Raises:
         SandboxUnavailableError: On native, if the mirror copy fails.
     """
-    if path.startswith("/workspace") and not os.path.exists("/workspace"):
+    # Match the path component, not the prefix: "/workspaces/x"
+    # (Codespaces) or "/workspace-backup/x" are not container paths.
+    if path != "/workspace" and not path.startswith("/workspace/"):
+        return path
+    # A host path under a workspace root that itself lives in
+    # /workspace (native from a container) is already translated.
+    if WORKSPACE_ROOT != "/workspace" and (
+        path == WORKSPACE_ROOT or path.startswith(WORKSPACE_ROOT + "/")
+    ):
+        return path
+    # Native always needs a mirror refresh and a translation to the
+    # native workspace, even from a development container where
+    # ``/workspace`` also exists locally: without this, host-side reads
+    # would fall through to the local container tree instead of the
+    # remote repository, and QEMU/native state would no longer be
+    # separated. When WORKSPACE_ROOT is already ``/workspace`` (native
+    # from inside the sandbox), the string translation is a no-op but
+    # the mirror still refreshes.
+    if is_native():
         refresh_mirror(path)
-        return path.replace("/workspace", WORKSPACE_ROOT, 1)
+        if WORKSPACE_ROOT != "/workspace":
+            return WORKSPACE_ROOT + path[len("/workspace"):]
+        return path
+    if not os.path.exists("/workspace"):
+        return WORKSPACE_ROOT + path[len("/workspace"):]
     return path
 
 

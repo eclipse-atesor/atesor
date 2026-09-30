@@ -39,20 +39,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 
 ARG GO_VERSION=1.26.5
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
-    | tar -xz -C /usr/local \
+ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
+# SHA256 source: https://go.dev/dl/?mode=json&include=all
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
+        -o /opt/atesor-downloads/go.tar.gz \
+    && echo "${GO_SHA256}  /opt/atesor-downloads/go.tar.gz" \
+        | sha256sum -c - \
+    && tar -xzf /opt/atesor-downloads/go.tar.gz -C /usr/local \
+    && rm -f /opt/atesor-downloads/go.tar.gz \
     && /usr/local/go/bin/go version
 
 # Install a modern Rust/Cargo toolchain via rustup. Ubuntu jammy's cargo 1.75
 # cannot build crates using Edition 2024 (seen in dalfox and similar repos).
 ARG RUST_TOOLCHAIN=1.90.0
-RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
-    && sh /tmp/rustup-init.sh -y \
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256=09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100d165c98a8fd7a7
+# SHA256 source: https://static.rust-lang.org/rustup/archive/1.28.2/riscv64gc-unknown-linux-gnu/rustup-init.sha256
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/riscv64gc-unknown-linux-gnu/rustup-init" \
+        -o /opt/atesor-downloads/rustup-init \
+    && echo "${RUSTUP_SHA256}  /opt/atesor-downloads/rustup-init" \
+        | sha256sum -c - \
+    && chmod +x /opt/atesor-downloads/rustup-init \
+    && /opt/atesor-downloads/rustup-init -y \
         --profile minimal \
         --default-toolchain ${RUST_TOOLCHAIN} \
     && /root/.cargo/bin/rustc --version \
     && /root/.cargo/bin/cargo --version \
-    && rm -f /tmp/rustup-init.sh
+    && rm -f /opt/atesor-downloads/rustup-init
 
 # Hard guard: refuse any apt-install of the distro Go toolchain. Even with our
 # in-agent `_strip_bundled_toolchain_packages` cleaning, an LLM-suggested
@@ -70,13 +87,23 @@ RUN printf 'Package: golang* golang-go gccgo* go-1.* golang-1.*\nPin: release o=
 # autoreconf with "Autoconf version 2.72 or higher is required". Pre-installing
 # from source avoids forcing the agent to debug this every run.
 ARG AUTOCONF_VERSION=2.72
-RUN curl -fsSL "https://ftp.gnu.org/gnu/autoconf/autoconf-${AUTOCONF_VERSION}.tar.gz" \
-    | tar -xz -C /tmp \
-    && cd /tmp/autoconf-${AUTOCONF_VERSION} \
+ARG AUTOCONF_SHA256=afb181a76e1ee72832f6581c0eddf8df032b83e2e0239ef79ebedc4467d92d6e
+# SHA256 source: https://lists.gnu.org/archive/html/autotools-announce/2023-12/msg00003.html
+# (the announcement gives it in base64:
+# r7GBp24e5ygy9lgcDt343wMrg+LgI573nr7cRGfZLW4=)
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://ftp.gnu.org/gnu/autoconf/autoconf-${AUTOCONF_VERSION}.tar.gz" \
+        -o /opt/atesor-downloads/autoconf.tar.gz \
+    && echo "${AUTOCONF_SHA256}  /opt/atesor-downloads/autoconf.tar.gz" \
+        | sha256sum -c - \
+    && tar -xzf /opt/atesor-downloads/autoconf.tar.gz \
+        -C /opt/atesor-downloads \
+    && cd /opt/atesor-downloads/autoconf-${AUTOCONF_VERSION} \
     && ./configure --prefix=/usr/local >/dev/null \
     && make -j"$(nproc)" >/dev/null \
     && make install >/dev/null \
-    && cd / && rm -rf /tmp/autoconf-${AUTOCONF_VERSION} \
+    && cd / && rm -rf /opt/atesor-downloads \
     && autoconf --version | head -n1
 
 # Set up environment variables for native compilation inside the sandbox.

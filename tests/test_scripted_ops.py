@@ -114,6 +114,35 @@ class TestDetectBuildSystem:
         assert info.type == "go"
         assert info.module_dir.endswith("src/sub")
 
+    def test_vendor_go_mod_is_not_primary_build_system(self, repo) -> None:
+        """Vendored go.mod files must not make a C repo look like Go."""
+        _write(repo, "src/main.c", "int main(void) { return 0; }\n")
+        _write(repo, "vendor/tool/go.mod", "module vendored\n")
+        info = ScriptedOperations(repo).detect_build_system(repo)
+        assert info.type == "unknown"
+
+    def test_legitimate_nested_go_mod_is_still_primary(self, repo) -> None:
+        """Non-vendored nested go.mod files remain build roots."""
+        _write(repo, "cmd/tool/go.mod", "module example.com/tool\n")
+        _write(repo, "cmd/tool/main.go", "package main\nfunc main() {}\n")
+        info = ScriptedOperations(repo).detect_build_system(repo)
+        assert info.type == "go"
+        assert info.module_dir == "cmd/tool"
+
+    def test_third_party_cargo_is_not_primary_build_system(self, repo) -> None:
+        """third_party Cargo.toml files must not make a C repo Rust."""
+        _write(repo, "src/main.c", "int main(void) { return 0; }\n")
+        _write(repo, "third_party/rust/Cargo.toml", "[package]\n")
+        info = ScriptedOperations(repo).detect_build_system(repo)
+        assert info.type == "unknown"
+
+    def test_legitimate_nested_cargo_is_still_primary(self, repo) -> None:
+        """Non-vendored nested Cargo.toml files remain build roots."""
+        _write(repo, "rust/Cargo.toml", "[package]\nname = 'app'\n")
+        info = ScriptedOperations(repo).detect_build_system(repo)
+        assert info.type == "cargo"
+        assert info.module_dir == "rust"
+
     def test_gopath_style_go_without_mod_detected(self, repo) -> None:
         """Test GOPATH-style Go repo is detected as Go."""
         _write(repo, "cmd/tool/main.go", "package main\nfunc main() {}\n")
@@ -160,6 +189,31 @@ class TestExtractDependencies:
         assert "Threads" in deps.libraries
         assert deps.install_method == "apk"
         assert "cmake" in deps.build_tools
+
+    def test_cmake_uses_nested_build_root_for_dependencies(self, repo) -> None:
+        """Nested CMake dependency extraction reads module_dir."""
+        _write(repo, "CMakeLists.txt", "project(root)\n")
+        _write(
+            repo,
+            "src/CMakeLists.txt",
+            textwrap.dedent("""
+            project(nested)
+            find_package(Boost REQUIRED)
+            include(FindPkgConfig)
+            pkg_check_modules(SSL REQUIRED IMPORTED_TARGET openssl>=3.0 zlib)
+            pkg_search_module(GTK QUIET gtk+-3.0)
+            """),
+        )
+        deps = ScriptedOperations(repo).extract_dependencies(
+            repo,
+            "cmake",
+            module_dir="src",
+        )
+        assert "Boost" in deps.libraries
+        assert "openssl" in deps.libraries
+        assert "zlib" in deps.libraries
+        assert "gtk+-3.0" in deps.libraries
+        assert "boost-dev" in deps.system_packages
 
     def test_cargo_extracts_dependencies(self, repo) -> None:
         """Test cargo extracts dependencies."""
@@ -329,6 +383,100 @@ class TestQuickAnalysis:
         assert result["go_main_info"]["needs_go_init"] is True
 
 
+class TestArchitectureScan:
+    """Tests for deterministic architecture portability scanning."""
+
+    def test_detects_common_riscv_blockers(self, repo) -> None:
+        """Scan reports headers, flags, asm, Go constraints, and autotools."""
+        _write(repo, "src/simd.c", "#include <immintrin.h>\n")
+        _write(
+            repo,
+            "include/dispatch.h",
+            "#if defined(__x86_64__)\n#else\n#error no arch\n#endif\n",
+        )
+        _write(repo, "Makefile", "CFLAGS += -mavx2 -march=native\n")
+        _write(repo, "src/asm.c", "void f(){ __asm__(\"nop\"); }\n")
+        _write(repo, "asm/start.S", "nop\n")
+        _write(repo, "cmd/tool/foo_amd64.go", "package main\n")
+        _write(repo, "cmd/tool/tags.go", "//go:build amd64 && !riscv64\n")
+        _write(repo, "config.guess", "timestamp='2017-01-01'\n")
+
+        findings = ScriptedOperations(repo).find_architecture_specific_code(
+            repo
+        )
+        by_type = {finding.arch_type for finding in findings}
+
+        assert "intrinsic_header" in by_type
+        assert "arch_dispatch" in by_type
+        assert "hardcoded_arch_flags" in by_type
+        assert "inline_asm" in by_type
+        assert "assembly_source" in by_type
+        assert "go_build_constraints" in by_type
+        assert "go_arch_files" in by_type
+        assert "stale_autotools" in by_type
+        assert all(finding.file != "" for finding in findings)
+        assert all(finding.suggested_fix for finding in findings)
+
+    def test_arch_scan_skips_vendored_dirs(self, repo) -> None:
+        """Vendored source does not produce architecture warnings."""
+        _write(repo, "vendor/lib/simd.c", "#include <immintrin.h>\n")
+        _write(repo, "third_party/lib/Makefile", "CFLAGS=-mavx2\n")
+
+        findings = ScriptedOperations(repo).find_architecture_specific_code(
+            repo
+        )
+
+        assert findings == []
+
+    def test_go_fallback_files_are_not_blockers(self, repo) -> None:
+        """A `!amd64` file or a riscv64 file is a fallback, not a blocker."""
+        _write(repo, "a/fast_amd64.go", "package a\n")
+        _write(repo, "a/slow.go", "//go:build !amd64\n\npackage a\n")
+        _write(repo, "b/fast_arm64.s", "RET\n")
+        _write(repo, "b/impl_linux_riscv64.go", "package b\n")
+
+        findings = ScriptedOperations(repo).find_architecture_specific_code(
+            repo
+        )
+        by_type = {finding.arch_type for finding in findings}
+
+        assert "go_build_constraints" not in by_type
+        assert "go_arch_files" not in by_type
+
+    def test_go_files_that_skip_riscv64_are_blockers(self, repo) -> None:
+        """Tags and names that exclude riscv64 give no fallback."""
+        # +build: space is OR, comma is AND; neither line holds on riscv64.
+        _write(
+            repo,
+            "a/legacy.go",
+            "// +build amd64 arm64,!purego\n\npackage a\n",
+        )
+        _write(repo, "a/fast_amd64.go", "package a\n")
+        # A test file is not an implementation, and a constraint line
+        # below the package clause is plain text to the Go tool.
+        _write(repo, "b/fast_arm64.go", "package b\n")
+        _write(repo, "b/fast_test.go", "package b\n")
+        _write(repo, "b/doc.go", "package b\n\n//go:build ignore\n")
+        _write(repo, "c/win_windows.go", "package c\n")
+        _write(repo, "c/fast_amd64.go", "package c\n")
+        _write(repo, "d/fast_amd64.go", "package d\n")
+        _write(repo, "d/fast_test.go", "package d\n")
+
+        findings = ScriptedOperations(repo).find_architecture_specific_code(
+            repo
+        )
+        flagged = {
+            (finding.arch_type, finding.file) for finding in findings
+        }
+
+        assert ("go_build_constraints", "a/legacy.go") in flagged
+        assert ("go_arch_files", "a/fast_amd64.go") in flagged
+        # b/doc.go builds on riscv64, so b has a fallback.
+        assert ("go_arch_files", "b/fast_arm64.go") not in flagged
+        assert ("go_arch_files", "c/fast_amd64.go") in flagged
+        assert ("go_arch_files", "d/fast_amd64.go") in flagged
+
+
 # ---------- Path translation ----------
 
 
@@ -347,6 +495,10 @@ class TestPathTranslation:
         """Test to host path passes through other paths."""
         ops = ScriptedOperations()
         assert ops._to_host_path("/tmp/x") == "/tmp/x"
+        assert ops._to_host_path("/workspaces/x") == "/workspaces/x"
+        assert ops._to_host_path("/workspace-backup/x") == (
+            "/workspace-backup/x"
+        )
 
 
 # ---------- Homepage → git URL resolution ----------
@@ -541,6 +693,19 @@ class TestCloneResetsExistingRepo:
         def fake(cmd, **kwargs):
             """Fake execute_command that records every issued command."""
             commands.append(cmd)
+            if (
+                isinstance(cmd, list)
+                and cmd[:5]
+                == ["git", "-c", "safe.directory=*", "-C",
+                    "/workspace/repos/bar"]
+            ):
+                return CommandResult(
+                    str(cmd),
+                    0,
+                    "https://github.com/foo/bar.git\n",
+                    "",
+                    0.0,
+                )
             return CommandResult(str(cmd), 0, "", "", 0.0)
 
         stub_execute_command("src.scripted_ops", fake)
@@ -557,6 +722,55 @@ class TestCloneResetsExistingRepo:
         assert not any(
             isinstance(c, str) and c.strip().endswith("git pull")
             for c in commands
+        )
+
+    def test_existing_repo_origin_mismatch_reclones(
+        self, stub_execute_command, monkeypatch
+    ) -> None:
+        """A basename collision must delete and clone the requested URL."""
+        from src.state import CommandResult
+
+        monkeypatch.setattr("os.path.exists", lambda _p: True)
+        monkeypatch.setattr(
+            "src.scripted_ops.ScriptedOperations." "_ensure_container_healthy",
+            lambda _self: None,
+        )
+        monkeypatch.setattr(
+            "src.scripted_ops.ScriptedOperations."
+            "_init_submodules_if_present",
+            lambda _self, _p: None,
+        )
+
+        commands: list = []
+
+        def fake(cmd, **kwargs):
+            """Return a different remote for the existing clone."""
+            commands.append(cmd)
+            if (
+                isinstance(cmd, list)
+                and cmd[:5]
+                == ["git", "-c", "safe.directory=*", "-C",
+                    "/workspace/repos/cli"]
+            ):
+                return CommandResult(
+                    str(cmd),
+                    0,
+                    "https://github.com/hetznercloud/cli.git\n",
+                    "",
+                    0.0,
+                )
+            return CommandResult(str(cmd), 0, "", "", 0.0)
+
+        stub_execute_command("src.scripted_ops", fake)
+        ScriptedOperations().clone_or_update_repository(
+            "https://github.com/cli/cli.git",
+            "cli",
+        )
+
+        assert ["rm", "-rf", "/workspace/repos/cli"] in commands
+        assert any("git clone --depth 1" in str(c) for c in commands)
+        assert not any(
+            "git fetch --depth 1 origin" in str(c) for c in commands
         )
 
 
@@ -599,6 +813,17 @@ class TestNativeRepoChecks:
             commands.append(cmd)
             if isinstance(cmd, list) and cmd[:2] == ["test", "-e"]:
                 return CommandResult(str(cmd), 0 if exists else 1, "", "", 0)
+            if (
+                isinstance(cmd, list)
+                and cmd[:3] == ["git", "-c", "safe.directory=*"]
+            ):
+                return CommandResult(
+                    str(cmd),
+                    0,
+                    "https://github.com/foo/bar.git\n",
+                    "",
+                    0,
+                )
             return CommandResult(str(cmd), 0, "", "", 0.0)
 
         stub_execute_command("src.scripted_ops", fake)
@@ -939,6 +1164,12 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
         def fake_execute(cmd, **kwargs):
             """Fail reset, succeed clone, and fail safe.directory."""
             commands.append(cmd)
+            if isinstance(cmd, list) and "get-url" in cmd:
+                # The clone belongs to this same repository, so the
+                # update path (fetch + reset) runs before any re-clone.
+                return _command_result(
+                    cmd, stdout="https://github.com/foo/bar.git\n"
+                )
             if isinstance(cmd, str) and "git fetch --depth 1" in cmd:
                 return _command_result(cmd, exit_code=1, stderr="diverged")
             if isinstance(cmd, str) and cmd.startswith("git clone"):
@@ -1464,38 +1695,26 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
     """Tests for architecture-specific source and build-file detection."""
 
     def test_find_architecture_specific_code_parses_grep_hits(self) -> None:
-        """Parse grep output into ArchSpecificCode findings."""
+        """Report x86-only code with its line, and SIMD code as high.
 
-        def fake_execute(cmd, **kwargs):
-            """Return x86 and SIMD grep hits for selected patterns."""
-            if "'__x86_64__'" in cmd:
-                return _command_result(
-                    cmd,
-                    stdout=(
-                        "/workspace/repos/repo/a.c:12:#ifdef __x86_64__\n"
-                        "/workspace/repos/repo/b.c:notnum:#ifdef __x86_64__"
-                    ),
-                )
-            if "'_mm\\w+'" in cmd:
-                return _command_result(
-                    cmd,
-                    stdout="/workspace/repos/repo/simd.c:8:_mm_add_epi32(x)",
-                )
-            return _command_result(cmd, exit_code=1)
+        The scan reads the repository files on the host; it no longer
+        runs grep in the sandbox, so the files are real here.
+        """
+        with open(os.path.join(self.repo, "a.c"), "w") as fh:
+            fh.write("int x;\n" * 11 + "#ifdef __x86_64__\nint y;\n#endif\n")
+        with open(os.path.join(self.repo, "simd.c"), "w") as fh:
+            fh.write("#include <emmintrin.h>\nvoid f(void) {}\n")
 
-        with mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
-        ):
-            findings = self._ops().find_architecture_specific_code(self.repo)
+        findings = self._ops().find_architecture_specific_code(self.repo)
+        by_file = {finding.file: finding for finding in findings}
 
-        self.assertEqual(len(findings), 3)
-        self.assertEqual(findings[0].arch_type, "x86")
-        self.assertEqual(findings[0].severity, "medium")
-        self.assertEqual(findings[0].line, 12)
-        self.assertEqual(findings[1].line, 0)
-        self.assertEqual(findings[2].arch_type, "x86_simd")
-        self.assertEqual(findings[2].severity, "high")
+        self.assertEqual(len(findings), 2)
+        self.assertEqual(by_file["a.c"].arch_type, "arch_dispatch")
+        self.assertEqual(by_file["a.c"].severity, "medium")
+        self.assertEqual(by_file["a.c"].line, 12)
+        self.assertEqual(by_file["simd.c"].arch_type, "intrinsic_header")
+        self.assertEqual(by_file["simd.c"].severity, "high")
+        self.assertEqual(by_file["simd.c"].line, 1)
 
     def test_suggest_fix_for_each_arch_type_and_default(self) -> None:
         """Return tailored suggestions for every known arch category."""

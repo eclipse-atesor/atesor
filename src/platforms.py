@@ -33,6 +33,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
+from .target import NATIVE, target_name_from_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,14 +192,15 @@ ALPINE_RISCV = PlatformProfile(
         # C++
         "abseil-cpp": "abseil-cpp-dev",
         "absl": "abseil-cpp-dev",
+        "boost": "boost-dev",
         "protobuf": "protobuf-dev",
         "protoc": "protoc",
+        "qt5base": "qt5-qtbase-dev",
         "gtest": "gtest-dev",
         "benchmark": "benchmark-dev",
         # system
         "linux-headers": "linux-headers",
         "musl-dev": "musl-dev",
-        "libexecinfo": "libexecinfo-dev",
         "libunwind": "libunwind-dev",
     },
     name_corrections={
@@ -313,7 +316,7 @@ DEBIAN_RISCV = PlatformProfile(
         # images
         "libpng": "libpng-dev",
         "libjpeg": "libjpeg-dev",
-        "libjpeg-turbo": "libjpeg-turbo8-dev",
+        "libjpeg-turbo": "libjpeg-dev",
         "libwebp": "libwebp-dev",
         "libtiff": "libtiff-dev",
         "openjpeg": "libopenjp2-7-dev",
@@ -348,8 +351,10 @@ DEBIAN_RISCV = PlatformProfile(
         # C++
         "abseil-cpp": "libabsl-dev",
         "absl": "libabsl-dev",
+        "boost": "libboost-dev",
         "protobuf": "libprotobuf-dev",
         "protoc": "protobuf-compiler",
+        "qt5base": "qtbase5-dev",
         "gtest": "libgtest-dev",
         "benchmark": "libbenchmark-dev",
         # system
@@ -369,7 +374,7 @@ DEBIAN_RISCV = PlatformProfile(
         "curl-dev": "libcurl4-openssl-dev",
         "openssl-dev": "libssl-dev",
         "tiff-dev": "libtiff-dev",
-        "libjpeg-turbo-dev": "libjpeg-turbo8-dev",
+        "libjpeg-turbo-dev": "libjpeg-dev",
         "freetype-dev": "libfreetype6-dev",
         "sqlite-dev": "libsqlite3-dev",
         "lcms2-dev": "liblcms2-dev",
@@ -455,9 +460,12 @@ def detect_platform(container_name: Optional[str] = None) -> PlatformProfile:
     """Read ``/etc/os-release`` from the container and pick a profile.
 
     Falls back to ALPINE_RISCV if detection fails (container not
-    running, docker missing, unknown distro). Honors the
-    ``ATESOR_PLATFORM`` env var as an override -- useful for testing and
-    the ``--platform`` CLI flag.
+    running, docker missing, unknown distro). A valid
+    ``ATESOR_PLATFORM`` (the ``--platform`` flag) wins over any
+    container: batch passes ``--platform`` and ``--container`` together,
+    and a new worker container does not exist yet when the profile is
+    chosen. On native nothing is inspected, because the container runs
+    on the machine and a local ``docker exec`` cannot see it.
 
     Args:
         container_name: Container to inspect. Defaults to the active
@@ -472,7 +480,12 @@ def detect_platform(container_name: Optional[str] = None) -> PlatformProfile:
             logger.info(f"Platform override via ATESOR_PLATFORM={override}")
             return PROFILES[override]
         logger.warning(f"ATESOR_PLATFORM={override!r} is unknown; ignoring")
-
+    if target_name_from_env() == NATIVE:
+        logger.warning(
+            "No valid ATESOR_PLATFORM on the native target; using "
+            f"{_DEFAULT_PROFILE.name} (preflight asks for --platform)"
+        )
+        return _DEFAULT_PROFILE
     if container_name is None:
         # Resolve the container to inspect WITHOUT calling
         # get_container_name()/get_active_profile(): those depend on the

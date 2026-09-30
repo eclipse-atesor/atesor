@@ -76,6 +76,10 @@ _WORKDIR_FIX = (
     "set ATESOR_REMOTE_WORKDIR in .env to a dedicated directory, "
     "for example ~/atesor-ai"
 )
+_PHYSICAL_WORKDIR_FIX = (
+    "choose a work directory whose physical path has no spaces or shell "
+    "metacharacters, for example /home/<user>/atesor-ai"
+)
 _DISK_FIX = (
     "free space, or put podman storage on another disk "
     "(graphroot in ~/.config/containers/storage.conf)"
@@ -313,6 +317,8 @@ def _remote(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -624,6 +630,16 @@ def _check_rootless(
         "podman info --format "
         "'{{.Host.Security.Rootless}} {{.Store.GraphRoot}}'"
     )
+    if completed.returncode == 255:
+        # Every other rung reports exit 255 as a stable-SSH problem;
+        # this rung must do the same, or a dropped connection here
+        # would be reported as a broken podman setup even when podman
+        # is fine (or, when the ID mapping is also missing, would be
+        # hidden entirely).
+        result = _connection_lost(8, completed)
+        return _last_line(completed.stderr) or "ssh connection lost", (
+            result.missing
+        )
     if completed.returncode != 0:
         if ids_missing:
             # podman info fails without the ID mapping; the items above
@@ -689,6 +705,19 @@ def _rung_workdir(facts: _Facts) -> RungResult:
                     f"a writable work directory at {config.remote_workdir}",
                     "create it, or set ATESOR_REMOTE_WORKDIR to a directory "
                     "that the login user owns",
+                )
+            ],
+        )
+    if not target.is_safe_remote_workdir(physical):
+        return RungResult(
+            10,
+            False,
+            detail=physical,
+            missing=[
+                Missing(
+                    "a physical work directory path without spaces or shell "
+                    "metacharacters",
+                    _PHYSICAL_WORKDIR_FIX,
                 )
             ],
         )

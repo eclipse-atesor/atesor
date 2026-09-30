@@ -151,6 +151,9 @@ class FixAttempt:
     success: bool
     build_result: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
+    # The error this fix addressed. Auto-learning keys the few-shot
+    # example on it; the run's last error belongs to another step.
+    error_message: str = ""
 
 
 @dataclass
@@ -350,6 +353,15 @@ class AgentState:
     curated_artifacts: List[Dict[str, Any]] = field(
         default_factory=list
     )  # User-facing subset
+    # The verdict of the last artifact scan (VerificationResult.to_dict):
+    # "verified", "wrong_arch" or "unverified", with the evidence. None
+    # until verify_node runs. Reports, exit codes, the zip manifest and
+    # the learning gate read it.
+    artifact_verification: Optional[Dict[str, Any]] = None
+    # The package's own test suite, run once after a successful build
+    # and never gating it: status, framework, command, exit code,
+    # duration and the output tail. None until finish_node runs it.
+    package_tests: Optional[Dict[str, Any]] = None
 
     # ========== Debugging & Audit ==========
     audit_trail: List[Dict[str, Any]] = field(default_factory=list)
@@ -460,6 +472,10 @@ class AgentState:
         cache_key = self._generate_cache_key(command)
         return self.command_results_cache.get(cache_key)
 
+    def forget_command_result(self, command: str) -> None:
+        """Drop a cached command result, so the command runs again."""
+        self.command_results_cache.pop(self._generate_cache_key(command), None)
+
     def cache_file_content(self, filepath: str, content: str) -> None:
         """Cache file content to avoid repeated reads."""
         self.file_content_cache[filepath] = content
@@ -475,16 +491,30 @@ class AgentState:
         """Get total execution time in seconds."""
         return (datetime.now() - self.execution_start_time).total_seconds()
 
+    @property
+    def verification_status(self) -> Optional[str]:
+        """Return the artifact verdict, or None before verification."""
+        if not self.artifact_verification:
+            return None
+        return self.artifact_verification.get("status")
+
+    @property
+    def is_verified_success(self) -> bool:
+        """Return True for a SUCCESS whose riscv64 output was proven."""
+        return (
+            self.build_status == BuildStatus.SUCCESS
+            and self.verification_status == "verified"
+        )
+
     def is_in_error_loop(self) -> bool:
         """Check if we're stuck in an error loop."""
         if len(self.error_history) < 3:
             return False
 
-        # Check if last 3 errors are the same category
         recent_errors = self.error_history[-3:]
-        categories = [e.category for e in recent_errors]
+        signatures = [_error_signature(error) for error in recent_errors]
 
-        return len(set(categories)) == 1  # All same category
+        return len(set(signatures)) == 1
 
     def add_build_artifact(
         self,
@@ -507,9 +537,13 @@ class AgentState:
         """Convert state to a dictionary for serialization."""
         from dataclasses import asdict
 
-        # We need a custom converter for Enums and Datetime
+        # We need a custom converter for Enums and Datetime. Enums give
+        # their value ("SUCCESS"): str() gave "BuildStatus.SUCCESS" on
+        # Python 3.10, which no reader matched.
         def custom_serializer(obj: Any) -> Any:
-            if isinstance(obj, (datetime, Enum)):
+            if isinstance(obj, Enum):
+                return obj.value
+            if isinstance(obj, datetime):
                 return str(obj)
             if isinstance(obj, list):
                 return [custom_serializer(i) for i in obj]
@@ -638,10 +672,78 @@ def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
     )
 
 
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.-])/(?:[^\s:'\"()]+/)*[^\s:'\"()]+")
+_LINE_COLUMN_RE = re.compile(r":\d+(?::\d+)?")
+_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
+_NUMBER_RE = re.compile(r"\b\d+\b")
+
+
+def _first_meaningful_error_line(message: str) -> str:
+    """Extract the first diagnostic line worth comparing."""
+    fallback = ""
+    noisy_prefixes = (
+        "make:",
+        "ninja:",
+        "[",
+        "warning:",
+        "note:",
+        "running",
+        "compiling ",
+        "checking ",
+    )
+    markers = (
+        "error",
+        "fatal",
+        "undefined reference",
+        "multiple definition",
+        "relocation",
+        "no such file",
+        "not found",
+        "permission denied",
+        "no space left",
+        "timed out",
+        "killed",
+        "exit status",
+        "exit code",
+    )
+
+    for raw_line in message.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if not fallback:
+            fallback = line
+        if lowered.startswith(noisy_prefixes) and not any(
+            marker in lowered for marker in markers
+        ):
+            continue
+        if any(marker in lowered for marker in markers):
+            return line
+
+    return fallback
+
+
+def _normalize_error_line(line: str) -> str:
+    """Normalize volatile paths and numbers from an error line."""
+    normalized = _ABSOLUTE_PATH_RE.sub("<path>", line)
+    normalized = _LINE_COLUMN_RE.sub(":<n>", normalized)
+    normalized = _HEX_RE.sub("<hex>", normalized)
+    normalized = _NUMBER_RE.sub("<n>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return normalized[:200]
+
+
+def _error_signature(error: ErrorRecord) -> tuple[ErrorCategory, str]:
+    """Build a stable signature for loop detection."""
+    line = _first_meaningful_error_line(error.message or "")
+    return error.category, _normalize_error_line(line)
+
+
 def classify_error(error_message: str) -> ErrorCategory:
     """Classify an error message into a category.
 
-    Uses pattern matching on common error substrings.
+    Uses ordered pattern matching on common build failure substrings.
 
     Args:
         error_message: The raw error text to classify.
@@ -651,107 +753,215 @@ def classify_error(error_message: str) -> ErrorCategory:
     """
     error_lower = error_message.lower()
 
-    # Check rate limiting before network ("timeout" appears in both).
+    def has_any(terms: tuple[str, ...]) -> bool:
+        """Return True when any term appears in the lower-case message."""
+        return any(term in error_lower for term in terms)
+
     if any(
         term in error_lower
-        for term in [
+        for term in (
             "rate limit",
             "too many requests",
             "429",
             "quota exceeded",
-        ]
+        )
     ):
         return ErrorCategory.RATE_LIMIT
 
-    # Git clone auth failures (sandbox has no git credentials)
-    if any(
-        term in error_lower
-        for term in [
+    lock_terms = (
+        "could not get lock /var/lib/dpkg/lock-frontend",
+        "could not get lock /var/lib/dpkg/lock",
+        "unable to lock database",
+    )
+    if has_any(lock_terms):
+        return ErrorCategory.DEPENDENCY
+
+    if has_any(
+        (
+            "no space left",
+            "disk full",
+            "out of space",
+            "virtual memory exhausted",
+            "exit 137",
+            "exit code 137",
+            "exit status 137",
+        )
+    ):
+        return ErrorCategory.DISK_SPACE
+
+    if re.search(
+        r"\b(exit\s+(status|code)\s+124|exited?\s+with\s+124)\b",
+        error_lower,
+    ) or has_any(("timed out", "command timeout", "command timed out")):
+        return ErrorCategory.NETWORK
+
+    if re.search(
+        r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower
+    ):
+        return ErrorCategory.CONFIGURATION
+
+    if has_any(
+        (
             "could not read username",
             "could not read password",
             "no such device or address",
             "authentication failed",
             "could not read from remote",
-        ]
+            "network",
+            "connection",
+            "timeout",
+            "unreachable",
+        )
     ):
         return ErrorCategory.NETWORK
 
-    # Bad repository URL (not a real repo)
-    if re.search(r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower):
+    if has_any(
+        (
+            "config.guess: unable to guess system type",
+            "invalid configuration 'riscv64",
+            "invalid configuration `riscv64",
+            "machine `riscv64",
+            "machine 'riscv64",
+            "not recognized",
+        )
+    ) and has_any(("config.guess", "config.sub", "configuration")):
         return ErrorCategory.CONFIGURATION
 
-    # Network errors
-    if any(
-        term in error_lower
-        for term in ["network", "connection", "timeout", "unreachable"]
+    arch_headers = (
+        "immintrin.h",
+        "xmmintrin.h",
+        "emmintrin.h",
+        "smmintrin.h",
+        "tmmintrin.h",
+        "avxintrin.h",
+        "cpuid.h",
+        "sys/io.h",
+        "asm/",
+        "asm\\",
+    )
+    arch_terms = (
+        "#error \"unsupported architecture\"",
+        "#error unsupported architecture",
+        "unsupported architecture",
+        "unsupported goos/goarch pair linux/riscv64",
+        "build constraints exclude all go files",
+        "unknown value 'native' for '-march'",
+        "unknown value \"native\" for '-march'",
+        "unknown value 'native' for -march",
+        "unknown value \"native\" for -march",
+        "'asm' operand has impossible constraints",
+        "\"asm\" operand has impossible constraints",
+        "invalid instruction mnemonic",
+        "unknown mnemonic",
+        "unrecognized opcode",
+        "unsupported instruction",
+        "illegal instruction",
+    )
+    option_pattern = (
+        r"(unrecognized|unknown|unsupported) command-line option "
+        r"['\"]-(m64|msse\d*|mavx\d*|mfma|march=native)['\"]"
+    )
+    if (
+        has_any(arch_headers)
+        or has_any(arch_terms)
+        or re.search(option_pattern, error_lower)
+        or re.search(
+            r"\b(architecture|sse\d?|avx\d*|neon|simd"
+            r"|x86[-_]64|amd64)\b",
+            error_lower,
+        )
     ):
-        return ErrorCategory.NETWORK
+        return ErrorCategory.ARCHITECTURE
 
-    # Linking errors
-    if any(
-        term in error_lower
-        for term in [
+    if has_any(
+        (
+            "r_riscv_hi20",
+            "r_riscv_jal",
+            "relocation truncated to fit",
+            "__atomic_fetch_add_1",
+            "__atomic_compare_exchange_1",
+            "__atomic_load_1",
+            "__atomic_store_1",
+            "__atomic_fetch_add_",
+            "__atomic_compare_exchange_",
+            "__atomic_load_",
+            "__atomic_store_",
+            "undefined reference",
+            "multiple definition",
             "linking error",
             "linker",
             "undefined symbol",
             "cannot find -l",
             "ld returned",
             "collect2: error",
-        ]
+        )
     ):
         return ErrorCategory.LINKING
 
-    # Autotools/configure script issues (check before COMPILATION to
-    # catch configure syntax errors).
-    if any(
-        term in error_lower
-        for term in [
+    if (
+        "cmake error" in error_lower
+        and re.search(r"could\s+not\s+find\s+\w+", error_lower)
+    ):
+        return ErrorCategory.DEPENDENCY
+
+    if (
+        re.search(r"\bno package ['`\"]?[^'`\"\n]+['`\"]? found", error_lower)
+        or has_any(
+            (
+                "package not found",
+                "missing dependency",
+                "failed to select a version",
+                "unable to select packages",
+                "no such package",
+                "unable to locate package",
+                "broken packages",
+                "has no installation candidate",
+            )
+        )
+    ):
+        return ErrorCategory.DEPENDENCY
+
+    if has_any(
+        (
+            "command not found",
+            "no such command",
+            "cmake: not found",
+            "make: not found",
+            "ninja: not found",
+        )
+    ):
+        return ErrorCategory.MISSING_TOOLS
+
+    if has_any(
+        (
             "possibly undefined macro",
             "macro not found in library",
             "autoconf failed",
             "autoreconf: error",
             "aclocal: not found",
-        ]
+        )
     ):
         return ErrorCategory.CONFIGURATION
 
-    # Configure script has unexpanded M4 macros or shell-incompatible syntax
     if "configure" in error_lower and "syntax error" in error_lower:
         return ErrorCategory.CONFIGURATION
 
-    # Compilation errors
-    if any(
-        term in error_lower
-        for term in [
+    if re.search(r"error\[e\d{4}\]", error_lower) or has_any(
+        (
+            "could not compile",
             "compilation error",
             "syntax error",
             "parse error",
             "undeclared",
-            "undefined reference",
             "implicit declaration",
             "path_max unset",
             "fortified realpath",
-        ]
+        )
     ):
         return ErrorCategory.COMPILATION
 
-    # Architecture-specific errors. Word boundaries are mandatory:
-    # bare substring checks misclassify ordinary words and REPO NAMES —
-    # "sse" matches inside "assetfinder", so every error mentioning
-    # that repo's path was tagged ARCHITECTURE (observed in the
-    # 2026-07-02 smoke run).
-    if re.search(
-        r"\b(architecture|sse\d?|avx\d*|neon|simd"
-        r"|unsupported instruction|illegal instruction"
-        r"|x86[-_]64|amd64|arch)\b",
-        error_lower,
-    ):
-        return ErrorCategory.ARCHITECTURE
-
-    # Configuration errors
-    if any(
-        term in error_lower
-        for term in [
+    if has_any(
+        (
             "configure error",
             "cmake error",
             "configure: error",
@@ -770,95 +980,53 @@ def classify_error(error_message: str) -> ErrorCategory:
             "already exists and is a directory",
             "inconsistent vendoring",
             "does not appear to contain cmakelists.txt",
-        ]
+        )
     ):
         return ErrorCategory.CONFIGURATION
 
-    # Missing tools
-    if any(
-        term in error_lower
-        for term in [
-            "command not found",
-            "no such command",
-            "not installed",
-            "cmake: not found",
-            "make: not found",
-        ]
-    ):
-        return ErrorCategory.MISSING_TOOLS
-
-    # Dependency errors
-    if any(
-        term in error_lower
-        for term in [
+    if has_any(
+        (
             "cannot find",
             "not found",
             "no such file",
-            "missing dependency",
-            "package not found",
             "module not found",
             "import error",
-        ]
+            "not installed",
+        )
     ):
         return ErrorCategory.DEPENDENCY
 
-    # Permission errors
-    if any(
-        term in error_lower
-        for term in ["permission denied", "access denied", "forbidden"]
-    ):
+    if has_any(("permission denied", "access denied", "forbidden")):
         return ErrorCategory.PERMISSION
 
-    # Disk space
-    if any(
-        term in error_lower
-        for term in ["no space left", "disk full", "out of space"]
+    if error_lower.strip() == "killed" or re.search(
+        r"(^|\n)\s*killed\s*$", error_lower
     ):
         return ErrorCategory.DISK_SPACE
 
-    # Python/System errors
-    if any(
-        term in error_lower
-        for term in [
+    if has_any(
+        (
             "keyerror",
             "indexerror",
             "attributeerror",
             "typeerror",
             "valueerror",
             "importerror",
-        ]
-    ):
-        return ErrorCategory.CONFIGURATION  # Usually a code/config bug
-
-    # Package manager resolution errors (apk, apt, etc.)
-    if any(
-        term in error_lower
-        for term in [
-            "unable to select packages",
-            "no such package",
-            "unable to locate package",
-            "unable to lock database",
-            "broken packages",
-            "has no installation candidate",
-        ]
-    ):
-        return ErrorCategory.DEPENDENCY
-
-    # Empty repository (git clone succeeded but no commits)
-    if any(
-        term in error_lower
-        for term in [
-            "does not have any commits",
-            "does not have any commits yet",
-            "empty repository",
-        ]
+        )
     ):
         return ErrorCategory.CONFIGURATION
 
-    # Go toolchain version mismatch
-    if any(
-        term in error_lower
-        for term in [
+    if has_any(
+        (
+            "does not have any commits",
+            "does not have any commits yet",
+            "empty repository",
+        )
+    ):
+        return ErrorCategory.CONFIGURATION
+
+    if has_any(
+        (
             "go.mod requires go >=",
             "requires go >=",
             "running go ",
@@ -867,7 +1035,7 @@ def classify_error(error_message: str) -> ErrorCategory:
             "requires rustc ",
             "requires rust version",
             "this package requires rustc",
-        ]
+        )
     ):
         return ErrorCategory.MISSING_TOOLS
 
@@ -987,6 +1155,8 @@ def should_escalate(state: AgentState) -> tuple[bool, str]:
         ErrorCategory.LICENSE_INCOMPATIBLE,
         ErrorCategory.REQUIRES_HARDWARE,
         ErrorCategory.ARCHITECTURE_IMPOSSIBLE,
+        ErrorCategory.PERMISSION,
+        ErrorCategory.DISK_SPACE,
     }
 
     if state.last_error_category in fundamental_categories:

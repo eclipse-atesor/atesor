@@ -21,7 +21,9 @@ import os
 import re
 import shlex
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from src.state import (
     ArchSpecificCode,
@@ -41,6 +43,57 @@ logger = logging.getLogger(__name__)
 # SCRIPTED OPERATIONS CLASS
 # ============================================================================
 
+VENDORED_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".github",
+        "contrib",
+        "deps",
+        "doc",
+        "docs",
+        "example",
+        "examples",
+        "external",
+        "extern",
+        "node_modules",
+        "test",
+        "testdata",
+        "tests",
+        "third-party",
+        "third_party",
+        "thirdparty",
+        "vendor",
+    }
+)
+
+
+def normalize_repo_url(url: str) -> str:
+    """Normalize repository URLs for identity comparisons.
+
+    Args:
+        url: Repository URL from a catalog, remote, or cache entry.
+
+    Returns:
+        A normalized URL string with case-insensitive scheme, host, and
+        path, and without a trailing slash or ``.git`` suffix.
+    """
+    cleaned = (url or "").strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parsed = urlsplit(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        return cleaned.lower()
+    path = parsed.path.rstrip("/").lower()
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            "",
+            "",
+        )
+    )
+
 
 def _walk_root_is_excluded(root: str, *names: str) -> bool:
     """True when any path COMPONENT of ``root`` equals one of ``names``.
@@ -51,6 +104,180 @@ def _walk_root_is_excluded(root: str, *names: str) -> bool:
     """
     parts = root.split(os.sep)
     return any(part in names for part in parts)
+
+
+def _prune_vendored_dirs(dirs: List[str]) -> None:
+    """Prune non-primary/vendor directories during ``os.walk``."""
+    dirs[:] = [d for d in dirs if d not in VENDORED_SKIP_DIRS]
+
+
+# GOOS and GOARCH values that Go reads from a file-name suffix: a file
+# named ``x_amd64.go`` builds only for amd64, even without a build tag.
+_GO_ARCHES = frozenset(
+    {
+        "386", "amd64", "arm", "arm64", "loong64", "mips", "mipsle",
+        "mips64", "mips64le", "ppc64", "ppc64le", "riscv64", "s390x",
+        "wasm",
+    }
+)
+_GO_OSES = frozenset(
+    {
+        "aix", "android", "darwin", "dragonfly", "freebsd", "illumos",
+        "ios", "js", "linux", "netbsd", "openbsd", "plan9", "solaris",
+        "wasip1", "windows",
+    }
+)
+# Tags that a default native linux build with cgo sets, besides GOARCH.
+_GO_LINUX_TAGS = frozenset({"linux", "unix", "cgo", "gc"})
+_GO_BUILD_LINE = re.compile(r"^\s*//\s*go:build\s+(.+?)\s*$")
+_GO_PLUS_BUILD_LINE = re.compile(r"^\s*//\s*\+build\s+(.+?)\s*$")
+_GO_EXPR_TOKEN = re.compile(r"\|\||&&|!|\(|\)|[A-Za-z0-9_.]+")
+
+
+def _go_tag_holds(tag: str, arch: str) -> bool:
+    """Return True when build tag ``tag`` is set for linux/``arch``."""
+    return (
+        tag == arch
+        or tag in _GO_LINUX_TAGS
+        or re.fullmatch(r"go1\.\d+", tag) is not None
+    )
+
+
+def _eval_go_build_expr(expr: str, arch: str) -> Optional[bool]:
+    """Evaluate a ``//go:build`` expression for linux/``arch``.
+
+    Args:
+        expr: The expression after ``//go:build``.
+        arch: The GOARCH to evaluate for, for example ``"riscv64"``.
+
+    Returns:
+        True or False, or None when the expression does not parse.
+    """
+    tokens = _GO_EXPR_TOKEN.findall(expr)
+    if "".join(tokens) != re.sub(r"\s+", "", expr):
+        return None
+    pos = 0
+
+    def parse_or() -> bool:
+        nonlocal pos
+        value = parse_and()
+        while pos < len(tokens) and tokens[pos] == "||":
+            pos += 1
+            right = parse_and()
+            value = value or right
+        return value
+
+    def parse_and() -> bool:
+        nonlocal pos
+        value = parse_not()
+        while pos < len(tokens) and tokens[pos] == "&&":
+            pos += 1
+            right = parse_not()
+            value = value and right
+        return value
+
+    def parse_not() -> bool:
+        nonlocal pos
+        token = tokens[pos]
+        pos += 1
+        if token == "!":
+            return not parse_not()
+        if token == "(":
+            value = parse_or()
+            if tokens[pos] != ")":
+                raise ValueError("unbalanced parenthesis")
+            pos += 1
+            return value
+        if token in ("||", "&&", ")"):
+            raise ValueError(f"unexpected {token}")
+        return _go_tag_holds(token, arch)
+
+    try:
+        result = parse_or()
+    except (IndexError, ValueError):
+        return None
+    return result if pos == len(tokens) else None
+
+
+def _eval_plus_build(expr: str, arch: str) -> Optional[bool]:
+    """Evaluate one legacy ``// +build`` line for linux/``arch``.
+
+    Spaces separate alternatives (OR); commas join terms (AND).
+
+    Args:
+        expr: The text after ``// +build``.
+        arch: The GOARCH to evaluate for.
+
+    Returns:
+        True or False, or None when a term is malformed.
+    """
+    for option in expr.split():
+        holds = True
+        for term in option.split(","):
+            negate = term.startswith("!")
+            tag = term[1:] if negate else term
+            if not re.fullmatch(r"[A-Za-z0-9_.]+", tag):
+                return None
+            holds = holds and (_go_tag_holds(tag, arch) != negate)
+        if holds:
+            return True
+    return False
+
+
+def _go_constraint_line_blocks_riscv64(line: str) -> bool:
+    """Return True for a constraint line that builds elsewhere only.
+
+    A line counts when it holds for linux/amd64 or linux/arm64 but not
+    for linux/riscv64, for example ``//go:build amd64``. A line such as
+    ``//go:build !amd64`` is the riscv64 fallback, not a blocker.
+    """
+    match = _GO_BUILD_LINE.match(line)
+    evaluate = _eval_go_build_expr
+    if not match:
+        match = _GO_PLUS_BUILD_LINE.match(line)
+        evaluate = _eval_plus_build
+    if not match:
+        return False
+    expr = match.group(1)
+    if evaluate(expr, "riscv64") is not False:
+        return False
+    return any(evaluate(expr, arch) for arch in ("amd64", "arm64"))
+
+
+def _go_file_builds_for(filename: str, content: str, arch: str) -> bool:
+    """Return True when Go file ``filename`` builds for linux/``arch``.
+
+    Applies the file-name suffix rules and the header build constraints.
+    Test files never count, because they are not an implementation.
+    An expression that does not parse counts as building, so a parse
+    gap never invents a missing-fallback finding.
+    """
+    stem = filename[: -len(".go")]
+    if stem.endswith("_test"):
+        return False
+    parts = stem.split("_")
+    if len(parts) > 1 and parts[-1] in _GO_ARCHES:
+        if parts[-1] != arch:
+            return False
+        parts = parts[:-1]
+    if len(parts) > 1 and parts[-1] in _GO_OSES and parts[-1] != "linux":
+        return False
+    go_build = None
+    plus_build: List[str] = []
+    for line in content.splitlines():
+        if line.startswith("package "):
+            break
+        match = _GO_BUILD_LINE.match(line)
+        if match:
+            go_build = match.group(1)
+            continue
+        match = _GO_PLUS_BUILD_LINE.match(line)
+        if match:
+            plus_build.append(match.group(1))
+    # Go gives //go:build precedence over +build lines when both exist.
+    if go_build is not None:
+        return _eval_go_build_expr(go_build, arch) is not False
+    return all(_eval_plus_build(e, arch) is not False for e in plus_build)
 
 
 class ScriptedOperations:
@@ -283,16 +510,105 @@ class ScriptedOperations:
 
         return None
 
+    def _fresh_clone(
+        self, url: str, name: str, container_repo_path: str
+    ) -> CommandResult:
+        """Remove any old clone and perform the normal clone fallback flow."""
+        execute_command(["rm", "-rf", container_repo_path], use_docker=True)
+
+        logger.info(f"Cloning repository {url}...")
+        cmd = self._build_clone_cmd(url, container_repo_path)
+        result = execute_command(
+            cmd,
+            use_docker=True,
+            extra_env=self._git_env(),
+        )
+
+        if not result.success and self._is_auth_error(result):
+            logger.warning(
+                f"Auth failure for {name}, retrying without token..."
+            )
+            execute_command(
+                ["rm", "-rf", container_repo_path], use_docker=True
+            )
+            cmd = (
+                f"git clone --depth 1 {shlex.quote(url)} "
+                f"{shlex.quote(container_repo_path)}"
+            )
+            result = execute_command(
+                cmd,
+                use_docker=True,
+                extra_env=self._GIT_FAIL_FAST_ENV,
+            )
+
+        if not result.success:
+            logger.warning(f"Clone failed for {name}, trying URL variants...")
+            variant_result = self._try_url_variants(url, name)
+            if variant_result is not None:
+                result = variant_result
+                logger.info(f"Clone via URL variant succeeded for {name}")
+            else:
+                logger.error(f"All clone attempts failed for {name} ({url})")
+        return result
+
+    def _existing_origin_matches(
+        self, url: str, name: str, container_repo_path: str
+    ) -> bool:
+        """Return True when the existing clone remote matches ``url``."""
+        result = execute_command(
+            [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-C",
+                container_repo_path,
+                "remote",
+                "get-url",
+                "origin",
+            ],
+            use_docker=True,
+            extra_env=self._git_env(),
+        )
+        if not result.success:
+            logger.warning(
+                "Could not read origin for existing %s clone; re-cloning: %s",
+                name,
+                (result.stderr or "")[:200],
+            )
+            return False
+
+        existing = normalize_repo_url(result.stdout)
+        expected = normalize_repo_url(url)
+        if existing != expected:
+            logger.warning(
+                "Existing clone %s origin mismatch; re-cloning "
+                "(existing=%s expected=%s)",
+                name,
+                existing,
+                expected,
+            )
+            return False
+        return True
+
     def _to_host_path(self, path: str) -> str:
         """Translate container path to host path if necessary.
 
         Only the leading ``/workspace`` prefix is rewritten — a plain
         ``str.replace`` would also mangle any later ``workspace``
         segment inside the path. On native, the local mirror of the
-        repository is refreshed first (see ``config.refresh_mirror``).
+        repository is refreshed first (see ``config.refresh_mirror``)
+        even from a development container where ``/workspace`` also
+        exists locally: without this, analysis would read the local
+        container tree instead of the mirrored remote repository.
         """
-        if path.startswith("/workspace") and not os.path.exists("/workspace"):
+        if path != "/workspace" and not path.startswith("/workspace/"):
+            return path
+        if is_native():
             refresh_mirror(path)
+            if self.workspace_root != "/workspace":
+                return self.workspace_root + path[len("/workspace") :]
+            return path
+        if not os.path.exists("/workspace"):
             return self.workspace_root + path[len("/workspace") :]
         return path
 
@@ -488,93 +804,49 @@ class ScriptedOperations:
             f"{container_repo_path}/.git", os.path.join(host_repo_path, ".git")
         ):
             logger.info(f"Repository {name} already exists, resetting...")
-            # STRATEGIC HARDENING (dasel regression, 2026-07-01): a
-            # previous run's LLM may have authored broken files (e.g. a
-            # syntactically-invalid Makefile or half-applied patches).
-            # `git pull` alone preserves those files (they are untracked
-            # or committed-locally), so every subsequent run replays the
-            # same failure. Always reset to pristine upstream state
-            # before touching the working tree; this keeps every run
-            # idempotent and preserves the self-healing contract.
-            # Reset to FETCH_HEAD rather than a command-substituted
-            # `origin/<branch>`: if `git remote show origin` fails
-            # (network / non-English locale) the substitution is empty
-            # and `git reset --hard` silently resets to the poisoned
-            # LOCAL head — exactly the state this hardening removes.
-            reset_cmd = (
-                f"cd {container_repo_path} && "
-                f"git fetch --depth 1 origin && "
-                f"git reset --hard FETCH_HEAD && "
-                f"git clean -fdx"
-            )
-            result = execute_command(
-                reset_cmd,
-                use_docker=True,
-                extra_env=self._git_env(),
-            )
-
-            if not result.success:
-                # Reset failed — likely diverged history, force-push, or
-                # a genuinely broken clone. Delete and re-clone.
-                logger.warning(
-                    f"fetch+reset failed for {name} "
-                    f"(stderr={result.stderr[:200]!r}); "
-                    f"re-cloning from scratch..."
-                )
-                execute_command(
-                    ["rm", "-rf", container_repo_path], use_docker=True
-                )
-                clone_cmd = (
-                    f"git clone --depth 1 {shlex.quote(url)} "
-                    f"{shlex.quote(container_repo_path)}"
+            if not self._existing_origin_matches(
+                url,
+                name,
+                container_repo_path,
+            ):
+                result = self._fresh_clone(url, name, container_repo_path)
+            else:
+                # STRATEGIC HARDENING (dasel regression, 2026-07-01): a
+                # previous run's LLM may have authored broken files (e.g. a
+                # syntactically-invalid Makefile or half-applied patches).
+                # `git pull` alone preserves those files (they are untracked
+                # or committed-locally), so every subsequent run replays the
+                # same failure. Always reset to pristine upstream state
+                # before touching the working tree; this keeps every run
+                # idempotent and preserves the self-healing contract.
+                # Reset to FETCH_HEAD rather than a command-substituted
+                # `origin/<branch>`: if `git remote show origin` fails
+                # (network / non-English locale) the substitution is empty
+                # and `git reset --hard` silently resets to the poisoned
+                # LOCAL head — exactly the state this hardening removes.
+                reset_cmd = (
+                    f"cd {container_repo_path} && "
+                    f"git fetch --depth 1 origin && "
+                    f"git reset --hard FETCH_HEAD && "
+                    f"git clean -fdx"
                 )
                 result = execute_command(
-                    clone_cmd,
+                    reset_cmd,
                     use_docker=True,
                     extra_env=self._git_env(),
                 )
-        else:
-            execute_command(
-                ["rm", "-rf", container_repo_path], use_docker=True
-            )
 
-            logger.info(f"Cloning repository {url}...")
-            cmd = self._build_clone_cmd(url, container_repo_path)
-            result = execute_command(
-                cmd,
-                use_docker=True,
-                extra_env=self._git_env(),
-            )
-
-            if not result.success and self._is_auth_error(result):
-                logger.warning(
-                    f"Auth failure for {name}, retrying without token..."
-                )
-                execute_command(
-                    ["rm", "-rf", container_repo_path], use_docker=True
-                )
-                cmd = (
-                    f"git clone --depth 1 {shlex.quote(url)} "
-                    f"{shlex.quote(container_repo_path)}"
-                )
-                result = execute_command(
-                    cmd,
-                    use_docker=True,
-                    extra_env=self._GIT_FAIL_FAST_ENV,
-                )
-
-            if not result.success:
-                logger.warning(
-                    f"Clone failed for {name}, trying URL variants..."
-                )
-                variant_result = self._try_url_variants(url, name)
-                if variant_result is not None:
-                    result = variant_result
-                    logger.info(f"Clone via URL variant succeeded for {name}")
-                else:
-                    logger.error(
-                        f"All clone attempts failed for {name} ({url})"
+                if not result.success:
+                    # Reset failed — likely diverged history, force-push, or
+                    # a genuinely broken clone. Delete and re-clone.
+                    logger.warning(
+                        f"fetch+reset failed for {name} "
+                        f"(stderr={result.stderr[:200]!r}); "
+                        f"re-cloning from scratch..."
                     )
+                    result = self._fresh_clone(url, name, container_repo_path)
+        else:
+            result = self._fresh_clone(url, name, container_repo_path)
 
         # Configure git safe.directory to prevent "dubious ownership" errors
         # This is needed because the workspace is mounted from host
@@ -684,20 +956,7 @@ class ScriptedOperations:
     )
     # Directories that never hold the primary build root.
     _NESTED_SKIP_DIRS = frozenset(
-        {
-            ".git",
-            "node_modules",
-            "vendor",
-            "testdata",
-            "test",
-            "tests",
-            "examples",
-            "example",
-            "third_party",
-            "contrib",
-            "__pycache__",
-            ".venv",
-        }
+        set(VENDORED_SKIP_DIRS) | {"__pycache__", ".venv"}
     )
 
     def _find_nested_build_root(
@@ -809,8 +1068,7 @@ class ScriptedOperations:
             go_subdir_candidates = []
             cargo_found = None
             for root, dirs, files in os.walk(repo_path):
-                if _walk_root_is_excluded(root, ".git"):
-                    continue
+                _prune_vendored_dirs(dirs)
                 if "go.mod" in files:
                     module_dir = root.replace(repo_path, "").lstrip("/")
                     score = self._score_go_subdir(root, repo_path)
@@ -935,7 +1193,7 @@ class ScriptedOperations:
     # ========== Dependency Detection ==========
 
     def extract_dependencies(
-        self, repo_path: str, build_system: str
+        self, repo_path: str, build_system: str, module_dir: str = ""
     ) -> DependencyInfo:
         """Extract dependencies by parsing package files.
 
@@ -952,7 +1210,7 @@ class ScriptedOperations:
         deps = DependencyInfo()
 
         if build_system == "cmake":
-            deps = self._extract_cmake_dependencies(repo_path)
+            deps = self._extract_cmake_dependencies(repo_path, module_dir)
         elif build_system == "cargo":
             deps = self._extract_cargo_dependencies(repo_path)
         elif build_system == "pip":
@@ -966,10 +1224,15 @@ class ScriptedOperations:
 
         return deps
 
-    def _extract_cmake_dependencies(self, repo_path: str) -> DependencyInfo:
+    def _extract_cmake_dependencies(
+        self, repo_path: str, module_dir: str = ""
+    ) -> DependencyInfo:
         """Extract dependencies from CMakeLists.txt."""
         deps = DependencyInfo(install_method="apk")
-        cmake_file = os.path.join(repo_path, "CMakeLists.txt")
+        build_root = (
+            os.path.join(repo_path, module_dir) if module_dir else repo_path
+        )
+        cmake_file = os.path.join(build_root, "CMakeLists.txt")
 
         if not os.path.exists(cmake_file):
             return deps
@@ -980,6 +1243,21 @@ class ScriptedOperations:
         # Find find_package() calls
         package_pattern = r"find_package\s*\(\s*(\w+)"
         packages = re.findall(package_pattern, content, re.IGNORECASE)
+        pkg_modules: List[str] = []
+        pkg_pattern = re.compile(
+            r"pkg_(?:check_modules|search_module)\s*\((.*?)\)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        pkg_options = {"REQUIRED", "QUIET", "IMPORTED_TARGET", "GLOBAL"}
+        for match in pkg_pattern.finditer(content):
+            tokens = re.split(r"[\s;]+", match.group(1).strip())
+            for token in tokens[1:]:
+                upper = token.upper()
+                if not token or upper in pkg_options:
+                    continue
+                module = re.split(r"[<>=]", token, maxsplit=1)[0]
+                if module:
+                    pkg_modules.append(module)
 
         # Map common CMake packages to canonical names; PlatformProfile
         # resolves to the distro package at install time.
@@ -992,8 +1270,8 @@ class ScriptedOperations:
             "ZLIB": "zlib",
             "PNG": "libpng",
             "JPEG": "libjpeg-turbo",
-            "Boost": "boost-dev",  # rare canonical, kept as Alpine name
-            "Qt5": "qt5-qtbase-dev",  # rare canonical, kept as Alpine name
+            "Boost": "boost",
+            "Qt5": "qt5base",
             "Protobuf": "protobuf",
         }
 
@@ -1003,6 +1281,9 @@ class ScriptedOperations:
                     profile.resolve(canonical_map[pkg])
                 )
             deps.libraries.append(pkg)
+        for module in pkg_modules:
+            if module not in deps.libraries:
+                deps.libraries.append(module)
 
         # Common build tools for CMake
         deps.build_tools = ["cmake", "make", "gcc", "g++"]
@@ -1133,8 +1414,7 @@ class ScriptedOperations:
         go_mod_files = []
         has_go_files = False
         for root, dirs, files in os.walk(repo_path):
-            if _walk_root_is_excluded(root, ".git"):
-                continue
+            _prune_vendored_dirs(dirs)
             if "go.mod" in files:
                 module_dir = root.replace(repo_path, "").lstrip("/")
                 go_mod_files.append((root, module_dir))
@@ -1148,8 +1428,7 @@ class ScriptedOperations:
                 result["has_go_files"] = True
                 # Try to find main package anyway
                 for root, dirs, files in os.walk(repo_path):
-                    if _walk_root_is_excluded(root, ".git", "vendor"):
-                        continue
+                    _prune_vendored_dirs(dirs)
                     for f in files:
                         if f.endswith(".go"):
                             try:
@@ -1192,8 +1471,7 @@ class ScriptedOperations:
 
         main_files = []
         for root, dirs, files in os.walk(go_mod_path):
-            if _walk_root_is_excluded(root, ".git", "vendor"):
-                continue
+            _prune_vendored_dirs(dirs)
             for f in files:
                 if f.endswith(".go"):
                     filepath = os.path.join(root, f)
@@ -1318,7 +1596,7 @@ class ScriptedOperations:
     ) -> List[ArchSpecificCode]:
         """Search for architecture-specific code patterns.
 
-        This is a zero-cost operation using grep.
+        This is a zero-cost bounded scan over source and build files.
 
         Args:
             repo_path: Path to the repository root.
@@ -1327,82 +1605,238 @@ class ScriptedOperations:
             A list of ``ArchSpecificCode`` findings.
         """
         repo_path = self._to_host_path(repo_path)
-        arch_specific = []
+        if not os.path.isdir(repo_path):
+            return []
 
-        # Patterns to search for
-        patterns = {
-            "x86": [
-                r"__x86_64__",
-                r"__amd64__",
-                r"__i386__",
-                r"_M_X64",
-                r"_M_IX86",
-            ],
-            "x86_simd": [
-                r"__SSE\d?__",
-                r"__AVX\d?__",
-                r"__FMA__",
-                r"_mm\w+",
-                r"__builtin_ia32",
-            ],
-            "arm": [r"__ARM__", r"__aarch64__", r"__arm__", r"_M_ARM"],
-            "arm_simd": [r"__ARM_NEON", r"vld\d", r"vst\d", r"vmul", r"vadd"],
-            "inline_asm": [r"__asm__", r"asm\s*\(", r"__asm\s+volatile"],
+        findings: List[ArchSpecificCode] = []
+        per_category: Dict[str, int] = {}
+        max_total = 40
+        max_per_category = 8
+
+        source_suffixes = (
+            ".c",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".h",
+            ".hh",
+            ".hpp",
+            ".hxx",
+            ".inl",
+            ".S",
+            ".s",
+            ".asm",
+            ".go",
+        )
+        build_names = {
+            "CMakeLists.txt",
+            "meson.build",
+            "configure.ac",
+            "configure.in",
+            "Makefile",
+            "GNUmakefile",
+            "build.rs",
         }
+        build_suffixes = (".mk", ".cmake", ".am")
 
-        # Use container path for grep
-        target_path = self._to_container_path(repo_path)
+        intrinsic_headers = re.compile(
+            r"#\s*include\s*[<\"]("
+            r"immintrin|emmintrin|xmmintrin|pmmintrin|tmmintrin|"
+            r"smmintrin|nmmintrin|wmmintrin|x86intrin|cpuid|"
+            r"arm_neon|arm_acle|arm_sve"
+            r")\.h[>\"]"
+        )
+        arch_macros = re.compile(
+            r"__x86_64__|__i386__|_M_X64|__aarch64__|__arm__"
+        )
+        hard_flags = re.compile(
+            r"(^|\s)-m("
+            r"sse[0-9.]*|avx[0-9.]*|fma|pclmul|aes|fpu=neon|"
+            r"float-abi|32|64|arch=native|tune=native|"
+            r"arch=x86-64[^\s]*|arch=armv[^\s]*"
+            r")\b"
+        )
+        inline_asm = re.compile(r"\b(__asm__|__asm|asm\s+volatile)\b")
 
-        for arch_type, pattern_list in patterns.items():
-            for pattern in pattern_list:
-                # Use grep for fast searching
-                cmd = (
-                    f"grep -rn -E '{pattern}' {target_path} "
-                    f"--include='*.c' --include='*.cpp' "
-                    f"--include='*.h' --include='*.hpp' "
-                    f"2>/dev/null | head -n 20"
+        def add_finding(
+            path: str,
+            line: int,
+            snippet: str,
+            category: str,
+            severity: str,
+        ) -> None:
+            """Append a bounded architecture finding."""
+            if len(findings) >= max_total:
+                return
+            if per_category.get(category, 0) >= max_per_category:
+                return
+            per_category[category] = per_category.get(category, 0) + 1
+            rel = os.path.relpath(path, repo_path)
+            findings.append(
+                ArchSpecificCode(
+                    file=rel,
+                    line=line,
+                    code_snippet=snippet.strip()[:160],
+                    arch_type=category,
+                    severity=severity,
+                    suggested_fix=self._suggest_fix_for_arch_code(category),
                 )
+            )
 
-                result = execute_command(cmd, use_docker=True)
+        go_arch_dirs: Dict[str, set] = {}
+        go_portable_dirs: set = set()
 
-                if result.success and result.stdout.strip():
-                    for line in result.stdout.strip().split("\n"):
-                        if ":" in line:
-                            parts = line.split(":", 2)
-                            if len(parts) >= 3:
-                                file_path = parts[0]
-                                line_num = parts[1]
-                                code = parts[2][:100]  # Truncate long lines
+        for root, dirs, files in os.walk(repo_path):
+            _prune_vendored_dirs(dirs)
+            rel_root = os.path.relpath(root, repo_path)
+            if rel_root == ".":
+                rel_root = ""
 
-                                # Determine severity
-                                severity = "medium"
-                                if arch_type in [
-                                    "x86_simd",
-                                    "arm_simd",
-                                    "inline_asm",
-                                ]:
-                                    severity = "high"
+            for filename in sorted(files):
+                path = os.path.join(root, filename)
+                suffix = Path(filename).suffix
+                is_build = filename in build_names or filename.endswith(
+                    build_suffixes
+                )
+                is_source = filename.endswith(source_suffixes)
+                if not is_build and not is_source:
+                    if filename not in ("config.guess", "config.sub"):
+                        continue
 
-                                arch_specific.append(
-                                    ArchSpecificCode(
-                                        file=file_path,
-                                        line=(
-                                            int(line_num)
-                                            if line_num.isdigit()
-                                            else 0
-                                        ),
-                                        code_snippet=code.strip(),
-                                        arch_type=arch_type,
-                                        severity=severity,
-                                        suggested_fix=(
-                                            self._suggest_fix_for_arch_code(
-                                                arch_type
-                                            )
-                                        ),
-                                    )
-                                )
+                if suffix in (".S", ".s", ".asm"):
+                    add_finding(
+                        path,
+                        1,
+                        "assembly source file",
+                        "assembly_source",
+                        "medium",
+                    )
 
-        return arch_specific
+                if filename.endswith(
+                    ("_amd64.go", "_arm64.go", "_amd64.s", "_arm64.s")
+                ):
+                    go_arch_dirs.setdefault(root, set()).add(filename)
+
+                try:
+                    with open(
+                        path,
+                        "r",
+                        encoding="utf-8",
+                        errors="ignore",
+                    ) as file_obj:
+                        content = file_obj.read()
+                except OSError:
+                    continue
+
+                # A directory has a riscv64 fallback only when some Go
+                # file in it really builds for linux/riscv64; a generic
+                # name with a `//go:build amd64` header does not.
+                if filename.endswith(".go") and _go_file_builds_for(
+                    filename, content, "riscv64"
+                ):
+                    go_portable_dirs.add(root)
+
+                if filename in ("config.guess", "config.sub"):
+                    # GNU config.git learned riscv64 Linux tuples before
+                    # 2018-02-22; older generated scripts are conservatively
+                    # stale and should be refreshed with upstream config.
+                    match = re.search(
+                        r"timestamp=['\"]([0-9]{4}-[0-9]{2}-[0-9]{2})",
+                        content,
+                    )
+                    if match and match.group(1) < "2018-02-22":
+                        add_finding(
+                            path,
+                            1,
+                            f"timestamp='{match.group(1)}'",
+                            "stale_autotools",
+                            "high",
+                        )
+                    continue
+
+                has_arch_macro = bool(arch_macros.search(content))
+                lacks_riscv = "__riscv" not in content
+                has_error_else = bool(
+                    re.search(r"#\s*else[\s\S]{0,800}#\s*error", content)
+                )
+                if has_arch_macro and (lacks_riscv or has_error_else):
+                    line_no = self._line_for_match(content, arch_macros)
+                    add_finding(
+                        path,
+                        line_no,
+                        self._line_at(content, line_no),
+                        "arch_dispatch",
+                        "high" if has_error_else else "medium",
+                    )
+
+                in_go_header = filename.endswith(".go")
+                for idx, line_text in enumerate(content.splitlines(), 1):
+                    if intrinsic_headers.search(line_text):
+                        add_finding(
+                            path,
+                            idx,
+                            line_text,
+                            "intrinsic_header",
+                            "high",
+                        )
+                    if is_build and hard_flags.search(line_text):
+                        add_finding(
+                            path,
+                            idx,
+                            line_text,
+                            "hardcoded_arch_flags",
+                            "high",
+                        )
+                    if is_source and inline_asm.search(line_text):
+                        add_finding(
+                            path,
+                            idx,
+                            line_text,
+                            "inline_asm",
+                            "high",
+                        )
+                    # Go reads build constraints only above the package
+                    # clause; a `//go:build` line further down is text.
+                    if in_go_header and line_text.startswith("package "):
+                        in_go_header = False
+                    if in_go_header and _go_constraint_line_blocks_riscv64(
+                        line_text
+                    ):
+                        add_finding(
+                            path,
+                            idx,
+                            line_text,
+                            "go_build_constraints",
+                            "medium",
+                        )
+
+        for root, arch_files in sorted(go_arch_dirs.items()):
+            if root in go_portable_dirs:
+                continue
+            sample = sorted(arch_files)[0]
+            add_finding(
+                os.path.join(root, sample),
+                1,
+                "arch-specific Go file without riscv64 or generic fallback",
+                "go_arch_files",
+                "medium",
+            )
+
+        return findings
+
+    def _line_for_match(self, content: str, pattern: re.Pattern) -> int:
+        """Return the one-based line number for the first regex match."""
+        match = pattern.search(content)
+        if not match:
+            return 1
+        return content[: match.start()].count("\n") + 1
+
+    def _line_at(self, content: str, line_no: int) -> str:
+        """Return a single line from a text blob."""
+        lines = content.splitlines()
+        if 1 <= line_no <= len(lines):
+            return lines[line_no - 1]
+        return ""
 
     def _suggest_fix_for_arch_code(self, arch_type: str) -> str:
         """Suggest fixes for architecture-specific code."""
@@ -1417,6 +1851,25 @@ class ScriptedOperations:
             ),
             "inline_asm": (
                 "Rewrite assembly in C or add RISC-V assembly variant"
+            ),
+            "intrinsic_header": (
+                "Add scalar/RVV fallback or guard intrinsics with __riscv"
+            ),
+            "arch_dispatch": (
+                "Add a __riscv branch before fallback #error paths"
+            ),
+            "hardcoded_arch_flags": (
+                "Remove x86/ARM -m flags for native riscv64 builds"
+            ),
+            "assembly_source": "Add RISC-V assembly or a portable C fallback",
+            "go_build_constraints": (
+                "Add riscv64 build tags or a generic Go fallback"
+            ),
+            "go_arch_files": (
+                "Add *_riscv64.go or a non-arch-specific Go implementation"
+            ),
+            "stale_autotools": (
+                "Run autoreconf -fi or refresh config.guess/config.sub"
             ),
         }
         return suggestions.get(arch_type, "Review and port to RISC-V")
@@ -1788,7 +2241,9 @@ def quick_analysis(repo_path: str) -> Dict[str, Any]:
 
     if analysis["build_system"].type != "unknown":
         analysis["dependencies"] = ops.extract_dependencies(
-            repo_path, analysis["build_system"].type
+            repo_path,
+            analysis["build_system"].type,
+            analysis["build_system"].module_dir,
         )
 
     analysis["arch_specific_code"] = ops.find_architecture_specific_code(

@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -10,7 +11,6 @@ from unittest import mock
 
 from src.memory import (
     MEMORY_INSTANCES,
-    RECIPE_CACHE_PATH,
     AgentExample,
     AgentMemory,
     format_few_shot_examples,
@@ -376,6 +376,47 @@ class TestAutoLearning:
         # Manual example should survive
         assert any(e.get("source", "manual") == "manual" for e in pruned)
 
+    def test_concurrent_duplicate_save_lands_once(self) -> None:
+        """Concurrent writers dedupe and allocate ids inside the lock."""
+        payload = {
+            "name": "Auto: concurrent (go)",
+            "tags": ["go"],
+            "build_system": "go",
+            "repo_name": "same-repo",
+            # A command of its own: the fixture example already holds
+            # "go build .", and scout dedupe matches on commands.
+            "plan": {
+                "phases": [
+                    {"name": "build", "commands": ["go build ./cmd/x"]}
+                ]
+            },
+            "reasoning": "same payload",
+        }
+        results = []
+
+        def worker() -> None:
+            """Attempt to save the same learned example."""
+            memory = AgentMemory("scout", examples_dir=self.examples_dir)
+            results.append(memory.save_learned_example(dict(payload)))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        data = json.loads(
+            (self.examples_dir / "scout_examples.json").read_text()
+        )
+        autos = [
+            item
+            for item in data["examples"]
+            if item.get("repo_name") == "same-repo"
+        ]
+        assert results.count(True) == 1
+        assert len(autos) == 1
+        assert autos[0]["id"] == "scout-auto-001"
+
 
 class TestFormatFewShotExamples:
     """Tests for the convenience function."""
@@ -447,23 +488,29 @@ class TestRecipeCache:
     """Tests for recipe cache functions."""
 
     def setup_method(self) -> None:
-        """Back up recipe cache if it exists."""
-        self.backup = None
-        if RECIPE_CACHE_PATH.exists():
-            self.backup = RECIPE_CACHE_PATH.read_text()
+        """Patch recipe cache storage to a project-local test file."""
+        import src.memory as memory
+
+        self.tmp_dir = _make_test_dir("recipe-cache")
+        self.cache_path = self.tmp_dir / "recipe_cache.json"
+        self.cache_path.write_text(
+            json.dumps({"version": "2.0", "packages": {}})
+        )
+        self.patch = mock.patch.object(
+            memory,
+            "RECIPE_CACHE_PATH",
+            self.cache_path,
+        )
+        self.patch.start()
 
     def teardown_method(self) -> None:
-        """Restore recipe cache."""
-        if self.backup is not None:
-            RECIPE_CACHE_PATH.write_text(self.backup)
-        elif RECIPE_CACHE_PATH.exists():
-            RECIPE_CACHE_PATH.write_text(
-                json.dumps({"version": "1.0", "packages": {}})
-            )
+        """Remove isolated cache storage."""
+        self.patch.stop()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_load_empty_cache(self) -> None:
         """Test loading when cache is empty."""
-        RECIPE_CACHE_PATH.write_text(
+        self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
         cache = load_recipe_cache()
@@ -472,7 +519,7 @@ class TestRecipeCache:
 
     def test_save_and_get_recipe(self) -> None:
         """Test saving and retrieving a recipe."""
-        RECIPE_CACHE_PATH.write_text(
+        self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
 
@@ -495,10 +542,44 @@ class TestRecipeCache:
         assert cached["build_system"] == "go"
         assert cached["architecture"] == "riscv64"
         assert cached["build_duration_seconds"] == 30.5
+        assert "verification" not in cached
+
+    def test_recipe_keeps_the_verdict_and_source_commit(self) -> None:
+        """A cache hit can tell a proven riscv64 build from an old entry."""
+        self.cache_path.write_text(
+            json.dumps({"version": "2.0", "packages": {}})
+        )
+        summary = {
+            "status": "verified",
+            "verified": True,
+            "reason": "1 riscv64 ELF build output(s) verified by header",
+            "source_commit": "c" * 40,
+            "counts": {"riscv64": 1, "foreign": 0, "prebuilt_foreign": 0},
+            "riscv64": [{"path": "/w/r/tool"}],
+        }
+
+        save_to_recipe_cache(
+            repo_name="verdict-pkg",
+            repo_url="https://github.com/test/verdict-pkg",
+            build_system="make",
+            build_plan={"phases": []},
+            dependencies=[],
+            patches=[],
+            artifacts=[],
+            build_duration_seconds=1.0,
+            verification=summary,
+        )
+
+        cached = get_cached_recipe("verdict-pkg")
+        assert cached["verification"] == {
+            "status": "verified",
+            "reason": "1 riscv64 ELF build output(s) verified by header",
+            "source_commit": "c" * 40,
+        }
 
     def test_get_nonexistent_recipe(self) -> None:
         """Test cache miss returns None."""
-        RECIPE_CACHE_PATH.write_text(
+        self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
         cached = get_cached_recipe("nonexistent-pkg")
@@ -506,7 +587,7 @@ class TestRecipeCache:
 
     def test_upsert_recipe(self) -> None:
         """Test that saving again updates the entry."""
-        RECIPE_CACHE_PATH.write_text(
+        self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
 
@@ -538,6 +619,54 @@ class TestRecipeCache:
         cached = get_cached_recipe("update-test")
         assert cached["build_duration_seconds"] == 20.0
         assert cached["dependencies"] == ["go"]
+
+    def test_repo_url_mismatch_is_cache_miss(self) -> None:
+        """Same basename with a different URL must not reuse a recipe."""
+        save_to_recipe_cache(
+            repo_name="cli",
+            repo_url="https://github.com/hetznercloud/cli.git",
+            build_system="go",
+            build_plan={"phases": []},
+            dependencies=[],
+            patches=[],
+            artifacts=[],
+            build_duration_seconds=1.0,
+        )
+
+        assert get_cached_recipe(
+            "cli",
+            repo_url="https://github.com/cli/cli",
+        ) is None
+        assert get_cached_recipe(
+            "cli",
+            repo_url="https://GITHUB.com/hetznercloud/CLI/",
+        ) is not None
+        assert get_cached_recipe("cli") is not None
+
+    def test_recipe_write_error_keeps_original_cache(self) -> None:
+        """A failed recipe JSON dump leaves the cache intact."""
+        import src.memory as memory
+
+        before = self.cache_path.read_text()
+        with mock.patch.object(
+            memory.json,
+            "dump",
+            side_effect=RuntimeError("disk full"),
+        ):
+            ok = save_to_recipe_cache(
+                repo_name="broken",
+                repo_url="https://github.com/test/broken",
+                build_system="go",
+                build_plan={"phases": []},
+                dependencies=[],
+                patches=[],
+                artifacts=[],
+                build_duration_seconds=1.0,
+            )
+
+        assert ok is False
+        assert self.cache_path.read_text() == before
+        assert list(self.cache_path.parent.glob("*.tmp")) == []
 
 
 class TestRecipeMaterialization:
@@ -784,6 +913,32 @@ class TestMemoryEdgeCases(unittest.TestCase):
         memory = AgentMemory("fixer", examples_dir=self.examples_dir)
 
         self.assertEqual(memory.examples, [])
+
+    def test_atomic_example_write_keeps_original_on_json_error(self) -> None:
+        """A failed JSON dump leaves the original examples file intact."""
+        import src.memory as memory_module
+
+        original = {"version": "2.0", "examples": []}
+        path = _write_examples_file(self.examples_dir, "scout", [])
+        before = path.read_text()
+        agent_memory = AgentMemory("scout", examples_dir=self.examples_dir)
+
+        with mock.patch.object(
+            memory_module.json,
+            "dump",
+            side_effect=RuntimeError("disk full"),
+        ):
+            with self.assertRaises(RuntimeError):
+                agent_memory._write_json_file(
+                    {
+                        "version": "2.0",
+                        "examples": [{"id": "broken"}],
+                    }
+                )
+
+        self.assertEqual(json.loads(before), original)
+        self.assertEqual(path.read_text(), before)
+        self.assertEqual(list(self.examples_dir.glob("*.tmp")), [])
 
     def test_empty_memory_has_no_relevant_examples_or_prompt(self) -> None:
         """Empty memories return no matches and no prompt section."""

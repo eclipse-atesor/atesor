@@ -3,6 +3,7 @@
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -101,12 +102,18 @@ class _PreflightCase(unittest.TestCase):
         """Create the scratch cache folder, the board and the config."""
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # A short runtime dir keeps the ssh control-socket path under
+        # the sun_path limit even when TMPDIR is long; only the
+        # socket-length tests exercise the long-path rung.
+        self.runtime_dir = tempfile.mkdtemp(prefix="atesor-rt-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, self.runtime_dir, True)
         self.machine = FakeMachine()
         self.env = {
             "ATESOR_TARGET": "native",
             "ATESOR_PLATFORM": "debian",
             "ATESOR_SSH_HOST": "tester@board-1",
             "XDG_CACHE_HOME": self._tmp.name,
+            "XDG_RUNTIME_DIR": self.runtime_dir,
             "HOME": self._tmp.name,
             "PATH": os.environ.get("PATH", ""),
         }
@@ -163,6 +170,16 @@ class TestPreflightLadder(_PreflightCase):
         )
         self.assertEqual("/home/tester/atesor-ai", target.remote_workdir())
         self.assertIn("passed: rungs 1 to 11", report.render())
+
+    def test_unsafe_physical_workdir_fails_rung_10(self) -> None:
+        """A symlink-resolved workdir with spaces is rejected."""
+        self.machine.workdir = "/home/tester/atesor ai"
+        report = self.run_ladder()
+        self.assertFalse(report.passed)
+        self.assertIn(
+            "physical work directory path without spaces",
+            report.render(),
+        )
 
     def test_every_call_uses_the_ssh_prefix_and_no_stdin(self) -> None:
         """Remote calls go through ssh_argv with stdin closed."""
@@ -231,6 +248,7 @@ class TestPreflightLadder(_PreflightCase):
     def test_long_control_socket_path_fails_rung_3(self) -> None:
         """Rung 3 catches a socket path that ssh would refuse."""
         self.env["XDG_CACHE_HOME"] = os.path.join(self._tmp.name, "x" * 80)
+        del self.env["XDG_RUNTIME_DIR"]
         report = self.run_ladder()
         self.assertEqual(3, report.stopped_at)
         self.assertIn("a short directory for the ssh", report.render())

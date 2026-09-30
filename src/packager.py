@@ -13,9 +13,10 @@
 
 Layout produced::
 
-    <repo>-<YYYYMMDD-HHMMSS>-<platform>.zip
+    <owner>-<repo>-<YYYYMMDD-HHMMSS>-<platform>.zip
     ├── build_recipe.md          # the porting recipe (root of zip)
-    ├── manifest.json            # machine-readable metadata
+    ├── manifest.json            # metadata: verification verdict,
+    │                            # riscv64 artifacts with SHA-256
     ├── <repo>.log               # batch_test per-package log (optional)
     ├── agent_<repo>.log         # main.py per-package debug log (optional)
     └── <repo>/                  # source tree (excluding .git/, symlinks)
@@ -25,18 +26,101 @@ Used by ``main.py --package`` and the CI batch workflow to produce
 artifacts that downstream consumers can download directly.
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
 import zipfile
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 # Top-level entries inside the repo subtree that are excluded from packages.
 # Kept conservative on purpose — users asked for "repo code", not a clone.
 _EXCLUDED_DIRS = frozenset({".git"})
+
+_UNSAFE_STEM_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _url_path_parts(repo_url: str) -> list:
+    """Return the non-empty path segments of ``repo_url``.
+
+    Accepts ``https://host/owner/repo(.git)``, ``git@host:owner/repo``
+    and bare ``owner/repo`` or ``repo`` forms.
+    """
+    url = (repo_url or "").strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[: -len(".git")]
+    if "://" in url:
+        rest = url.split("://", 1)[1]
+        url = rest.split("/", 1)[1] if "/" in rest else ""
+    elif "@" in url and ":" in url:
+        url = url.split(":", 1)[1]
+    return [p for p in url.split("/") if p]
+
+
+def _sanitize_stem(raw: str) -> str:
+    return _UNSAFE_STEM_CHARS.sub("-", raw).lstrip(".")
+
+
+def package_stem(repo_url: str) -> str:
+    """Return the zip filename stem for ``repo_url``: ``<owner>-<repo>``.
+
+    The URL basename alone is not unique: the catalog holds five
+    different repositories named ``cli``. The owner prefix makes the
+    stem unique per repository, so release dedupe and the planners
+    never confuse two packages.
+
+    Args:
+        repo_url: The upstream repository URL.
+
+    Returns:
+        A lower-case, path-safe stem such as ``"hetznercloud-cli"``.
+        A URL without an owner segment gives the bare repo stem.
+    """
+    parts = _url_path_parts(repo_url)
+    stem = _sanitize_stem("-".join(parts[-2:])).lower()
+    return stem or "repo"
+
+
+# A copy of src.state._AMBIGUOUS_BASENAMES, not an import: the planners
+# import this module on a bare python3 before the workflows install
+# requirements, and src.state imports langchain. tests/test_packager.py
+# fails when the copy and the original drift apart.
+_LEGACY_AMBIGUOUS_BASENAMES = frozenset(
+    {"cli", "core", "src", "app", "main", "client", "server", "lib"}
+)
+
+
+def legacy_package_stem(repo_url: str) -> str:
+    """Return the zip stem of releases before owner-prefixed names.
+
+    Those zips were named after ``src.state.derive_repo_name``: the
+    sanitized URL basename, with the owner prefixed only for generic
+    basenames such as ``cli`` (``hetznercloud-cli``). This function
+    mirrors that derivation exactly, so old zips keep matching. The
+    planners accept a legacy stem only when it is unique in the list.
+
+    Args:
+        repo_url: The upstream repository URL.
+
+    Returns:
+        The case-preserving legacy stem, for example ``"zlib"``.
+    """
+    trimmed = (repo_url or "").strip().rstrip("/")
+    segments = [s for s in trimmed.split("/") if s]
+    basename = segments[-1].removesuffix(".git") if segments else ""
+    if (
+        basename.lower() in _LEGACY_AMBIGUOUS_BASENAMES
+        and len(segments) >= 2
+    ):
+        owner = segments[-2].removesuffix(".git")
+        # Skip the scheme and host segments ("https:", "github.com").
+        if owner and ":" not in owner and "." not in owner:
+            basename = f"{owner}-{basename}"
+    return _sanitize_stem(basename) or "repo"
 
 
 def _safe_zip_path(packages_dir: str, base_name: str) -> str:
@@ -109,6 +193,57 @@ def _add_repo_tree(
     return files_added, symlinks_skipped
 
 
+def _sha256(path: str) -> str:
+    """Return the hex SHA-256 of a file, read in chunks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _manifest_artifacts(
+    verification: Optional[Dict[str, Any]],
+    curated: Optional[List[Dict[str, Any]]],
+    repo_path: str,
+    container_repo_path: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return the verified riscv64 outputs for the manifest.
+
+    Each entry keeps the scanner evidence (type, arch, ABI, size), the
+    curated role when there is one, and the SHA-256 of files that are
+    inside the zipped repository tree. Outputs installed outside the
+    tree (``/usr/local/bin``) are listed with ``in_zip: false``.
+    """
+    roles = {
+        (a.get("filepath") or a.get("path")): a.get("role")
+        for a in (curated or [])
+    }
+    root = (container_repo_path or "").rstrip("/")
+    entries: List[Dict[str, Any]] = []
+    for art in (verification or {}).get("riscv64", []):
+        path = art.get("path", "")
+        entry = {
+            "path": path,
+            "type": art.get("type"),
+            "arch": art.get("arch"),
+            "abi": art.get("abi"),
+            "size": art.get("size"),
+            "in_zip": False,
+        }
+        if roles.get(path):
+            entry["role"] = roles[path]
+        if root and path.startswith(root + "/"):
+            rel = path[len(root) + 1:]
+            host_file = os.path.join(repo_path, rel)
+            entry["path_in_zip"] = rel
+            if os.path.isfile(host_file) and not os.path.islink(host_file):
+                entry["in_zip"] = True
+                entry["sha256"] = _sha256(host_file)
+        entries.append(entry)
+    return entries
+
+
 def package_build(
     repo_name: str,
     repo_path: str,
@@ -118,23 +253,38 @@ def package_build(
     repo_url: Optional[str] = None,
     agent_log_path: Optional[str] = None,
     batch_log_path: Optional[str] = None,
+    verification: Optional[Dict[str, Any]] = None,
+    curated_artifacts: Optional[List[Dict[str, Any]]] = None,
+    container_repo_path: Optional[str] = None,
+    package_tests: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Produce a zip artifact for a successful build.
 
     Args:
-        repo_name: Slug used in the filename (e.g. ``"amass"``).
+        repo_name: The repository directory name; also the file-name
+            stem when ``repo_url`` is not known.
         repo_path: Host path to the cloned repository directory.
         recipe_path: Host path to the porting recipe markdown file.
         platform_name: ``"alpine"`` / ``"debian"`` / etc — used in the
             filename and manifest.
         packages_dir: Host directory in which to write the zip.
-        repo_url: Original git URL, recorded in the manifest if provided.
+        repo_url: Original git URL. It gives the ``<owner>-<repo>``
+            file-name stem and is recorded in the manifest.
         agent_log_path: Optional host path to the per-package agent log
             (``workspace/logs/agent_<repo>.log``). Included at the zip
             root as ``agent_<repo>.log`` when the file exists.
         batch_log_path: Optional host path to the per-package batch log
             (``output/batch_logs/<repo>.log``). Included at the zip
             root as ``<repo>.log`` when the file exists.
+        verification: The artifact verdict
+            (``AgentState.artifact_verification``). The manifest says
+            whether the riscv64 output was proven.
+        curated_artifacts: Curated artifacts; their roles are copied.
+        container_repo_path: The repository path in the sandbox, used
+            to find verified outputs inside the zipped tree.
+        package_tests: The non-gating package test result
+            (``AgentState.package_tests``); its summary goes in the
+            manifest.
 
     Returns:
         Absolute path to the created zip file.
@@ -155,16 +305,49 @@ def package_build(
 
     os.makedirs(packages_dir, exist_ok=True)
 
+    stem = package_stem(repo_url) if repo_url else repo_name
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    base_name = f"{repo_name}-{timestamp}-{platform_name}.zip"
+    base_name = f"{stem}-{timestamp}-{platform_name}.zip"
     zip_path = _safe_zip_path(packages_dir, base_name)
 
+    verdict = verification or {}
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_name": repo_name,
         "repo_url": repo_url,
+        "package_stem": stem,
+        "legacy_package_stem": (
+            legacy_package_stem(repo_url) if repo_url else repo_name
+        ),
         "platform": platform_name,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": datetime.now()
+        .astimezone()
+        .isoformat(timespec="seconds"),
+        "verification": {
+            "status": verdict.get("status", "not run"),
+            "verified": bool(verdict.get("verified")),
+            "reason": verdict.get("reason"),
+            "source_commit": verdict.get("source_commit"),
+            "counts": verdict.get("counts", {}),
+            "abi_warnings": verdict.get("abi_warnings", []),
+            "expected_missing": verdict.get("expected_missing", []),
+            "truncated": bool(verdict.get("truncated")),
+            "scan_error": verdict.get("scan_error"),
+        },
+        "artifacts": _manifest_artifacts(
+            verification, curated_artifacts, repo_path, container_repo_path
+        ),
+        "package_tests": {
+            key: (package_tests or {}).get(key)
+            for key in (
+                "status",
+                "framework",
+                "command",
+                "exit_code",
+                "duration_seconds",
+                "reason",
+            )
+        },
         "recipe_filename_in_zip": "build_recipe.md",
         "source_root_in_zip": repo_name,
         "logs_in_zip": [],
@@ -194,14 +377,28 @@ def package_build(
     manifest["logs_in_zip"] = [arc for _, arc in logs_to_add]
 
     logger.info("Creating package: %s", zip_path)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(recipe_path, arcname="build_recipe.md")
-        zf.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
-        for host_path, arcname in logs_to_add:
-            zf.write(host_path, arcname=arcname)
-        files_added, symlinks_skipped = _add_repo_tree(
-            zf, repo_path, arc_root=repo_name
-        )
+    # Write under a temporary name and rename at the end. A run killed
+    # mid-write (a batch timeout) must not leave a truncated zip under
+    # its final name: release upload and the planners match *.zip.
+    part_path = zip_path + ".part"
+    try:
+        with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(recipe_path, arcname="build_recipe.md")
+            zf.writestr(
+                "manifest.json", json.dumps(manifest, indent=2) + "\n"
+            )
+            for host_path, arcname in logs_to_add:
+                zf.write(host_path, arcname=arcname)
+            files_added, symlinks_skipped = _add_repo_tree(
+                zf, repo_path, arc_root=repo_name
+            )
+        os.replace(part_path, zip_path)
+    except BaseException:
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
+        raise
 
     size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     logger.info(
@@ -214,4 +411,4 @@ def package_build(
     return zip_path
 
 
-__all__ = ["package_build"]
+__all__ = ["legacy_package_stem", "package_build", "package_stem"]

@@ -6,7 +6,10 @@ main run and need to be re-tried. A package is considered "missing" when
 no zip in ``--packages-dir`` matches the canonical filename pattern
 produced by ``src.packager.package_build``:
 
-    <repo>-<YYYYMMDD>-<HHMMSS>-<platform>.zip
+    <owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<platform>.zip
+
+A zip named with the legacy ``<repo>`` stem also counts, but only when
+that stem is unique in the list: five catalog repos are named ``cli``.
 
 The script emits the missing names, one per line, to stdout. With
 ``--format space`` they're space-joined on a single line, ready to pass
@@ -20,33 +23,60 @@ import json
 import os
 import re
 import sys
-from typing import Iterable
+from typing import Iterable, NamedTuple
+
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src.packager import legacy_package_stem, package_stem  # noqa: E402
 
 
-def _zip_stem_from_url(url: str) -> str:
-    """Derive the zip filename stem the packager will actually use.
+class PackageEntry(NamedTuple):
+    """Package name plus zip stems accepted for a completed build.
 
-    MUST mirror ``src.state.sanitize_repo_name`` — see the twin helper
-    in ``plan_remaining.py``. Zip filenames come from the sanitized URL
-    basename, not the list ``name`` field.
+    A NamedTuple, not a dataclass: tests load this script with
+    ``spec_from_file_location`` without registering it in
+    ``sys.modules``, and a dataclass needs that entry to resolve its
+    postponed annotations.
     """
-    base = (url or "").rstrip("/").split("/")[-1]
-    if base.endswith(".git"):
-        base = base[: -len(".git")]
-    stem = re.sub(r"[^A-Za-z0-9._-]", "-", base).lstrip(".")
-    return stem or "repo"
+
+    name: str
+    package_stem: str
+    legacy_package_stem: str | None = None
+    legacy_unique: bool = False
 
 
-def _load_packages(list_path: str) -> list[tuple[str, str]]:
-    """Return ordered ``(name, zip_stem)`` pairs from a list JSON file.
+def _stem_metadata(
+    name: str,
+    stems_map: dict,
+) -> tuple[str, str | None, bool]:
+    """Read new/legacy stem metadata from a remaining-list stems map."""
+    raw = stems_map.get(name)
+    if isinstance(raw, dict):
+        new_stem = raw.get("package_stem") or raw.get("stem") or name
+        legacy_stem = raw.get("legacy_package_stem")
+        legacy_unique = bool(raw.get("legacy_unique", False))
+        return str(new_stem), (
+            str(legacy_stem) if legacy_stem else None
+        ), legacy_unique
+    if isinstance(raw, str):
+        return raw, None, False
+    return name, None, False
+
+
+def _load_packages(list_path: str) -> list[PackageEntry]:
+    """Return ordered package entries from a list JSON file.
 
     Accepts both schemas in use across the workflow:
 
     * ``.github/packages/*.json`` — ``{"packages": [{"name": ...,
-      "url": ...}, ...]}``; the stem is derived from the URL.
+      "url": ...}, ...]}``; stems are derived from the URL.
     * ``remaining-<platform>.json`` (from ``plan_remaining.py``) —
-      ``{"packages": ["name1", ...], "stems": {"name1": "stem1", ...}}``;
-      the optional ``stems`` map covers names whose zip stem differs.
+      ``{"packages": ["name1", ...], "stems": {...}}``; old string
+      stem maps still work, and new maps include legacy-stem metadata.
 
     Mixed lists are tolerated; entries with neither a ``name`` key nor
     a string value are silently skipped.
@@ -55,22 +85,42 @@ def _load_packages(list_path: str) -> list[tuple[str, str]]:
         data = json.load(fh)
     pkgs = data.get("packages", [])
     stems_map = data.get("stems") or {}
-    out: list[tuple[str, str]] = []
+    # One pass keeps the declared order, which _apply_shard relies on.
+    # A None uniqueness marks a stem derived here; it is counted below
+    # over the whole list. String entries carry the uniqueness that
+    # plan_remaining.py computed over the full catalog.
+    rows: list[tuple[str, str, str | None, bool | None]] = []
     for p in pkgs:
         if isinstance(p, str):
             if p:
-                out.append((p, stems_map.get(p, p)))
+                rows.append((p, *_stem_metadata(p, stems_map)))
             continue
-        if isinstance(p, dict):
-            name = p.get("name")
-            if not name:
-                continue
-            url = p.get("url") or p.get("repo") or ""
-            stem = (
-                _zip_stem_from_url(url) if url else stems_map.get(name, name)
+        if not isinstance(p, dict):
+            continue
+        name = p.get("name")
+        if not name:
+            continue
+        url = p.get("url") or p.get("repo") or ""
+        if url:
+            rows.append(
+                (name, package_stem(url), legacy_package_stem(url), None)
             )
-            out.append((name, stem))
-    return out
+        else:
+            new_stem, legacy_stem, _unique = _stem_metadata(name, stems_map)
+            rows.append((name, new_stem, legacy_stem or new_stem, None))
+    counts: dict[str, int] = {}
+    for _name, _new_stem, legacy_stem, unique in rows:
+        if unique is None:
+            counts[legacy_stem] = counts.get(legacy_stem, 0) + 1
+    return [
+        PackageEntry(
+            name,
+            new_stem,
+            legacy_stem,
+            counts[legacy_stem] == 1 if unique is None else unique,
+        )
+        for name, new_stem, legacy_stem, unique in rows
+    ]
 
 
 def _apply_shard(
@@ -106,6 +156,17 @@ def _built_names(packages_dir: str, platform: str) -> set[str]:
         if m:
             out.add(m.group("name"))
     return out
+
+
+def _is_built(entry: PackageEntry, built: set[str]) -> bool:
+    """Return True when a new or unambiguous legacy zip exists."""
+    if entry.package_stem in built:
+        return True
+    return bool(
+        entry.legacy_unique
+        and entry.legacy_package_stem
+        and entry.legacy_package_stem in built
+    )
 
 
 def _emit(names: Iterable[str], fmt: str) -> None:
@@ -191,9 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     declared_pairs = _load_packages(args.list)
     if shard_total is not None:
         declared_pairs = _apply_shard(declared_pairs, shard_index, shard_total)
-    declared = [name for name, _stem in declared_pairs]
+    declared = [entry.name for entry in declared_pairs]
     built = _built_names(args.packages_dir, args.platform)
-    missing = [name for name, stem in declared_pairs if stem not in built]
+    missing = [entry.name for entry in declared_pairs if not _is_built(
+        entry,
+        built,
+    )]
 
     _emit(missing, args.format)
 

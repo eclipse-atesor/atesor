@@ -135,6 +135,13 @@ def _copy(repo: str) -> None:
             "The mirror cannot copy, because preflight rung 10 did not "
             "find the work directory."
         )
+    if not target.is_safe_remote_workdir(workdir):
+        raise SandboxUnavailableError(
+            "The mirror cannot copy from the native machine because the "
+            f"physical work directory is unsafe for rsync: {workdir!r}. "
+            "Choose a work directory path without spaces or shell "
+            "metacharacters."
+        )
     local = mirror_dir(repo)
     os.makedirs(local, exist_ok=True)
     # The trailing slashes copy the content of the directory, and
@@ -154,6 +161,8 @@ def _copy(repo: str) -> None:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=PULL_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
@@ -166,18 +175,18 @@ def _copy(repo: str) -> None:
     if result.returncode == 0:
         logger.info(f"Mirror: copied {repo} in {seconds:.1f} s")
         return
-    if result.returncode in _WARNING_EXITS:
-        if _MISSING_SOURCE_RE.search(result.stderr):
-            # The repository is gone on the machine, so the copy goes too.
-            shutil.rmtree(local, ignore_errors=True)
-            logger.info(
-                f"Mirror: {repo} does not exist on the machine; removed "
-                "the local copy"
-            )
-            return
-        logger.warning(
-            f"Mirror: rsync exit {result.returncode} for {repo}: "
-            f"{stderr[:500]}"
+    if result.returncode in _WARNING_EXITS and _MISSING_SOURCE_RE.search(
+        result.stderr
+    ):
+        # The repository is gone on the machine, so the copy goes too.
+        # This is the only exit-23/24 case that is safe to treat as
+        # success: any other partial transfer would leave the mirror
+        # incomplete, and later host reads or packaging would see the
+        # stale tree without knowing that files are missing.
+        shutil.rmtree(local, ignore_errors=True)
+        logger.info(
+            f"Mirror: {repo} does not exist on the machine; removed "
+            "the local copy"
         )
         return
     raise SandboxUnavailableError(

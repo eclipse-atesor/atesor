@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -72,14 +72,19 @@ def _save_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _parse_time(value: str | None) -> datetime | None:
+    # Accept "2026-06-18T12:45:04.618860" and "...Z" variants. Naive
+    # timestamps come back as UTC-aware so a later _prefer_recipe()
+    # comparison never mixes offset-naive and offset-aware datetimes.
     if not value:
         return None
     try:
-        # Accept "2026-06-18T12:45:04.618860" and "...Z" variants.
         normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _prefer_recipe(

@@ -141,6 +141,8 @@ class TestQemuArgv(unittest.TestCase):
             ["docker", "rm", "-f", "box-w1"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
 
@@ -510,17 +512,41 @@ class TestBuildImage(_NativeCase):
         self.assertEqual("FROM x\n", fake.stdin.getvalue())
         script = self.remote_script(popen.call_args.args[0])
         self.assertIn(
+            "timeout --kill-after=30s --signal=TERM 60s "
             "podman build --pull=always -t img:1 "
             '-f "$ctx/Containerfile" "$ctx"',
             script,
         )
 
-    def test_build_stops_at_the_time_limit(self) -> None:
-        """A build that runs too long is killed and reported."""
-        fake = _FakeBuild([], hang=True)
+    def test_remote_timeout_exit_is_reported(self) -> None:
+        """A remote timeout exit maps to BUILD_TIMED_OUT."""
+        fake = _FakeBuild([], code=124)
         with mock.patch("src.sandbox.subprocess.Popen", return_value=fake):
-            code = sandbox.build_image("img:1", "FROM x\n", print, 0.05)
+            code = sandbox.build_image("img:1", "FROM x\n", print, 60)
         self.assertEqual(sandbox.BUILD_TIMED_OUT, code)
+
+    def test_local_margin_timer_kills_stuck_ssh(self) -> None:
+        """If ssh outlives the remote timeout margin, it is killed."""
+        fake = _FakeBuild([], hang=True)
+        timers = []
+
+        def fake_timer(delay, callback):
+            """Run the timer callback when start() is called."""
+            timer = mock.Mock()
+            timer.delay = delay
+            timer.start.side_effect = callback
+            timers.append(timer)
+            return timer
+
+        with mock.patch(
+            "src.sandbox.subprocess.Popen", return_value=fake
+        ), mock.patch(
+            "src.sandbox.threading.Timer", side_effect=fake_timer
+        ) as timer_class:
+            code = sandbox.build_image("img:1", "FROM x\n", print, 60)
+        self.assertEqual(sandbox.BUILD_TIMED_OUT, code)
+        timer_class.assert_called_once()
+        self.assertEqual(150, timers[0].delay)
 
     def test_build_transport_error_raises(self) -> None:
         """A dropped connection during the build raises."""
