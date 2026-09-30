@@ -267,6 +267,26 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
 
+    def test_failed_disk_space_routes_to_escalate(self):
+        """Infrastructure capacity failures route to human handoff."""
+        s = _base_state(
+            package_analysis=_analysis(),
+            build_status=BuildStatus.FAILED,
+            last_error_category=ErrorCategory.DISK_SPACE,
+            last_error="No space left on device",
+        )
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_failed_permission_routes_to_escalate(self):
+        """Permission failures route to human handoff, not the fixer."""
+        s = _base_state(
+            package_analysis=_analysis(),
+            build_status=BuildStatus.FAILED,
+            last_error_category=ErrorCategory.PERMISSION,
+            last_error="Permission denied",
+        )
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
     def test_pending_without_plan_routes_to_scout(self):
         """Pending analyzed state without a plan asks the scout to plan."""
         s = _base_state(
@@ -356,3 +376,31 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEscalatedRouting(unittest.TestCase):
+    """ESCALATED (a crashed node) must end the run, not loop back."""
+
+    def test_supervisor_sends_escalated_to_escalate(self):
+        """The supervisor has a terminal branch for ESCALATED."""
+        s = _base_state(
+            build_status=BuildStatus.ESCALATED,
+            package_analysis=_analysis(),
+        )
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_subgraph_routers_exit_on_escalated(self):
+        """Build, verify and fix routers leave the subgraph."""
+        for router in (
+            route_build_result,
+            route_verify_result,
+            route_fix_result,
+        ):
+            with self.subTest(router=router.__name__):
+                s = _base_state(build_status=BuildStatus.ESCALATED)
+                self.assertEqual(router(s), "__end__")
+
+    def test_crashed_init_escalates(self):
+        """A crashed init_node must not hand a missing clone on."""
+        s = _base_state(build_status=BuildStatus.ESCALATED)
+        self.assertEqual(route_init_to_next(s), "escalate_node")

@@ -276,6 +276,12 @@ def get_system_knowledge_summary(
             continue
         lines.append(f"  **{issue_key}**: {issue['root_cause']}")
         lines.append(f"    Fix: {issue['solutions'][0]}")
+        # "Do not" warnings must reach the prompt even when they are not
+        # the first solution; libexecinfo, for one, is gone from Alpine
+        # and from the package map, so an LLM that suggests it fails.
+        for extra in issue["solutions"][1:]:
+            if "do not" in extra.lower():
+                lines.append(f"    Also: {extra}")
 
     lines.append("")
     lines.append("### Key Facts")

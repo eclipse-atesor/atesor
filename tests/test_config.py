@@ -184,6 +184,54 @@ class TestPathTranslation(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=False):
             self.assertEqual(config.to_host_path("/opt/pkg"), "/opt/pkg")
 
+    def test_workspace_prefix_lookalikes_stay_unchanged(self) -> None:
+        """Only the /workspace component matches, not a longer name."""
+        with mock.patch("os.path.exists", return_value=False):
+            for path in ("/workspaces/pkg", "/workspace-backup/pkg"):
+                with self.subTest(path=path):
+                    self.assertEqual(config.to_host_path(path), path)
+
+    def test_native_does_not_translate_a_host_path_twice(self) -> None:
+        """A path already under the native root is returned unchanged."""
+        root = "/workspace/workspace-native"
+        with (
+            mock.patch.object(config, "WORKSPACE_ROOT", root),
+            mock.patch.object(config, "is_native", return_value=True),
+            mock.patch.object(config, "refresh_mirror") as refresh,
+        ):
+            self.assertEqual(
+                config.to_host_path(f"{root}/repos/pkg"),
+                f"{root}/repos/pkg",
+            )
+            refresh.assert_not_called()
+            self.assertEqual(
+                config.to_host_path("/workspace/repos/pkg"),
+                f"{root}/repos/pkg",
+            )
+            refresh.assert_called_once_with("/workspace/repos/pkg")
+
+
+class TestNativeWorkspaceInContainer(unittest.TestCase):
+    """Native keeps its own workspace even when Atesor runs in docker."""
+
+    def test_native_root_is_not_the_container_workspace(self) -> None:
+        """The docker /workspace shortcut applies to qemu only."""
+        env = {
+            k: v for k, v in os.environ.items() if k != "ATESOR_HOME"
+        }
+        env["ATESOR_TARGET"] = "native"
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(
+                config, "is_running_in_docker", return_value=True
+            ),
+            mock.patch("os.makedirs"),
+        ):
+            self.assertEqual(
+                config.get_workspace_root(),
+                "/workspace/workspace-native",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

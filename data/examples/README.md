@@ -1,153 +1,144 @@
-# How to Add New Few-Shot Examples
+# Few-Shot Example Store
 
-This guide explains how to add new examples to improve agent performance.
+The scout, fixer and builder files are v2.0 few-shot stores loaded by
+`src.memory.AgentMemory`. Runtime writes happen under a file lock and use
+atomic JSON replacement. Prompts use the scout and fixer examples. Builder
+examples are learned, but no prompt uses them yet.
 
-## Directory Structure
+`supervisor_examples.json` is a legacy v1.0 file (`context` and
+`expected_output` fields). No code reads it: the supervisor routes by
+rules and makes no LLM call.
 
-```
+## Files
+
+```text
 data/examples/
-├── scout_examples.json      # Build plan generation examples
-├── fixer_examples.json      # Error resolution examples
-├── builder_examples.json    # Build execution examples
-└── supervisor_examples.json # Routing decision examples
+├── scout_examples.json
+├── fixer_examples.json
+├── builder_examples.json
+└── supervisor_examples.json
 ```
 
-## Example Format
+## Common Fields
 
-Each example file follows this JSON structure:
+Each v2.0 file has:
 
 ```json
 {
-  "version": "1.0",
-  "description": "Description of this examples file",
+  "version": "2.0",
+  "description": "Examples for one agent role",
   "examples": [
     {
-      "id": "unique-id",
+      "id": "scout-001",
       "name": "Human-readable name",
-      "tags": ["relevant", "tags", "for", "matching"],
-      "context": {
-        // Context that triggers this example
-        "build_system": "go",
-        "has_main": true,
-        "main_path": ".",
-        "module_dir": ""
-      },
-      "expected_output": {
-        // What the agent should produce
-        "build_system": "go",
-        "phases": [...],
-        "notes": ["..."]
-      },
-      "reasoning": "Why this solution works"
+      "tags": ["go", "cgo"],
+      "build_system": "go",
+      "source": "manual",
+      "repo_name": "example",
+      "sandbox": "alpine-riscv64",
+      "timestamp": "2026-09-30",
+      "reasoning": "Why this pattern applies"
     }
   ]
 }
 ```
 
-## Adding Scout Examples (Build Plans)
+`sandbox` is important. Retrieval hard-filters out examples from a
+different sandbox before scoring, so Alpine `apk` plans do not appear in
+Debian/Ubuntu prompts and vice versa. Legacy examples without `sandbox`
+are treated as `alpine-riscv64`.
 
-Scout examples teach the agent how to create build plans for different project types.
+## Scout Examples
+
+Scout examples use `trigger` and `plan`:
 
 ```json
 {
-  "id": "scout-XXX",
-  "name": "Descriptive Name",
-  "tags": ["go", "tag2", "tag3"],
-  "context": {
-    "repo_name": "example-repo",
+  "id": "scout-001",
+  "name": "Go command in subdirectory",
+  "tags": ["go", "module-dir"],
+  "build_system": "go",
+  "sandbox": "alpine-riscv64",
+  "trigger": {
     "build_system": "go",
     "has_main": true,
     "main_path": "cmd/app",
-    "module_dir": "",
-    "dependencies": ["lib1", "lib2"]
+    "module_dir": ""
   },
-  "repo_structure": "Brief description of file structure",
-  "expected_output": {
-    "build_system": "go",
-    "build_system_confidence": 0.95,
-    "module_dir": "",
+  "plan": {
     "phases": [
       {
-        "id": 1,
-        "name": "install_dependencies",
-        "commands": ["apk update", "apk add go"],
-        "can_parallelize": false,
-        "expected_duration": "30s"
-      },
-      {
-        "id": 2,
         "name": "build",
-        "commands": ["go build -buildvcs=false -v -o app ./cmd/app"],
-        "can_parallelize": false,
-        "expected_duration": "2m"
+        "commands": ["go build -buildvcs=false -o app ./cmd/app"]
       }
-    ],
-    "total_estimated_duration": "3m",
-    "notes": ["Key observations about this build"]
+    ]
   },
-  "reasoning": "Explain WHY this build plan is correct"
+  "reasoning": "Build the actual main package and disable Go VCS stamping."
 }
 ```
 
-## Adding Fixer Examples (Error Resolution)
+## Fixer Examples
 
-Fixer examples teach the agent how to resolve common build errors.
+Fixer examples use `error_pattern` and `fix`:
 
 ```json
 {
-  "id": "fixer-XXX",
-  "name": "Error Type Description",
-  "tags": ["go", "error-category", "tool"],
-  "error_context": {
-    "category": "DEPENDENCY",
-    "error_message": "Full error message from build",
-    "failed_command": "go build ."
-  },
-  "solution": {
-    "analysis": "Root cause analysis",
-    "strategy": "High-level fix approach",
+  "id": "fixer-001",
+  "name": "Missing pkg-config module",
+  "tags": ["dependency", "pkgconfig"],
+  "build_system": "cmake",
+  "sandbox": "debian-riscv64",
+  "error_pattern": "No package 'zlib' found",
+  "fix": {
+    "analysis": "The development package is missing.",
+    "strategy": "Install the canonical distro package.",
     "actions": [
-      {
-        "type": "command",
-        "command": "apk add missing-package"
-      }
-    ],
-    "updated_build_command": "go build -buildvcs=false ."
+      {"type": "command", "command": "apt-get install -y zlib1g-dev"}
+    ]
   },
-  "reasoning": "Why this fix works"
+  "reasoning": "zlib1g-dev provides zlib.pc on Debian/Ubuntu."
 }
 ```
 
-## Tips for Good Examples
+## Builder Examples
 
-1. **Be Specific**: Include actual error messages and real build commands
-2. **Tag Well**: Use relevant tags that match the context
-3. **Explain Reasoning**: The "reasoning" field helps the LLM understand WHY
-4. **Keep It Real**: Use examples from actual porting sessions
-5. **Cover Edge Cases**: Examples for Go modules in subdirectories, CGO, etc.
+Builder examples use compact `phases` and may include
+`timeout_recommendation`:
 
-## Testing New Examples
-
-```python
-from src.memory import format_few_shot_examples
-
-# Test Scout example
-context = {
-    'build_system': 'go',
-    'has_main': True,
-    'main_path': 'cmd/app',
-    'module_dir': ''
+```json
+{
+  "id": "builder-001",
+  "name": "Simple make build",
+  "tags": ["make"],
+  "build_system": "make",
+  "sandbox": "alpine-riscv64",
+  "phases": [
+    {"name": "build", "commands": ["make -j$(nproc)"]}
+  ],
+  "timeout_recommendation": "10m",
+  "reasoning": "The project has a root Makefile with a default target."
 }
-examples = format_few_shot_examples('scout', context, max_examples=2)
-print(examples)
 ```
 
-## Example Relevance Scoring
+## Relevance Scoring
 
-The memory system scores examples based on:
-- Build system match (+0.5)
-- Error message tag matches (+0.2 per match)
-- Main path match (+0.1)
-- Module directory match (+0.15)
+After sandbox filtering, examples are scored by:
 
-Higher scored examples are shown first in prompts.
+- Build system match: `+0.5`
+- Fixer `error_pattern` regex match: `+0.4`
+- Each tag found in the error message: `+0.15`
+- `has_main` match: `+0.1`
+- Exact `module_dir` match: `+0.15`
+- Both module dirs present but different: `+0.05`
+- CGO context plus `cgo` tag: `+0.2`
+- Same sandbox bonus: `+0.25`
+- Different sandbox penalty: `-0.35` (normally unreachable because of
+  the hard filter)
+
+Scores are capped at `1.0`; only positive-scoring examples are shown.
+
+## Auto-Learned Examples
+
+Auto-learned examples set `source: "auto"` and receive ids like
+`scout-auto-001`. When an agent file exceeds 100 examples, manual
+examples are kept and the oldest auto-learned examples are pruned first.

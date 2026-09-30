@@ -10,11 +10,16 @@ exercised via monkeypatched subprocess.run.
 
 from __future__ import annotations
 
+import os
+import shlex
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from src import target
+from src.sandbox import SandboxUnavailableError
 from src.tools import (
     CommandValidator,
     DockerConfig,
@@ -23,6 +28,7 @@ from src.tools import (
     _is_pkg_lock_error,
     apply_patch,
     execute_command,
+    masks_failure,
     write_file,
 )
 
@@ -41,6 +47,7 @@ class TestCommandValidatorSafe(unittest.TestCase):
         "cmake -B build -S .",
         "cmake --build build",
         "make -j$(nproc)",
+        "cmake -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/install",
         "ninja -C build",
         "meson setup builddir",
         "cargo build --release",
@@ -82,7 +89,13 @@ class TestCommandValidatorSafe(unittest.TestCase):
         "curl -L -o foo https://example.com/foo",
         # Env var assignment
         "CFLAGS=-O2 make -j4",
+        'CFLAGS="$(pkg-config --cflags zlib)" make',
         "DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
+        "export PATH=$(go env GOPATH)/bin:$PATH",
+        "echo $((2+3))",
+        "python3 -c 'print(1)' arg1 arg2",
+        "flock -w 120 /tmp/lock sh -c 'apk add zlib-dev'",
+        "timeout --kill-after=30s --signal=TERM 60s make",
         # Shell control flow
         "if [ -f foo ]; then echo yes; fi",
         "for f in *.c; do gcc -c $f; done",
@@ -139,6 +152,12 @@ class TestCommandValidatorDangerous(unittest.TestCase):
         # Unknown commands fail closed
         ("nmap -sP 192.168.1.0/24", "unknown"),
         ("blahblah --foo", "unknown"),
+        ("echo $(id)", "unsafe substitution"),
+        ("X=$(id)", "unsafe assignment substitution"),
+        ("env X=1 id", "unsafe env tail"),
+        ("bash -c 'id'", "unsafe bash -c"),
+        ("sh -ec 'id'", "unsafe sh -c"),
+        ("echo `id`", "unsafe backticks"),
     ]
 
     def test_dangerous_commands_blocked(self) -> None:
@@ -193,6 +212,34 @@ class TestCommandValidatorSegments(unittest.TestCase):
         segments = self.validator.split_segments("make && ninja || echo no")
         self.assertEqual(segments, ["make", "ninja", "echo no"])
 
+    def test_redirections_are_not_split(self) -> None:
+        """2>&1 and friends are redirections, not background operators.
+
+        Splitting them left a segment "1" that no pattern allows, so
+        every build command with 2>&1 was refused.
+        """
+        for command in (
+            "make -j4 2>&1",
+            "./configure > config.log 2>&1",
+            "make >&2",
+            "make &> build.log",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.validator.split_segments(command), [command]
+                )
+                self.assertTrue(self.validator.is_safe(command)[0])
+
+    def test_background_operator_still_splits(self) -> None:
+        """A real & still starts a segment that must pass on its own."""
+        self.assertEqual(
+            self.validator.split_segments("sleep 1 & id"), ["sleep 1", "id"]
+        )
+        self.assertFalse(self.validator.is_safe("sleep 1 & id")[0])
+        self.assertFalse(
+            self.validator.is_safe("echo x &> /etc/apt/sources.list")[0]
+        )
+
     def test_unknown_tail_segment_is_reported(self) -> None:
         """A safe prefix cannot hide an unknown command in a chain."""
         ok, reason = self.validator.is_safe("make && nmap 127.0.0.1")
@@ -239,6 +286,69 @@ class TestCommandValidatorSegments(unittest.TestCase):
         """Redirection-looking text inside quotes is harmless."""
         ok, reason = self.validator.is_safe_single("grep 'a > b' file.txt")
         self.assertTrue(ok, reason)
+
+
+class TestMasksFailure(unittest.TestCase):
+    """Tests for build-phase failure masking detection."""
+
+    POSITIVE = [
+        ("make || true", "||"),
+        ("make || :", "||"),
+        ("make || /bin/true", "||"),
+        ("make || exit 0", "||"),
+        ("make || echo failed", "||"),
+        ("make || printf '%s\\n' failed", "||"),
+        ("make || return 0", "||"),
+        ("make; true", "trailing"),
+        ("make; :", "trailing"),
+        ("make; exit 0", "trailing"),
+        ("set +e; make", "set +e"),
+        # No pipefail: the pipeline exits with tee, not with make.
+        ("make | tee build.log", "pipe"),
+        ("make -j4 2>&1 | tail -n 50", "pipe"),
+    ]
+
+    NEGATIVE = [
+        "make && ctest",
+        "make || exit 1",
+        "make || false",
+        "make || (exit 1)",
+        "make || { echo msg; exit 1; }",
+        "make || { echo msg >&2; false; }",
+        "set -o pipefail; make | tee build.log",
+        "grep -r foo . | head",
+        "true",
+        "echo 'make || true'",
+    ]
+
+    def test_masking_cases_are_reported(self) -> None:
+        """Known masking patterns return a reason."""
+        for command, text in self.POSITIVE:
+            with self.subTest(command=command):
+                reason = masks_failure(command)
+                self.assertIsNotNone(reason)
+                self.assertIn(text, reason)
+
+    def test_non_masking_cases_are_ignored(self) -> None:
+        """Non-masking shell constructs stay allowed."""
+        for command in self.NEGATIVE:
+            with self.subTest(command=command):
+                self.assertIsNone(masks_failure(command))
+
+
+class TestCommandOutputDecoding(unittest.TestCase):
+    """Tests for non-UTF-8 subprocess output."""
+
+    def test_host_command_replaces_invalid_utf8(self) -> None:
+        """Invalid bytes keep the real exit code and output tail."""
+        command = (
+            "python3 -c \"import sys; "
+            "sys.stdout.buffer.write(bytes([0xff, 0xfe])); "
+            "sys.exit(3)\""
+        )
+        result = execute_command(command, use_docker=False)
+        self.assertEqual(3, result.exit_code)
+        self.assertEqual("��", result.stdout)
 
 
 # ===========================================================================
@@ -780,6 +890,152 @@ class TestExecuteCommand(unittest.TestCase):
         self.assertFalse(res.success)
         self.assertEqual(res.exit_code, 2)
         self.assertIn("bad option", res.stderr)
+
+
+class TestExecuteCommandNative(unittest.TestCase):
+    """execute_command() on the native target: ssh and podman exec."""
+
+    def setUp(self) -> None:
+        """Select a valid native config with a scratch cache folder."""
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        env = {
+            "ATESOR_TARGET": "native",
+            "ATESOR_PLATFORM": "debian",
+            "ATESOR_SSH_HOST": "tester@board-1",
+            "ATESOR_CONTAINER": "box",
+            "XDG_CACHE_HOME": self._tmp.name,
+            "HOME": self._tmp.name,
+        }
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        target.reset_target_cache()
+        probe = mock.patch("src.tools.DockerConfig.is_container_running")
+        self.probe = probe.start()
+        self.addCleanup(probe.stop)
+
+    def _script(self, run_mock, index: int = 0) -> list:
+        """Return the words of the remote script of one ssh call."""
+        argv = run_mock.call_args_list[index].args[0]
+        self.assertEqual("ssh", argv[0])
+        self.assertEqual("tester@board-1", argv[-2])
+        return shlex.split(argv[-1])
+
+    def test_one_ssh_call_runs_podman_exec(self) -> None:
+        """The command goes over ssh, with no Docker probe first."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="hi\n", stderr=""
+            )
+            res = execute_command("echo hi", cwd="/workspace/repos/x")
+        self.assertTrue(res.success)
+        self.assertEqual("hi\n", res.stdout)
+        self.probe.assert_not_called()
+        words = self._script(run)
+        self.assertEqual(
+            ["exec", "podman", "exec", "-w", "/workspace/repos/x", "box"],
+            words[:6],
+        )
+        self.assertEqual(["bash", "-c"], words[6:8])
+        self.assertIn("echo hi", words[8])
+        self.assertIs(subprocess.DEVNULL, run.call_args.kwargs["stdin"])
+
+    def test_secret_goes_on_stdin(self) -> None:
+        """A secret value never reaches the argv on either machine."""
+        secret = "Authorization: bearer ghp_TESTSECRET"
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="", stderr=""
+            )
+            execute_command(
+                "git status",
+                extra_env={
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_VALUE_0": secret,
+                },
+            )
+        argv = run.call_args.args[0]
+        self.assertNotIn("ghp_TESTSECRET", " ".join(argv))
+        self.assertEqual(secret + "\n", run.call_args.kwargs["input"])
+        self.assertIn("GIT_TERMINAL_PROMPT=0", self._script(run))
+
+    def test_missing_container_is_not_running(self) -> None:
+        """Podman exit 125 gives the usual not-running result."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=125,
+                stdout="",
+                stderr='Error: no container with name or ID "box" found: '
+                "no such container",
+            )
+            res = execute_command("ls")
+        self.assertEqual(1, res.exit_code)
+        self.assertEqual("Container 'box' is not running", res.stderr)
+
+    def test_stopped_container_is_not_running(self) -> None:
+        """Podman exec exit 255 on a stopped container is no ssh error."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=255,
+                stdout="",
+                stderr="Error: can only create exec sessions on running "
+                "containers: container state improper",
+            )
+            res = execute_command("ls")
+        self.assertEqual(1, res.exit_code)
+        self.assertEqual("Container 'box' is not running", res.stderr)
+
+    def test_command_marks_the_mirror_stale(self) -> None:
+        """Any native command can change the tree, even a failed one."""
+        with (
+            mock.patch("src.sandbox.subprocess.run") as run,
+            mock.patch("src.mirror.mark_stale") as stale,
+        ):
+            run.return_value = SimpleNamespace(
+                returncode=2, stdout="", stderr="make: *** Error 2"
+            )
+            execute_command("make -j4")
+        stale.assert_called_once_with()
+
+    def test_dropped_connection_escalates(self) -> None:
+        """A transport error raises, so the fixer never sees it."""
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.return_value = SimpleNamespace(
+                returncode=255,
+                stdout="",
+                stderr="Connection to board-1 closed by remote host.",
+            )
+            with self.assertRaises(SandboxUnavailableError):
+                execute_command("make -j4")
+
+    def test_timeout_kills_through_the_same_prefix(self) -> None:
+        """The post-timeout pkill also goes over ssh and podman exec."""
+        results = [
+            subprocess.TimeoutExpired(cmd="ssh", timeout=1),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with mock.patch(
+            "src.sandbox.subprocess.run", side_effect=results
+        ) as run:
+            res = execute_command("make -j4", timeout=1)
+        self.assertEqual(-1, res.exit_code)
+        self.assertEqual(
+            ["exec", "podman", "exec", "box", "pkill", "-9", "-f", "make"],
+            self._script(run, index=1),
+        )
+
+    def test_in_docker_flag_does_not_apply(self) -> None:
+        """Native reaches its container over ssh, also from a container."""
+        with (
+            mock.patch("src.config._IN_DOCKER", True),
+            mock.patch("src.sandbox.subprocess.run") as run,
+        ):
+            run.return_value = SimpleNamespace(
+                returncode=0, stdout="", stderr=""
+            )
+            execute_command("echo hi")
+        self.assertEqual("ssh", run.call_args.args[0][0])
 
 
 # ===========================================================================

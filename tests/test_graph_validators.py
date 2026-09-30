@@ -1271,6 +1271,37 @@ class TestGoToolchainDownloadCommand(unittest.TestCase):
         cmd = _download_go_toolchain_cmd("1.25.0")
         self.assertTrue(cmd.startswith("set -e && "))
 
+    def test_rejects_a_version_that_is_not_a_version(self) -> None:
+        """The go.mod value goes into a shell command, so it is checked."""
+        for bad in ("1.25; rm -rf /", "$(id)", "", "1"):
+            with self.subTest(version=bad):
+                with self.assertRaises(ValueError):
+                    _download_go_toolchain_cmd(bad)
+
+    def test_old_toolchain_stays_until_new_one_is_proven(self) -> None:
+        """Checksum and staged go version come before the swap."""
+        cmd = _download_go_toolchain_cmd("1.26.5")
+        swap = cmd.index("mv /usr/local/go /usr/local/go.old")
+        self.assertIn(
+            "https://dl.google.com/go/go1.26.5.linux-riscv64.tar.gz.sha256",
+            cmd,
+        )
+        self.assertLess(cmd.index("sha256sum -c -"), swap)
+        self.assertLess(
+            cmd.index("/usr/local/.go-staging/go/bin/go version"), swap
+        )
+        self.assertNotIn("rm -rf /usr/local/go &&", cmd)
+
+    def test_command_is_valid_shell(self) -> None:
+        """The generated command parses as bash."""
+        import subprocess
+
+        cmd = _download_go_toolchain_cmd("1.26.5")
+        parsed = subprocess.run(
+            ["bash", "-n", "-c", cmd], capture_output=True, text=True
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
 
 class TestRepoGitmodules(unittest.TestCase):
     """Tests for ``.gitmodules`` presence detection."""
@@ -1341,3 +1372,241 @@ class TestNpmScripts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestContainedWriteCommand(unittest.TestCase):
+    """The fixer write resolves symlinks where it writes, and refuses."""
+
+    def _run(self, repo: str, target: str, content: str = "data"):
+        """Execute the generated command for real with bash."""
+        import subprocess
+
+        from src.graph import _contained_write_cmd
+
+        cmd = _contained_write_cmd(repo, target, content)
+        return subprocess.run(
+            ["bash", "-c", cmd], capture_output=True, text=True
+        )
+
+    def setUp(self) -> None:
+        """Create a repository and a directory outside it."""
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        self.outside = os.path.join(self._tmp.name, "outside")
+        os.makedirs(self.repo)
+        os.makedirs(self.outside)
+
+    def test_symlinked_target_outside_the_repo_is_refused(self) -> None:
+        """A repo file that links out of the repo is not written."""
+        victim = os.path.join(self.outside, "repositories")
+        with open(victim, "w") as fh:
+            fh.write("original")
+        os.symlink(victim, os.path.join(self.repo, "out"))
+
+        done = self._run(self.repo, os.path.join(self.repo, "out"))
+
+        self.assertEqual(done.returncode, 3, done.stderr)
+        with open(victim) as fh:
+            self.assertEqual(fh.read(), "original")
+
+    def test_symlinked_parent_directory_is_refused(self) -> None:
+        """A linked directory cannot carry the write out of the repo."""
+        os.symlink(self.outside, os.path.join(self.repo, "lnk"))
+
+        done = self._run(self.repo, os.path.join(self.repo, "lnk", "x.c"))
+
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(os.listdir(self.outside), [])
+
+    def test_nested_path_inside_the_repo_is_written(self) -> None:
+        """A normal path is created with its parent directories."""
+        target = os.path.join(self.repo, "a", "b", "fix.h")
+
+        done = self._run(self.repo, target, "#define X 1\n")
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "#define X 1\n")
+
+    def test_link_that_stays_inside_the_repo_is_allowed(self) -> None:
+        """Only escapes are refused; an in-repo link is followed."""
+        real = os.path.join(self.repo, "real.txt")
+        with open(real, "w") as fh:
+            fh.write("old")
+        os.symlink(real, os.path.join(self.repo, "alias.txt"))
+
+        done = self._run(self.repo, os.path.join(self.repo, "alias.txt"))
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(real) as fh:
+            self.assertEqual(fh.read(), "data")
+
+
+class TestBuildPlanMaskedFailures(unittest.TestCase):
+    """A plan must not hide a failing build or test step."""
+
+    def test_masked_build_steps_are_rejected(self) -> None:
+        """A masked make or cargo step reports a broken build as done."""
+        for cmd in (
+            "make || true",
+            "cmake --build build || :",
+            "go build ./... ; true",
+            "set +e; make -j4",
+            "./configure --prefix=/usr || echo skip",
+            "cargo build --release || exit 0",
+        ):
+            with self.subTest(cmd=cmd):
+                ok, reason = validate_build_plan(_plan(cmd))
+                self.assertFalse(ok)
+                self.assertIn("hides a failing step", reason)
+
+    def test_optional_steps_and_real_checks_pass(self) -> None:
+        """Best-effort copies and explicit failure paths stay allowed."""
+        for cmd in (
+            "cp /usr/share/gettext/m4/*.m4 m4/ 2>/dev/null || true",
+            "make && make install",
+            "make || exit 1",
+            "cmake -S . -B build",
+        ):
+            with self.subTest(cmd=cmd):
+                ok, reason = validate_build_plan(_plan(cmd))
+                self.assertTrue(ok, reason)
+
+
+class TestPackageTestPhase(unittest.TestCase):
+    """The package's own tests run once and never gate the port."""
+
+    def setUp(self) -> None:
+        """Create a repository tree the detector reads on the host."""
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.state = create_initial_state("https://github.com/a/b.git")
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "ATESOR_PACKAGE_TEST_TIMEOUT": "",
+                "ATESOR_RUN_DEADLINE": "",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        host = mock.patch(
+            "src.graph._to_host_path", return_value=self.root
+        )
+        host.start()
+        self.addCleanup(host.stop)
+
+    def _put(self, rel: str, text: str = "") -> None:
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    def test_timeout_default_override_disable_and_deadline(self) -> None:
+        """The limit comes from the env and the batch kill deadline."""
+        from src import graph
+        from src.graph import PACKAGE_TEST_TIMEOUT, _package_test_timeout
+
+        now = 1_000_000.0
+        cases = [
+            ({}, PACKAGE_TEST_TIMEOUT),
+            ({"ATESOR_PACKAGE_TEST_TIMEOUT": "90"}, 90),
+            ({"ATESOR_PACKAGE_TEST_TIMEOUT": "0"}, 0),
+            # Below the minimum the phase is skipped.
+            ({"ATESOR_PACKAGE_TEST_TIMEOUT": "30"}, 0),
+            ({"ATESOR_PACKAGE_TEST_TIMEOUT": "junk"}, PACKAGE_TEST_TIMEOUT),
+            # 800 s left: 420 s stay for the finish work.
+            ({"ATESOR_RUN_DEADLINE": str(now + 800)}, 380),
+            ({"ATESOR_RUN_DEADLINE": str(now + 450)}, 0),
+            ({"ATESOR_RUN_DEADLINE": str(now + 5000)}, PACKAGE_TEST_TIMEOUT),
+        ]
+        for env, expected in cases:
+            with self.subTest(env=env):
+                with (
+                    mock.patch.dict(os.environ, env),
+                    mock.patch.object(graph.time, "time", return_value=now),
+                ):
+                    self.assertEqual(
+                        _package_test_timeout(self.state), expected
+                    )
+
+    def test_detects_each_framework(self) -> None:
+        """Configured build trees win, then language files, then make."""
+        from src.graph import _detect_test_command
+
+        cases = [
+            ("build/CTestTestfile.cmake", "ctest --test-dir build"),
+            ("builddir/meson-info/x.json", "meson test -C builddir"),
+            ("go.mod", "go test ./..."),
+            ("Cargo.toml", "cargo test --release"),
+        ]
+        for rel, command in cases:
+            with self.subTest(rel=rel):
+                self.setUp()
+                self._put(rel)
+                framework, found = _detect_test_command(self.state)
+                self.assertTrue(found.startswith(command), found)
+
+    def test_make_targets_and_nothing(self) -> None:
+        """A check target beats a test target; no suite gives None."""
+        from src.graph import _detect_test_command
+
+        self.assertIsNone(_detect_test_command(self.state))
+        self._put("Makefile", "all:\n\tcc x.c\ntest: all\n\t./t\n")
+        self.assertEqual(
+            _detect_test_command(self.state), ("make test", "make test")
+        )
+        self._put("Makefile", "check: all\n\t./t\ntest:\n\t./u\n")
+        self.assertEqual(
+            _detect_test_command(self.state), ("make check", "make check")
+        )
+
+    def _run(self, exit_code: int, duration: float = 1.0):
+        from src import graph
+
+        self._put("Makefile", "check:\n\ttrue\n")
+        result = CommandResult("make check", exit_code, "ok", "", 1.0)
+        clock = iter([100.0, 100.0 + duration])
+        with (
+            mock.patch.object(graph, "execute_command", return_value=result),
+            mock.patch.object(graph.time, "time", lambda: next(clock)),
+        ):
+            return graph._run_package_tests(self.state)
+
+    def test_outcomes(self) -> None:
+        """Exit codes and elapsed time give passed, failed or timeout."""
+        self.assertEqual(self._run(0)["status"], "passed")
+        self.assertEqual(self._run(2)["status"], "failed")
+        # Killed at the limit: the in-sandbox timeout fired.
+        self.assertEqual(self._run(137, duration=590)["status"], "timeout")
+        # Killed early: an OOM kill, not a timeout.
+        self.assertEqual(self._run(137, duration=5)["status"], "failed")
+        done = self._run(2)
+        self.assertEqual(done["framework"], "make check")
+        self.assertEqual(done["exit_code"], 2)
+
+    def test_skipped_and_error_never_raise(self) -> None:
+        """No suite, no budget, or a crash is recorded, never raised."""
+        from src import graph
+
+        self.assertEqual(
+            graph._run_package_tests(self.state)["status"], "skipped"
+        )
+        with mock.patch.dict(
+            os.environ, {"ATESOR_PACKAGE_TEST_TIMEOUT": "0"}
+        ):
+            self.assertEqual(
+                graph._run_package_tests(self.state)["status"], "skipped"
+            )
+        with mock.patch.object(
+            graph, "_detect_test_command", side_effect=RuntimeError("boom")
+        ):
+            outcome = graph._run_package_tests(self.state)
+        self.assertEqual(outcome["status"], "error")
+        self.assertIn("boom", outcome["reason"])

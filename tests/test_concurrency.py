@@ -407,10 +407,11 @@ class TestRecipeCacheMultiProcessWriters:
             )
             for i in range(n)
         ]
-        exit_codes = [p.wait(timeout=120) for p in procs]
+        outputs = [p.communicate(timeout=120) for p in procs]
+        exit_codes = [p.returncode for p in procs]
 
         assert exit_codes == [0] * n, [
-            p.stderr.read().decode()[-300:] for p in procs
+            stderr.decode()[-300:] for _stdout, stderr in outputs
         ]
 
         cache_path = tmp_path / "data" / "recipe_cache.json"

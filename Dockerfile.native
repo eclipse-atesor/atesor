@@ -1,0 +1,115 @@
+# Atesor AI - RISC-V Porting Sandbox (native target, Debian trixie)
+#
+# Podman builds this image on the user's riscv64 machine, so it runs on
+# real hardware, not under QEMU. The debian and ubuntu platforms use it
+# on the native target. It follows Dockerfile.debian, with these changes:
+#   - Debian trixie instead of Ubuntu jammy. Trixie runs on any rv64gc
+#     board and ships gcc 14 and autoconf 2.72, so the autoconf source
+#     build is gone.
+#   - The Go pin file names o=Debian.
+#   - pip may install into the system Python, as it can on jammy.
+#   - No HEALTHCHECK. Atesor runs its own checks, and a podman health
+#     check adds a timer on the machine.
+# The build context is an empty directory, so the file copies nothing.
+FROM --platform=linux/riscv64 docker.io/library/debian:trixie
+
+LABEL maintainer="Atesor AI"
+LABEL description="RISC-V 64-bit Debian sandbox for native porting runs"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Core build essentials only. Project-specific libs (libpng-dev, gfortran,
+# libprotobuf-dev, etc.) are installed on demand by the agent.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    ca-certificates \
+    file \
+    tar \
+    xz-utils \
+    pkg-config \
+    meson \
+    ninja-build \
+    autoconf \
+    automake \
+    libtool \
+    patch \
+    diffutils \
+    ccache \
+    zlib1g-dev \
+    libssl-dev \
+    python3 \
+    python3-pip \
+    bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go and Rust versions match Dockerfile and Dockerfile.debian. The agent
+# and _MIN_TOOLCHAIN in batch_test.py expect them.
+ARG GO_VERSION=1.26.5
+ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
+# SHA256 source: https://go.dev/dl/?mode=json&include=all
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" \
+        -o /opt/atesor-downloads/go.tar.gz \
+    && echo "${GO_SHA256}  /opt/atesor-downloads/go.tar.gz" \
+        | sha256sum -c - \
+    && tar -xzf /opt/atesor-downloads/go.tar.gz -C /usr/local \
+    && rm -f /opt/atesor-downloads/go.tar.gz \
+    && /usr/local/go/bin/go version
+
+ARG RUST_TOOLCHAIN=1.90.0
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256=09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100d165c98a8fd7a7
+# SHA256 source: https://static.rust-lang.org/rustup/archive/1.28.2/riscv64gc-unknown-linux-gnu/rustup-init.sha256
+RUN mkdir -p /opt/atesor-downloads \
+    && curl -fsSL \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/riscv64gc-unknown-linux-gnu/rustup-init" \
+        -o /opt/atesor-downloads/rustup-init \
+    && echo "${RUSTUP_SHA256}  /opt/atesor-downloads/rustup-init" \
+        | sha256sum -c - \
+    && chmod +x /opt/atesor-downloads/rustup-init \
+    && /opt/atesor-downloads/rustup-init -y \
+        --profile minimal \
+        --default-toolchain ${RUST_TOOLCHAIN} \
+    && /root/.cargo/bin/rustc --version \
+    && /root/.cargo/bin/cargo --version \
+    && rm -f /opt/atesor-downloads/rustup-init
+
+# Hard guard: refuse any apt-install of the distro Go toolchain, so an
+# LLM-suggested `apt install golang...` fails at once instead of
+# shadowing the baked Go. See Dockerfile.debian for the history.
+RUN printf 'Package: golang* golang-go gccgo* go-1.* golang-1.*\nPin: release o=Debian\nPin-Priority: -1\n' \
+    > /etc/apt/preferences.d/99-no-distro-go
+
+# Same compiler setup as Dockerfile.debian: ccache through PATH, never
+# through CC, because CGO also uses CC as the assembler driver.
+ENV CC=gcc
+ENV CXX=g++
+ENV CCACHE_DIR=/workspace/.ccache
+ENV GOPATH=/root/go
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="${CARGO_HOME}/bin:${GOPATH}/bin:/usr/local/go/bin:/usr/lib/ccache:${PATH}"
+ENV GOPROXY=https://proxy.golang.org,direct
+ENV GONOSUMCHECK=*
+ENV GOFLAGS=-buildvcs=false
+# Pin Go to the baked version, so go.mod cannot start a toolchain
+# download in the middle of a build.
+ENV GOTOOLCHAIN=local
+# Trixie marks the system Python as externally managed (PEP 668). The
+# container is disposable, so allow pip installs as jammy does.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Workspace structure matches the other sandboxes. On the machine,
+# /workspace is a bind mount of the work directory. No VOLUME declaration
+# here: podman would materialize an image volume for /workspace/output
+# and nest it inside the bind mount, so writes into output/ would live in
+# container storage instead of the host work directory, and `podman rm
+# --volumes` would then wipe them.
+WORKDIR /workspace
+RUN mkdir -p /workspace/repos /workspace/output /workspace/logs /workspace/patches
+
+CMD ["tail", "-f", "/dev/null"]

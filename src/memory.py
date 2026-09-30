@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,8 @@ from typing import Any, Dict, List, Optional
 import filelock
 
 from .config import DATA_DIR
+from .scripted_ops import normalize_repo_url
+from .target import is_native
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,48 @@ _BUNDLED_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EXAMPLES_DIR = Path(DATA_DIR) / "examples"
 RECIPE_CACHE_PATH = Path(DATA_DIR) / "recipe_cache.json"
 MAX_EXAMPLES_PER_AGENT = 100
+
+
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Atomically write JSON to ``path`` using a same-directory temp file."""
+    os.makedirs(path.parent, exist_ok=True)
+    temp_name = (
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    temp_path = path.parent / temp_name
+    try:
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(data, file_obj, indent=2, ensure_ascii=False)
+            file_obj.write("\n")
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        os.replace(temp_path, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _lock_path_for(path: Path) -> str:
+    """Return the lock-file path that guards ``path``.
+
+    The lock sits next to the file it guards, as an absolute path, so
+    every writer uses the same lock whatever its working directory. It
+    is never deleted: removing a lock file lets a waiting process and a
+    new one lock two different inodes at once. ``.gitignore`` keeps
+    these files out of git.
+    """
+    return f"{path.resolve()}.lock"
 
 
 def _seed_bundled_data() -> None:
@@ -464,37 +509,47 @@ class AgentMemory:
             logger.warning("Cannot save example: missing name or build_system")
             return False
 
-        if self._is_duplicate(example_data):
-            logger.info(
-                f"Skipping duplicate example: {example_data.get('name')}"
-            )
-            return False
-
-        # Use max existing suffix + 1, not count + 1: after pruning
-        # removes old auto examples, a count-based id would collide
-        # with a surviving one.
-        prefix = f"{self.agent_type}-auto-"
-        max_num = 0
-        for ex in self.examples:
-            if ex.id.startswith(prefix):
-                try:
-                    max_num = max(max_num, int(ex.id[len(prefix) :]))
-                except ValueError:
-                    continue
-        example_data["id"] = f"{prefix}{max_num + 1:03d}"
-        example_data["source"] = "auto"
-        example_data["timestamp"] = datetime.now().strftime("%Y-%m-%d")
-        if not example_data.get("sandbox"):
-            from .platforms import get_active_profile
-
-            example_data["sandbox"] = f"{get_active_profile().name}-riscv64"
-
-        lock_path = str(self._filepath) + ".lock"
+        lock_path = _lock_path_for(self._filepath)
         try:
             lock = filelock.FileLock(lock_path, timeout=5)
             with lock:
                 data = self._read_json_file()
                 examples_list = data.get("examples", [])
+                loaded = [
+                    self._parse_example(item)
+                    for item in examples_list
+                    if isinstance(item, dict)
+                ]
+
+                if not example_data.get("sandbox"):
+                    from .platforms import get_active_profile
+
+                    example_data["sandbox"] = (
+                        f"{get_active_profile().name}-riscv64"
+                    )
+                if self._is_duplicate(example_data, examples=loaded):
+                    logger.info(
+                        "Skipping duplicate example: %s",
+                        example_data.get("name"),
+                    )
+                    return False
+
+                # Use max existing suffix + 1, not count + 1: after pruning
+                # removes old auto examples, a count-based id would collide
+                # with a surviving one.
+                prefix = f"{self.agent_type}-auto-"
+                max_num = 0
+                for ex in loaded:
+                    if ex.id.startswith(prefix):
+                        try:
+                            max_num = max(max_num, int(ex.id[len(prefix) :]))
+                        except ValueError:
+                            continue
+                example_data["id"] = f"{prefix}{max_num + 1:03d}"
+                example_data["source"] = "auto"
+                example_data["timestamp"] = datetime.now().strftime(
+                    "%Y-%m-%d"
+                )
                 examples_list.append(example_data)
 
                 examples_list = self._prune_examples_list(examples_list)
@@ -511,7 +566,11 @@ class AgentMemory:
             logger.error(f"Failed to save learned example: {e}")
             return False
 
-    def _is_duplicate(self, new_data: Dict[str, Any]) -> bool:
+    def _is_duplicate(
+        self,
+        new_data: Dict[str, Any],
+        examples: Optional[List[AgentExample]] = None,
+    ) -> bool:
         """Check if an example duplicates an existing one (sandbox-aware)."""
         new_bs = new_data.get("build_system", "")
         new_repo = new_data.get("repo_name", "")
@@ -526,7 +585,7 @@ class AgentMemory:
             except Exception:
                 new_sandbox = ""
 
-        for ex in self.examples:
+        for ex in examples if examples is not None else self.examples:
             ex_bs = ex.build_system or ex.context.get("build_system", "")
             ex_repo = ex.repo_name or ex.context.get("repo_name", "")
             # Treat an unset legacy sandbox as alpine-riscv64 (the
@@ -612,9 +671,7 @@ class AgentMemory:
             return json.load(f)
 
     def _write_json_file(self, data: Dict[str, Any]):
-        os.makedirs(self._filepath.parent, exist_ok=True)
-        with open(self._filepath, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(self._filepath, data)
 
 
 # ============================================================================
@@ -670,29 +727,37 @@ def load_recipe_cache() -> Dict[str, Any]:
 def _default_sandbox() -> str:
     """Return the active platform's sandbox key.
 
+    The native target adds ``-native``, so native and QEMU recipes
+    never share a cache entry.
+
     Returns:
         The sandbox key, e.g. ``"alpine-riscv64"`` or
-        ``"debian-riscv64"``.
+        ``"debian-riscv64-native"``.
     """
     try:
         from .platforms import get_active_profile
 
-        return f"{get_active_profile().name}-riscv64"
+        sandbox = f"{get_active_profile().name}-riscv64"
     except Exception:
-        return "alpine-riscv64"
+        sandbox = "alpine-riscv64"
+    if is_native():
+        sandbox += "-native"
+    return sandbox
 
 
 def get_cached_recipe(
     repo_name: str,
     architecture: str = "riscv64",
     sandbox: Optional[str] = None,
+    repo_url: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Look up a cached recipe for a package within a sandbox.
 
     A sandbox is a distro+arch combination. Falls back to the active
     platform's sandbox when `sandbox` is None. Returns None if no recipe
     exists for that combination — even if one exists for a different
-    sandbox (apk vs apt commands are not interchangeable).
+    sandbox (apk vs apt commands are not interchangeable). When
+    ``repo_url`` is provided, it must match the stored source URL.
     """
     if sandbox is None:
         sandbox = _default_sandbox()
@@ -701,9 +766,23 @@ def get_cached_recipe(
     if not isinstance(pkg_entry, dict):
         return None
     recipe = pkg_entry.get(sandbox)
-    if recipe and recipe.get("architecture", "riscv64") == architecture:
-        return recipe
-    return None
+    if not recipe or recipe.get("architecture", "riscv64") != architecture:
+        return None
+    if repo_url:
+        stored_url = recipe.get("repo_url", "")
+        if stored_url and (
+            normalize_repo_url(stored_url) != normalize_repo_url(repo_url)
+        ):
+            logger.info(
+                "Ignoring cached recipe for %s [%s]: URL mismatch "
+                "(cached=%s requested=%s)",
+                repo_name,
+                sandbox,
+                stored_url,
+                repo_url,
+            )
+            return None
+    return recipe
 
 
 def save_to_recipe_cache(
@@ -718,6 +797,7 @@ def save_to_recipe_cache(
     architecture: str = "riscv64",
     sandbox: Optional[str] = None,
     recipe_markdown: Optional[str] = None,
+    verification: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Upsert a package recipe in the cache, scoped per sandbox.
 
@@ -738,13 +818,18 @@ def save_to_recipe_cache(
         sandbox: Sandbox key; defaults to the active platform.
         recipe_markdown: The rendered recipe guide. Stored verbatim so a
             later cache hit can reproduce the exact ``<repo>_recipe.md``.
+        verification: The artifact verification summary of the build
+            (``AgentState.artifact_verification``). Its status, reason
+            and source commit are stored, so a cache hit can say
+            whether riscv64 output was proven. Entries written before
+            verification existed have no such record.
 
     Returns:
         True if the cache was written successfully, else False.
     """
     if sandbox is None:
         sandbox = _default_sandbox()
-    lock_path = str(RECIPE_CACHE_PATH) + ".lock"
+    lock_path = _lock_path_for(RECIPE_CACHE_PATH)
     try:
         lock = filelock.FileLock(lock_path, timeout=5)
         with lock:
@@ -782,6 +867,12 @@ def save_to_recipe_cache(
             }
             if recipe_markdown:
                 recipe["recipe_markdown"] = recipe_markdown
+            if verification:
+                recipe["verification"] = {
+                    "status": verification.get("status"),
+                    "reason": verification.get("reason"),
+                    "source_commit": verification.get("source_commit"),
+                }
 
             # Ensure nested layout (entry is a dict keyed by sandbox)
             pkg_entry = packages.get(repo_name)
@@ -802,10 +893,7 @@ def save_to_recipe_cache(
             packages[repo_name] = pkg_entry
 
             cache.setdefault("version", "2.0")
-            os.makedirs(RECIPE_CACHE_PATH.parent, exist_ok=True)
-            with open(RECIPE_CACHE_PATH, "w") as f:
-                json.dump(cache, f, indent=2, ensure_ascii=False)
-
+            _atomic_write_json(RECIPE_CACHE_PATH, cache)
         logger.info(f"Recipe cache updated for {repo_name} [{sandbox}]")
         return True
     except Exception as e:

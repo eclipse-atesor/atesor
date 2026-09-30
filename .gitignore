@@ -4,6 +4,9 @@
 
 # Workspace directories (host-side)
 /workspace/
+/workspace-native/
+# filelock files that guard the data stores (src/memory.py)
+/data/**/*.lock
 *.pyc
 __pycache__/
 .cache/

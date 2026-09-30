@@ -28,6 +28,7 @@ import re
 import tempfile
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_SCRATCH_ROOT = _REPO_ROOT / "workspace" / "test_masterplan_fixes"
 
 
 def _dockerfile_pins(name: str) -> dict:
@@ -43,6 +44,12 @@ def _dockerfile_pins(name: str) -> dict:
     return pins
 
 
+def _dockerfile_args(name: str) -> dict:
+    """Extract Dockerfile ARG values."""
+    text = (_REPO_ROOT / name).read_text()
+    return dict(re.findall(r"^ARG\s+([A-Z0-9_]+)=(\S+)", text, re.M))
+
+
 def _load_batch_module():
     spec = importlib.util.spec_from_file_location(
         "batch_test_mp", str(_REPO_ROOT / ".github/scripts/batch_test.py")
@@ -54,7 +61,8 @@ def _load_batch_module():
 
 def _mkrepo(paths) -> str:
     """Create a temp repo tree containing ``paths`` (relative files)."""
-    root = tempfile.mkdtemp()
+    _SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+    root = tempfile.mkdtemp(dir=_SCRATCH_ROOT)
     for rel in paths:
         full = os.path.join(root, rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -416,4 +424,27 @@ class TestPreflightGateTracksImages:
         # A current container triggers no rebuild.
         assert not batch._stale_reasons(
             {"go": "1.26.5", "cargo": "1.90.0"}, minimums
+        )
+
+    def test_downloaded_toolchains_have_sha256_pins(self) -> None:
+        """Dockerfile downloads verify pinned toolchain checksums."""
+        for name in ("Dockerfile", "Dockerfile.debian", "Dockerfile.native"):
+            text = (_REPO_ROOT / name).read_text()
+            args = _dockerfile_args(name)
+            assert args.get("GO_SHA256") == (
+                "d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff"
+                "61662750e3"
+            )
+            assert "sha256sum -c -" in text
+            if name != "Dockerfile":
+                assert args.get("RUSTUP_SHA256") == (
+                    "09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100"
+                    "d165c98a8fd7a7"
+                )
+        debian_args = _dockerfile_args("Dockerfile.debian")
+        # GNU publishes it in base64 (autotools-announce 2023-12):
+        # r7GBp24e5ygy9lgcDt343wMrg+LgI573nr7cRGfZLW4=
+        assert debian_args.get("AUTOCONF_SHA256") == (
+            "afb181a76e1ee72832f6581c0eddf8df032b83e2e0239ef79ebedc"
+            "4467d92d6e"
         )

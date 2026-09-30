@@ -578,180 +578,188 @@ class TestFixerInvestigation(unittest.TestCase):
 
 
 class TestExpectedArtifactVerification(unittest.TestCase):
-    """Tests for expected-artifact handling in verify_node."""
+    """Tests for verify_node on top of the ELF-header scanner."""
 
-    def _scanner(self):
-        """Fake ArtifactScanner that finds nothing scannable."""
+    RVC_DOUBLE = 0x5
+
+    def _entry(self, path, machine, tracked=False):
+        """Return one scan entry for an executable ELF file."""
+        return {
+            "path": path,
+            "size": 4096,
+            "exec": True,
+            "tracked": tracked,
+            "elf": [64, 1, 2, machine, self.RVC_DOUBLE],
+        }
+
+    def _verdict(self, files=(), outside=(), expected=()):
+        """Build a real VerificationResult from a scan payload."""
+        from src.artifact_scanner import evaluate_scan
+
+        payload = {
+            "files": list(files),
+            "outside": list(outside),
+            "examined": len(files),
+            "commit": "a" * 40,
+        }
+        return evaluate_scan(payload, "/workspace/repos/b", expected)
+
+    def _verify(self, verdict, state=None):
+        """Run verify_node with the scanner returning ``verdict``."""
+        from src import graph
+
+        state = state or _state()
         scanner = mock.MagicMock()
-        scanner.scan.return_value = []
-        scanner.verify_build_success.return_value = (False, "no artifacts")
-        scanner.get_summary.return_value = {"by_architecture": {}}
-        return scanner
+        scanner.scan.return_value = verdict
+        with mock.patch.object(
+            graph, "ArtifactScanner", return_value=scanner
+        ) as cls:
+            out = graph.verify_node(state)
+        return out, cls, scanner
 
     def test_scanner_valid_artifacts_are_recorded(self) -> None:
-        """A valid scanner result records artifacts and succeeds."""
-        from src import graph
-
-        scanner = mock.MagicMock()
-        scanner.scan.return_value = [
-            {
-                "filepath": "/workspace/repos/b/tool",
-                "type": "binary",
-                "architecture": "RISC-V",
-            }
-        ]
-        scanner.verify_build_success.return_value = (True, "ok")
-
-        with mock.patch.object(graph, "ArtifactScanner", return_value=scanner):
-            out = graph.verify_node(_state())
+        """A verified scan records riscv64 artifacts and succeeds."""
+        out, _cls, _scanner = self._verify(
+            self._verdict(files=[self._entry("build/tool", 243)])
+        )
 
         self.assertEqual(out.build_status, BuildStatus.SUCCESS)
-        self.assertEqual(out.build_artifacts[0]["architecture"], "RISC-V")
+        self.assertEqual(out.verification_status, "verified")
+        self.assertTrue(out.is_verified_success)
+        self.assertEqual(
+            out.build_artifacts[0]["filepath"],
+            "/workspace/repos/b/build/tool",
+        )
+        self.assertEqual(out.build_artifacts[0]["architecture"], "riscv64")
 
     def test_scanner_wrong_architecture_fails_verification(self) -> None:
-        """Non-RISC-V scanner summaries are hard verification failures."""
-        from src import graph
-
-        scanner = mock.MagicMock()
-        scanner.scan.return_value = []
-        scanner.verify_build_success.return_value = (False, "wrong arch")
-        scanner.get_summary.return_value = {"by_architecture": {"x86-64": 1}}
-
-        with mock.patch.object(graph, "ArtifactScanner", return_value=scanner):
-            out = graph.verify_node(_state())
+        """One x86-64 output beside riscv64 ones is a hard failure."""
+        out, _cls, _scanner = self._verify(
+            self._verdict(
+                files=[
+                    self._entry("build/tool", 243),
+                    self._entry("build/helper", 62),
+                ]
+            )
+        )
 
         self.assertEqual(out.build_status, BuildStatus.FAILED)
         self.assertEqual(out.last_error_category, ErrorCategory.ARCHITECTURE)
+        self.assertEqual(out.verification_status, "wrong_arch")
+        self.assertEqual(out.build_artifacts, [])
 
     def test_riscv_expected_artifact_seals_success(self) -> None:
-        """An expected artifact found as RISC-V verifies the build."""
-        from src import graph
+        """Expected names and the start time reach the scanner."""
+        state = _state()
+        state.package_analysis = PackageAnalysis(
+            purpose="x", expected_artifacts=["tool"]
+        )
+        verdict = self._verdict(
+            outside=[self._entry("/usr/local/bin/tool", 243)],
+            expected=["tool"],
+        )
 
-        s = _state(
-            package_analysis=PackageAnalysis(
-                purpose="t",
-                expected_artifacts=["mytool"],
-                llm_grounded=True,
-            )
+        out, cls, scanner = self._verify(verdict, state)
+
+        cls.assert_called_once_with(state.repo_path)
+        kwargs = scanner.scan.call_args.kwargs
+        self.assertEqual(kwargs["expected_names"], ["tool"])
+        self.assertEqual(
+            kwargs["since"], state.execution_start_time.timestamp()
         )
-        with (
-            mock.patch.object(
-                graph, "ArtifactScanner", return_value=self._scanner()
-            ),
-            mock.patch.object(
-                graph,
-                "_locate_expected_artifacts",
-                return_value=[
-                    ("/usr/local/bin/mytool", "ELF 64-bit LSB pie, RISC-V")
-                ],
-            ),
-        ):
-            out = graph.verify_node(s)
         self.assertEqual(out.build_status, BuildStatus.SUCCESS)
-        self.assertTrue(
-            any(
-                a["filepath"] == "/usr/local/bin/mytool"
-                for a in out.build_artifacts
-            )
-        )
+        self.assertTrue(out.is_verified_success)
 
     def test_wrong_arch_expected_artifact_fails(self) -> None:
-        """An expected artifact that is x86 must FAIL verification."""
-        from src import graph
-
-        s = _state(
-            package_analysis=PackageAnalysis(
-                purpose="t",
-                expected_artifacts=["mytool"],
-                llm_grounded=True,
-            )
+        """An installed expected artifact that is x86 must FAIL."""
+        verdict = self._verdict(
+            outside=[self._entry("/usr/local/bin/tool", 62)],
+            expected=["tool"],
         )
-        with (
-            mock.patch.object(
-                graph, "ArtifactScanner", return_value=self._scanner()
-            ),
-            mock.patch.object(
-                graph,
-                "_locate_expected_artifacts",
-                return_value=[("/usr/local/bin/mytool", "ELF 64-bit, x86-64")],
-            ),
-        ):
-            out = graph.verify_node(s)
+
+        out, _cls, _scanner = self._verify(verdict)
+
         self.assertEqual(out.build_status, BuildStatus.FAILED)
         self.assertEqual(out.last_error_category, ErrorCategory.ARCHITECTURE)
 
     def test_missing_expected_artifacts_recorded_in_caveat(self) -> None:
-        """Unfound expected artifacts land in the verification caveat."""
-        from src import graph
-
-        s = _state(
-            package_analysis=PackageAnalysis(
-                purpose="t",
-                expected_artifacts=["mytool"],
-                llm_grounded=True,
-            )
+        """An unverified build names the expected outputs it never saw."""
+        out, _cls, _scanner = self._verify(
+            self._verdict(expected=["tool", "libtool.so"])
         )
-        with (
-            mock.patch.object(
-                graph, "ArtifactScanner", return_value=self._scanner()
-            ),
-            mock.patch.object(
-                graph, "_locate_expected_artifacts", return_value=[]
-            ),
-        ):
-            out = graph.verify_node(s)
+
         self.assertEqual(out.build_status, BuildStatus.SUCCESS)
-        caveat = out.context_cache["artifact_verification"]
-        self.assertFalse(caveat["verified"])
-        self.assertEqual(caveat["expected_missing"], ["mytool"])
+        self.assertFalse(out.is_verified_success)
+        self.assertEqual(out.verification_status, "unverified")
+        self.assertEqual(
+            out.artifact_verification["expected_missing"],
+            ["tool", "libtool.so"],
+        )
 
     def test_expectation_names_are_sanitized(self) -> None:
-        """Path-ish or globby expectations never reach find."""
-        from src import graph
+        """Path-ish or globby expectations never reach the scan program."""
+        import json
 
-        s = _state()
+        from src import artifact_scanner
+
+        ok = CommandResult(
+            "python3",
+            0,
+            'ATESOR_SCAN_JSON {"files": [], "outside": [], "examined": 0}',
+            "",
+            0.1,
+        )
         with mock.patch.object(
-            graph,
-            "execute_command",
-            return_value=mock.MagicMock(stdout="", stderr="", exit_code=1),
-        ) as exec_mock:
-            hits = graph._locate_expected_artifacts(
-                s, ["../evil", "a*b", "$(rm)", "ok-name"]
+            artifact_scanner, "execute_command", return_value=ok
+        ) as execute:
+            artifact_scanner.ArtifactScanner("/workspace/repos/b").scan(
+                ["tool", "../etc/passwd", "*.so", "a b", "tool"]
             )
-        # Only "ok-name" is searched (one find; file only on matches)
-        self.assertEqual(exec_mock.call_count, 1)
-        self.assertEqual(hits, [])
 
-    def test_locate_expected_artifacts_verifies_each_find_hit(self) -> None:
-        """Expected artifact lookup runs file on each candidate path."""
+        names = json.loads(execute.call_args.args[0][5])
+        self.assertEqual(names, ["tool"])
+
+    def test_rescan_replaces_the_previous_artifact_list(self) -> None:
+        """A rebuild after a fix is judged by its own outputs only."""
+        state = _state()
+        state.add_build_artifact("/old/x86-tool", "binary", "x86-64")
+
+        out, _cls, _scanner = self._verify(
+            self._verdict(files=[self._entry("build/tool", 243)]), state
+        )
+
+        self.assertEqual(
+            [a["filepath"] for a in out.build_artifacts],
+            ["/workspace/repos/b/build/tool"],
+        )
+
+    def test_recorded_artifacts_are_capped_expected_first(self) -> None:
+        """A big build keeps 60 outputs in state; the summary counts all.
+
+        The curator sends the recorded list to an LLM, so it must stay
+        small. The expected output is kept even when it sorts last.
+        """
         from src import graph
 
-        s = _state()
-        find_result = mock.MagicMock(
-            stdout="/workspace/repos/b/tool\n",
-            stderr="",
-            exit_code=0,
+        state = _state()
+        state.package_analysis = PackageAnalysis(
+            purpose="x", expected_artifacts=["zz-tool"]
         )
-        file_result = mock.MagicMock(
-            stdout="/workspace/repos/b/tool: ELF 64-bit LSB, RISC-V",
-            stderr="",
-            exit_code=0,
-        )
-        with mock.patch.object(
-            graph, "execute_command", side_effect=[find_result, file_result]
-        ) as exec_mock:
-            hits = graph._locate_expected_artifacts(s, ["tool"])
+        files = [
+            self._entry(f"build/tests/t{i:03d}", 243) for i in range(100)
+        ] + [self._entry("build/zz-tool", 243)]
 
-        self.assertEqual(exec_mock.call_count, 2)
+        out, _cls, _scanner = self._verify(self._verdict(files=files), state)
+
         self.assertEqual(
-            hits,
-            [
-                (
-                    "/workspace/repos/b/tool",
-                    "/workspace/repos/b/tool: ELF 64-bit LSB, RISC-V",
-                )
-            ],
+            len(out.build_artifacts), graph._MAX_RECORDED_ARTIFACTS
         )
+        self.assertEqual(
+            out.build_artifacts[0]["filepath"],
+            "/workspace/repos/b/build/zz-tool",
+        )
+        self.assertEqual(out.artifact_verification["counts"]["riscv64"], 101)
+        self.assertTrue(out.is_verified_success)
 
 
 class TestFixerNode(unittest.TestCase):
@@ -784,6 +792,128 @@ class TestFixerNode(unittest.TestCase):
         out = graph.fixer_node(_state())
 
         self.assertEqual(out.build_status, BuildStatus.PENDING)
+
+    def _run_fixer_with(self, state, actions):
+        """Run fixer_node with one mocked strategy made of ``actions``."""
+        from src import graph
+
+        strategy = {
+            "strategies": [
+                {"id": 1, "description": "rebuild fix", "actions": actions}
+            ],
+            "recommended_strategy_id": 1,
+            "reflection": {
+                "root_cause": "objects built for the wrong arch",
+                "this_fix_will_work_because": "it rebuilds from source",
+            },
+        }
+        outcome = LLMCallOutcome(
+            data=strategy, used_fallback=False, attempts=1
+        )
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ),
+            mock.patch.object(
+                graph,
+                "execute_command",
+                return_value=mock.MagicMock(success=True),
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+        ):
+            return graph.fixer_node(state)
+
+    def test_applied_fix_forces_a_full_rebuild(self) -> None:
+        """A fix after a verify failure is compiled, not skipped."""
+        state = self._fixer_state()
+        # Every phase already succeeded; verify then failed.
+        state.last_successful_phase = 1
+        state.cache_command_result(
+            "make", CommandResult("make", 0, "", "", 1.0)
+        )
+
+        out = self._run_fixer_with(
+            state, [{"type": "command", "command": "make clean"}]
+        )
+
+        self.assertEqual(out.last_successful_phase, 0)
+        self.assertIsNone(out.get_cached_command_result("make"))
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+
+    def _two_phase_state(self, done_phase: int):
+        """A Go plan whose first phase is not safe to repeat."""
+        state = self._fixer_state()
+        state.build_plan = BuildPlan(
+            build_system="go",
+            build_system_confidence=0.9,
+            phases=[
+                BuildPhase(1, "setup", ["go mod init example.com/x"]),
+                BuildPhase(2, "build", ["go build ./..."]),
+            ],
+            total_estimated_duration="1m",
+        )
+        state.last_successful_phase = done_phase
+        for cmd in ("go mod init example.com/x", "go build ./..."):
+            state.cache_command_result(cmd, CommandResult(cmd, 0, "", "", 1.0))
+        return state
+
+    def test_verify_failure_fix_reruns_build_steps_only(self) -> None:
+        """The go mod init step stays done; go build runs again."""
+        out = self._run_fixer_with(
+            self._two_phase_state(done_phase=2),
+            [{"type": "command", "command": "make clean"}],
+        )
+
+        self.assertEqual(out.last_successful_phase, 1)
+        self.assertIsNotNone(
+            out.get_cached_command_result("go mod init example.com/x")
+        )
+        self.assertIsNone(out.get_cached_command_result("go build ./..."))
+
+    def test_build_failure_fix_resumes_at_the_failed_phase(self) -> None:
+        """After a build failure the builder resumes as before."""
+        out = self._run_fixer_with(
+            self._two_phase_state(done_phase=1),
+            [{"type": "command", "command": "make clean"}],
+        )
+
+        self.assertEqual(out.last_successful_phase, 1)
+        self.assertIsNotNone(out.get_cached_command_result("go build ./..."))
+
+    def test_rejected_fix_keeps_the_build_progress(self) -> None:
+        """A strategy that changed nothing does not restart the build."""
+        state = self._fixer_state()
+        state.last_successful_phase = 1
+        state.cache_command_result(
+            "make", CommandResult("make", 0, "", "", 1.0)
+        )
+
+        out = self._run_fixer_with(
+            state,
+            [
+                {
+                    "type": "create_file",
+                    "path": "../../etc/profile",
+                    "content": "x",
+                }
+            ],
+        )
+
+        self.assertEqual(out.last_successful_phase, 1)
+        self.assertIsNotNone(out.get_cached_command_result("make"))
 
     def test_investigation_round_then_command_fix(self) -> None:
         """Fixer can request one read-only investigation then emit a fix."""
@@ -967,7 +1097,9 @@ class TestFixerNode(unittest.TestCase):
         ):
             out = graph.fixer_node(state)
 
-        self.assertGreaterEqual(execute.call_count, 3)
+        # One sandbox call for the checked create_file write (it
+        # makes the directory too) and one for the command.
+        self.assertEqual(execute.call_count, 2)
         patch.assert_called_once()
         self.assertEqual(out.build_status, BuildStatus.PENDING)
         self.assertEqual(len(out.fixes_attempted[-1].changes_made), 3)
@@ -1070,6 +1202,33 @@ class TestTerminalNodes(unittest.TestCase):
         log_call.assert_called_once()
         save_learning.assert_called_once_with(state)
 
+    def test_finish_node_runs_package_tests_once_without_gating(
+        self,
+    ) -> None:
+        """A failing test suite is recorded and the port stays SUCCESS."""
+        from src import graph
+
+        state = _state(build_plan=self._plan())
+        failed = {"status": "failed", "framework": "make check"}
+        with (
+            mock.patch.object(
+                graph, "_run_package_tests", return_value=failed
+            ) as run_tests,
+            mock.patch.object(
+                graph, "get_model_for_role", side_effect=RuntimeError("x")
+            ),
+            mock.patch.object(graph, "_save_learning_data"),
+        ):
+            out = graph.finish_node(state)
+            graph.finish_node(out)
+
+        run_tests.assert_called_once()
+        self.assertEqual(out.package_tests, failed)
+        self.assertEqual(out.build_status, BuildStatus.SUCCESS)
+        self.assertIn(
+            "Package tests (not gating):** failed", out.porting_recipe
+        )
+
     def test_finish_node_falls_back_when_summarizer_fails(self) -> None:
         """Finish node emits a deterministic recipe if the LLM fails."""
         from src import graph
@@ -1095,21 +1254,31 @@ class TestTerminalNodes(unittest.TestCase):
         from src import graph
 
         state = _state(build_plan=self._plan())
+        # Only a verified port is learned (the learning gate).
+        state.build_status = BuildStatus.SUCCESS
+        state.artifact_verification = {"status": "verified"}
         state.build_artifacts = [
             {
                 "filepath": "bin/tool",
                 "type": "binary",
-                "architecture": "RISC-V",
+                "architecture": "riscv64",
             }
         ]
         state.context_cache["go_main_info"] = {"has_main": True}
-        state.last_error = "fatal error"
+        state.dependencies = DependencyInfo(
+            system_packages=["zlib-dev", "cmake", "zlib-dev"]
+        )
+        state.patches_generated = ["--- a/file.c\n+++ b/file.c\n"]
+        # A later, unrelated error: the fixer example must keep the
+        # error its own fix solved.
+        state.last_error = "later unrelated error"
         state.add_fix_attempt(
             FixAttempt(
                 error_category=ErrorCategory.COMPILATION,
                 strategy="patch header",
                 changes_made=["Executed: sed -i s/a/b/ file.c"],
                 success=True,
+                error_message="fatal error: a.h (x)",
             )
         )
 
@@ -1142,12 +1311,50 @@ class TestTerminalNodes(unittest.TestCase):
             fixer_payload["fix"]["actions"][0]["command"],
             "sed -i s/a/b/ file.c",
         )
+        self.assertEqual(
+            fixer_payload["error_pattern"], r"fatal\ error:\ a\.h\ \(x\)"
+        )
+        cache_kwargs = save_cache.call_args.kwargs
+        self.assertEqual(cache_kwargs["dependencies"], ["cmake", "zlib-dev"])
+        self.assertEqual(
+            cache_kwargs["patches"], ["--- a/file.c\n+++ b/file.c\n"]
+        )
+        self.assertIs(
+            cache_kwargs["verification"], state.artifact_verification
+        )
+
+    def test_unverified_success_is_not_learned(self) -> None:
+        """An unverified or wrong-arch build never reaches the caches."""
+        from src import graph
+
+        for status in ("unverified", "wrong_arch", None):
+            with self.subTest(status=status):
+                state = _state(build_plan=self._plan())
+                state.build_status = BuildStatus.SUCCESS
+                state.artifact_verification = (
+                    {"status": status} if status else None
+                )
+                with (
+                    mock.patch.object(
+                        graph, "save_learned_example"
+                    ) as save_example,
+                    mock.patch.object(
+                        graph, "save_to_recipe_cache"
+                    ) as save_cache,
+                ):
+                    graph._save_learning_data(state)
+
+                save_example.assert_not_called()
+                save_cache.assert_not_called()
 
     def test_save_learning_data_is_non_fatal(self) -> None:
         """Auto-learning swallows persistence failures."""
         from src import graph
 
         state = _state(build_plan=self._plan())
+        # Verified, so the save (and its failure) is really reached.
+        state.build_status = BuildStatus.SUCCESS
+        state.artifact_verification = {"status": "verified"}
         with mock.patch.object(
             graph,
             "save_learned_example",
@@ -1158,3 +1365,59 @@ class TestTerminalNodes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuilderCMakeCacheCleanup(unittest.TestCase):
+    """The stale build/ removal must target the container path."""
+
+    def test_rm_uses_container_path_not_host_path(self) -> None:
+        """The rm runs in the sandbox, so it needs the /workspace path."""
+        from src import graph
+
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="cmake",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "configure", ["cmake -S . -B build"])],
+            total_estimated_duration="1m",
+        )
+        host_build = "/host/repos/b/build"
+        calls = []
+
+        def fake_execute(cmd, *args, **kwargs):
+            calls.append(cmd)
+            text = cmd if isinstance(cmd, str) else " ".join(cmd)
+            if text.startswith("cmake -S . -B build") and (
+                "CMAKE_C_COMPILER" not in text
+            ):
+                return CommandResult(
+                    text,
+                    1,
+                    "",
+                    "CMAKE_C_COMPILER: gcc is not a full path to an "
+                    "existing compiler tool",
+                    1.0,
+                )
+            return CommandResult(text, 0, "", "", 1.0)
+
+        real_isdir = graph.os.path.isdir
+        with (
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(
+                graph,
+                "_to_host_path",
+                side_effect=lambda p: p.replace("/workspace", "/host", 1),
+            ),
+            mock.patch.object(
+                graph.os.path,
+                "isdir",
+                side_effect=lambda p: p == host_build or real_isdir(p),
+            ),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            graph.builder_node(state)
+
+        rm_calls = [c for c in calls if str(c).startswith("rm -rf")]
+        self.assertEqual(rm_calls, ["rm -rf /workspace/repos/b/build"])

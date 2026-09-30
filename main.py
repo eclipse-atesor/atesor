@@ -6,12 +6,15 @@ workflow.
 """
 
 import argparse
+import contextlib
 import fcntl
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
+from typing import Iterator, List
 
 import docker
 from dotenv import load_dotenv
@@ -38,7 +41,23 @@ if os.environ.get("ATESOR_HOME"):
 for _env_path in _env_candidates:
     load_dotenv(_env_path, override=False)
 
-from src import __version__  # noqa: E402
+# src.config computes its paths at import time, so a --target flag must
+# reach the environment first. The flag wins over .env.
+from src.target import (  # noqa: E402
+    apply_target_flag,
+    close_connection,
+    is_native,
+    machine_label,
+    redact,
+    remote_workdir,
+    reset_target_cache,
+    target_name_from_env,
+)
+
+apply_target_flag(sys.argv[1:])
+_TARGET_AT_IMPORT = target_name_from_env()
+
+from src import __version__, sandbox  # noqa: E402
 from src.config import (  # noqa: E402
     LOGS_DIR,
     OUTPUT_DIR,
@@ -52,6 +71,18 @@ from src.state import AgentState  # noqa: E402
 # Directory holding bundled resources (Dockerfiles, seed data), resolved
 # from the install location so image builds work regardless of the CWD.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The first native image build downloads the base image and the Go and
+# Rust toolchains on the machine.
+NATIVE_BUILD_TIMEOUT = 5400
+
+# The distro IDs that each profile accepts in the container. The ubuntu
+# platform uses the debian profile, which has the same package map.
+_NATIVE_DISTROS = {
+    "alpine": {"alpine"},
+    "debian": {"debian", "ubuntu"},
+    "ubuntu": {"debian", "ubuntu"},
+}
 
 
 # Configure logging
@@ -690,6 +721,468 @@ def _provision_sandbox_locked(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Native target: the build container on the user's riscv64 machine
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _sandbox_setup_lock() -> Iterator[None]:
+    """Hold the setup flock that _provision_sandbox() also takes.
+
+    batch_test.py starts several main.py processes at once. The lock
+    lets one of them build the image while the others wait.
+    """
+    lock_path = os.path.join(LOGS_DIR, ".container_setup.lock")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    with open(lock_path, "w") as lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(
+                colored(
+                    "   Another worker is provisioning the sandbox "
+                    "(image build / container setup); waiting...",
+                    "yellow",
+                )
+            )
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+
+def setup_native_environment() -> bool:
+    """Set up the build container on the native machine.
+
+    Podman builds the image on the machine when the image is missing or
+    ``REBUILD_IMAGE=true``. Then Atesor creates or starts the container
+    and runs the health checks. Nothing here uses the local Docker
+    daemon or binfmt_misc. The preflight must pass first, because rung
+    10 finds the work directory that the container mounts.
+
+    Returns:
+        True when the container runs and passes the health checks.
+    """
+    from src.platforms import get_active_profile, get_container_name
+
+    profile = get_active_profile()
+    container = get_container_name()
+    print(
+        colored(
+            f"\nSetting up the RISC-V sandbox ({profile.display_name}) "
+            f"on {machine_label()}...",
+            "cyan",
+        )
+    )
+    try:
+        with _sandbox_setup_lock():
+            return (
+                _ensure_native_image(profile)
+                and _ensure_native_container(container, profile.image_name)
+                and _check_native_container(profile, container)
+            )
+    except (
+        sandbox.SandboxUnavailableError,
+        sandbox.PodmanError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        print(colored(f"ERROR: {exc}", "red"))
+        return False
+
+
+def _ensure_native_image(profile) -> bool:
+    """Build the native image when it is missing or a rebuild is due."""
+    image = profile.image_name
+    if os.environ.get("REBUILD_IMAGE") == "true":
+        print(colored(f"Forcing rebuild of image '{image}'...", "yellow"))
+    elif sandbox.image_exists(image):
+        print(colored(f"Image '{image}' found", "green"))
+        return True
+
+    dockerfile = profile.native_dockerfile
+    print(
+        colored(
+            f"   Building image '{image}' from {dockerfile} on "
+            f"{machine_label()}...",
+            "yellow",
+        )
+    )
+    print(
+        colored(
+            "   Note: the first build downloads the base image and the Go "
+            "and Rust toolchains. Later runs reuse the image.",
+            "yellow",
+        )
+    )
+    with open(os.path.join(APP_DIR, dockerfile), encoding="utf-8") as handle:
+        text = handle.read()
+    started = time.time()
+    code = sandbox.build_image(
+        image,
+        text,
+        on_line=lambda line: print(f"   {line}"),
+        timeout=NATIVE_BUILD_TIMEOUT,
+    )
+    minutes = (time.time() - started) / 60
+    if code == 0:
+        print(
+            colored(f"Image built successfully in {minutes:.1f} min", "green")
+        )
+        return True
+    if code == sandbox.BUILD_TIMED_OUT:
+        print(
+            colored(
+                f"ERROR: The image build stopped at the time limit "
+                f"({NATIVE_BUILD_TIMEOUT} s)",
+                "red",
+            )
+        )
+    else:
+        print(
+            colored(
+                f"ERROR: Failed to build the image (podman exit {code})",
+                "red",
+            )
+        )
+    return False
+
+
+def _ensure_native_container(container: str, image: str) -> bool:
+    """Create or start the native container on the work directory.
+
+    A container whose ``/workspace`` mount is not the current work
+    directory is recreated, so it never works on stale files.
+    """
+    workdir = remote_workdir()
+    if not workdir:
+        print(
+            colored(
+                "ERROR: The work directory is unknown, because preflight "
+                "rung 10 did not run.",
+                "red",
+            )
+        )
+        return False
+    for _ in range(2):
+        state = sandbox.inspect_container(container)
+        if state is not None and state.workspace_source != workdir:
+            print(
+                colored(
+                    f"   Container '{container}' has a stale workspace "
+                    f"mount ({redact(state.workspace_source)}); "
+                    "recreating it...",
+                    "yellow",
+                )
+            )
+            sandbox.remove_container(container)
+            state = None
+        if state is None:
+            print(colored(f"   Creating container '{container}'...", "yellow"))
+            sandbox.create_container(container, image, workdir)
+        elif state.status != "running":
+            print(
+                colored(
+                    f"   Starting existing container '{container}'...",
+                    "yellow",
+                )
+            )
+            sandbox.start_container(container)
+        state = sandbox.inspect_container(container)
+        if state is not None and state.status == "running":
+            print(colored(f"Container '{container}' is running", "green"))
+            return True
+        status = state.status if state is not None else "missing"
+        print(
+            colored(f"   Container status: {status}, recreating...", "yellow")
+        )
+        sandbox.remove_container(container)
+    print(colored("ERROR: Failed to start container after 2 attempts", "red"))
+    return False
+
+
+def _os_release_id(text: str) -> str:
+    """Return the ID value of an /etc/os-release text, in lower case."""
+    for line in text.splitlines():
+        if line.startswith("ID="):
+            return line.split("=", 1)[1].strip().strip('"').lower()
+    return ""
+
+
+def _check_native_container(profile, container: str) -> bool:
+    """Check the distro, the architecture and the shell of the container.
+
+    The check also creates the workspace directories, because the bind
+    mount of the work directory hides the ones in the image.
+    """
+    osr = sandbox.run_in_container(container, ["cat", "/etc/os-release"])
+    if osr.returncode == 0:
+        distro = _os_release_id(osr.stdout)
+        allowed = _NATIVE_DISTROS.get(profile.name, {profile.name})
+        if distro and distro not in allowed:
+            print(
+                colored(
+                    f"ERROR: Platform mismatch: container '{container}' is "
+                    f"'{distro}', but --platform '{profile.name}' was "
+                    "selected.",
+                    "red",
+                )
+            )
+            print(
+                colored(
+                    "  Fix: remove the stale container on the machine, "
+                    f"then re-run.\n    podman rm -f {container}",
+                    "yellow",
+                )
+            )
+            return False
+        logger.info(f"Container distro check OK: {distro} in {allowed}")
+    else:
+        logger.warning(
+            f"Could not read /etc/os-release from container "
+            f"(exit {osr.returncode})"
+        )
+
+    arch = sandbox.run_in_container(container, ["uname", "-m"])
+    arch_name = arch.stdout.strip()
+    if arch.returncode != 0 or arch_name != "riscv64":
+        print(
+            colored(
+                f"ERROR: The container reports the architecture "
+                f"'{arch_name}' (exit {arch.returncode}), not riscv64",
+                "red",
+            )
+        )
+        return False
+    print(
+        colored(
+            f"Container architecture verified: {arch_name} (native)",
+            "green",
+        )
+    )
+
+    dirs = sandbox.run_in_container(
+        container,
+        [
+            "mkdir",
+            "-p",
+            "/workspace/repos",
+            "/workspace/output",
+            "/workspace/logs",
+            "/workspace/patches",
+        ],
+    )
+    ready = sandbox.run_in_container(container, ["echo", "Container ready!"])
+    if dirs.returncode == 0 and ready.returncode == 0:
+        print(colored("Container is responsive", "green"))
+        return True
+    print(colored("ERROR: Container is not responding correctly", "red"))
+    return False
+
+
+def stop_native_container() -> None:
+    """Stop the native build container when a native command ends.
+
+    A failure is logged, and the command still ends. The next native
+    command starts the container again.
+    """
+    from src.platforms import get_container_name
+
+    container = get_container_name()
+    try:
+        result = sandbox.stop_container(container)
+    except Exception as exc:  # the stop must never hide the exit reason
+        logger.warning(f"Could not stop container '{container}': {exc}")
+        return
+    if result.returncode == 0:
+        print(
+            colored(
+                f"Container '{container}' stopped on {machine_label()}",
+                "cyan",
+            )
+        )
+    elif "no such container" not in result.stderr.lower():
+        logger.warning(
+            f"Could not stop container '{container}': "
+            f"{redact(result.stderr.strip())}"
+        )
+
+
+def cleanup_native_container(remove_image: bool = False) -> None:
+    """Remove the native build container, and its image when asked.
+
+    Args:
+        remove_image: If True, also remove the sandbox image.
+    """
+    from src.platforms import get_active_profile, get_container_name
+
+    container = get_container_name()
+    image = get_active_profile().image_name
+    try:
+        if sandbox.container_exists(container):
+            print(
+                colored(
+                    f"Removing container '{container}' on "
+                    f"{machine_label()}...",
+                    "yellow",
+                )
+            )
+            result = sandbox.remove_container(container)
+            if result.returncode == 0:
+                print(colored("Container cleaned up", "green"))
+            else:
+                print(
+                    colored(
+                        "Error removing container: "
+                        f"{redact(result.stderr.strip())}",
+                        "red",
+                    )
+                )
+        else:
+            print(colored(f"Container '{container}' not found", "yellow"))
+
+        if remove_image:
+            print(
+                colored(
+                    f"Removing image '{image}' on {machine_label()}...",
+                    "yellow",
+                )
+            )
+            result = sandbox.remove_image(image)
+            if result.returncode == 0:
+                print(colored(f"Image '{image}' removed", "green"))
+            elif "image not known" in result.stderr.lower():
+                print(colored(f"Image '{image}' not found", "yellow"))
+            else:
+                print(
+                    colored(
+                        "Error removing image: "
+                        f"{redact(result.stderr.strip())}",
+                        "red",
+                    )
+                )
+    except (
+        sandbox.SandboxUnavailableError,
+        sandbox.PodmanError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        print(colored(f"Error during cleanup: {exc}", "red"))
+
+
+def clean_native_repos() -> None:
+    """Remove the cloned repositories from the native work directory.
+
+    Rungs 2 to 10 run first, because rung 10 finds the work directory.
+    ``podman unshare`` can remove files that container users own.
+    """
+    from src import preflight
+
+    report = preflight.run_preflight(first=2, last=10)
+    if not report.passed:
+        print(report.render(paint=colored))
+        return
+    repos = f"{remote_workdir()}/repos"
+    print(
+        colored(
+            f"Removing the cloned repositories on {machine_label()}...",
+            "yellow",
+        )
+    )
+    try:
+        result = sandbox.run_raw(
+            ["podman", "unshare", "rm", "-rf", "--", repos], timeout=600
+        )
+    except (sandbox.SandboxUnavailableError, subprocess.TimeoutExpired) as exc:
+        print(
+            colored(f"   Error cleaning repos/ on the machine: {exc}", "red")
+        )
+        return
+    if result.returncode == 0:
+        print(colored(f"   Cleaned repos/ on {machine_label()}", "green"))
+    else:
+        print(
+            colored(
+                "   Error cleaning repos/ on the machine: "
+                f"{redact(result.stderr.strip())}",
+                "red",
+            )
+        )
+
+
+def remove_native_repo(repo_name: str) -> None:
+    """Remove one repository tree from the native work directory.
+
+    The run is over, so the tree on the machine is no longer needed. The
+    local mirror keeps its copy. A failure is logged, and the command
+    still ends.
+
+    Args:
+        repo_name: The repository name, as in ``/workspace/repos/<name>``.
+    """
+    from src import mirror
+    from src.platforms import get_container_name
+
+    path = f"/workspace/repos/{repo_name}"
+    # Never let a name such as ".." widen the removal.
+    if mirror.repo_of(path) != repo_name:
+        logger.warning(f"Not removing {path}: unsafe repository name")
+        return
+    try:
+        result = sandbox.run_in_container(
+            get_container_name(), ["rm", "-rf", "--", path], timeout=300
+        )
+    except Exception as exc:  # the cleanup must never hide the exit reason
+        logger.warning(f"Could not remove {path} on the machine: {exc}")
+        return
+    if result.returncode == 0:
+        print(colored(f"Removed {path} on {machine_label()}", "cyan"))
+    else:
+        logger.warning(
+            f"Could not remove {path} on the machine: "
+            f"{redact(result.stderr.strip())}"
+        )
+
+
+def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
+    """Set up the native container, run the command, then stop it.
+
+    After a port, the repository tree on the machine is removed. Then
+    the container stops. Both happen after a port, a failure, an
+    escalation or an exception. --setup-only only stops the container.
+
+    Args:
+        args: The parsed command-line arguments.
+        infra_only: True for --setup-only, or --rebuild without --repo.
+
+    Returns:
+        The exit code of the command.
+    """
+    from src.state import derive_repo_name
+
+    ported = False
+    try:
+        if not setup_native_environment():
+            return 1
+        if infra_only:
+            message = "\nSetup complete!"
+            if args.rebuild and not args.setup_only:
+                message = "\nRebuild complete!"
+            print(colored(message, "green"))
+            return 0
+        ported = True
+        return run_agent(
+            repo_url=args.repo,
+            max_attempts=args.max_attempts,
+            verbose=args.verbose,
+            package=args.package,
+        )
+    finally:
+        if ported:
+            remove_native_repo(derive_repo_name(args.repo))
+        stop_native_container()
+
+
 def save_porting_outputs(state: AgentState, output_dir: str) -> None:
     """Save all porting outputs to files."""
     # Ensure output directory exists
@@ -716,7 +1209,9 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
         print(colored(f"Porting recipe saved: {recipe_path}", "green"))
 
     # 2. Save detailed build report
-    report = generate_detailed_report(state.to_dict())
+    report_data = state.to_dict()
+    report_data["execution_duration"] = state.get_execution_duration()
+    report = generate_detailed_report(report_data)
     report_path = os.path.join(
         output_dir, f"{repo_name}_report_{timestamp}.md"
     )
@@ -743,16 +1238,104 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
         )
 
 
+def _verification_section(verification: dict) -> str:
+    """Render the artifact verification verdict for the report."""
+    if not verification:
+        return (
+            "## Artifact Verification\n\n"
+            "*The artifact scan did not run.*\n\n"
+        )
+    counts = verification.get("counts", {})
+    lines = [
+        "## Artifact Verification",
+        "",
+        f"**Verdict**: {verification.get('status', 'unknown')}\u0020\u0020",
+        f"**Reason**: {verification.get('reason') or 'N/A'}\u0020\u0020",
+        "**Source commit**: "
+        f"{verification.get('source_commit') or 'unknown'}",
+        "",
+        "| riscv64 outputs | Other-arch outputs | Committed foreign files |",
+        "|---|---|---|",
+        f"| {counts.get('riscv64', 0)} | {counts.get('foreign', 0)} "
+        f"| {counts.get('prebuilt_foreign', 0)} |",
+        "",
+    ]
+    for title, key in (
+        ("riscv64 build outputs", "riscv64"),
+        ("Build outputs for another architecture", "foreign"),
+        ("Committed non-riscv64 files (not judged)", "prebuilt_foreign"),
+    ):
+        items = verification.get(key) or []
+        if not items:
+            continue
+        lines.append(f"### {title}")
+        lines.append("")
+        for art in items[:20]:
+            abi = f", {art['abi']}" if art.get("abi") else ""
+            lines.append(
+                f"- `{art.get('path')}` ({art.get('arch')}, "
+                f"{art.get('type')}{abi}, {art.get('size', 0)} bytes)"
+            )
+        if len(items) > 20:
+            lines.append(f"- ...and {len(items) - 20} more")
+        lines.append("")
+    for title, key in (
+        ("ABI warnings", "abi_warnings"),
+        ("Expected artifacts not found", "expected_missing"),
+    ):
+        items = verification.get(key) or []
+        if items:
+            lines.append(f"### {title}")
+            lines.append("")
+            lines.extend(f"- {item}" for item in items[:20])
+            lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _package_tests_section(tests: dict) -> str:
+    """Render the non-gating package test result for the report."""
+    lines = ["## Package Tests (not gating)", ""]
+    if not tests:
+        lines.append("*The package tests did not run.*")
+        return "\n".join(lines) + "\n\n"
+    lines.append(f"**Result**: {tests.get('status', 'unknown')}\u0020\u0020")
+    if tests.get("command"):
+        lines.append(
+            f"**Command**: `{tests['command']}` "
+            f"(exit {tests.get('exit_code')}, "
+            f"{tests.get('duration_seconds', 0)}s of "
+            f"{tests.get('timeout_seconds', '?')}s)"
+        )
+    if tests.get("reason"):
+        lines.append(f"**Reason**: {tests['reason']}")
+    tail = (tests.get("output_tail") or "").strip()
+    if tail:
+        lines += ["", "```", tail[-1500:], "```"]
+    return "\n".join(lines) + "\n\n"
+
+
 def generate_detailed_report(state: dict) -> str:
     """Generate a comprehensive detailed report."""
     tokens = (
         f"{state.get('api_tokens_in', 0)}/{state.get('api_tokens_out', 0)}"
     )
+    target_name = "native" if is_native() else "qemu"
+    status = state.get("build_status", "UNKNOWN")
+    verification = state.get("artifact_verification") or {}
+    verdict = verification.get("status")
+    status_text = status
+    if status == "SUCCESS":
+        status_text = (
+            "SUCCESS (riscv64 output verified)"
+            if verdict == "verified"
+            else "SUCCESS, NOT VERIFIED (no riscv64 output proven)"
+        )
     report = f"""# RISC-V Porting Report: {state.get("repo_name", "Unknown")}
 
 ## Executive Summary
 
-**Status**: {state.get("build_status", "UNKNOWN")}\u0020\u0020
+**Status**: {status_text}\u0020\u0020
+**Target**: {target_name}\u0020\u0020
 **Repository**: {state.get("repo_url", "N/A")}\u0020\u0020
 **Generated**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -762,7 +1345,7 @@ def generate_detailed_report(state: dict) -> str:
 
 | Metric | Value |
 |--------|-------|
-| Build Status | {state.get("build_status", "N/A")} |
+| Build Status | {status_text} |
 | Total Duration | {state.get("execution_duration", 0):.1f}s |
 | Attempts Made | {state.get("attempt_count", 0)} |
 | API Calls | {state.get("api_calls_made", 0)} |
@@ -770,6 +1353,12 @@ def generate_detailed_report(state: dict) -> str:
 | LLM Tokens (in/out) | {tokens} |
 | Cost (from token usage) | ${state.get("api_cost_usd", 0):.4f} |
 
+---
+
+{_verification_section(verification)}
+---
+
+{_package_tests_section(state.get("package_tests") or {})}
 ---
 
 ## Build System Analysis
@@ -849,14 +1438,18 @@ def generate_detailed_report(state: dict) -> str:
                     "*Truncated (full patch available in separate file)*\n\n"
                 )
 
-    # Error history
-    error_log = state.get("error_log", [])
-    if error_log:
+    # Error history (serialized ErrorRecords are dicts)
+    error_history = state.get("error_history", [])
+    if error_history:
         report += "---\n\n## Error Resolution History\n\n"
 
-        for i, error in enumerate(error_log, 1):
-            category = getattr(error, "category", "Unknown")
-            message = getattr(error, "message", "N/A")
+        for i, error in enumerate(error_history, 1):
+            if isinstance(error, dict):
+                category = error.get("category", "Unknown")
+                message = error.get("message") or "N/A"
+            else:
+                category = getattr(error, "category", "Unknown")
+                message = getattr(error, "message", "N/A")
 
             report += f"### Error {i}: {category}\n\n"
             report += f"```\n{message[:300]}\n```\n\n"
@@ -864,16 +1457,27 @@ def generate_detailed_report(state: dict) -> str:
     # Recommendations
     report += "---\n\n## Recommendations\n\n"
 
-    status = state.get("build_status")
-    if status == "SUCCESS":
+    if status == "SUCCESS" and verdict == "verified":
         report += """
-- Build completed successfully for RISC-V
+- The build produced riscv64 machine code, proven by its ELF headers
 - Test the binary on actual RISC-V hardware or QEMU
 - Consider submitting patches upstream if modifications were needed
 - Add RISC-V to your CI/CD pipeline
 """
+    elif status == "SUCCESS":
+        reason = verification.get("reason") or "the artifact scan did not run"
+        report += f"""
+- The build commands succeeded, but no riscv64 output was proven
+- Reason: {reason}
+- For a header-only or scripts-only package, check the install tree
+- Otherwise check that the build plan builds the main targets
+"""
     elif status == "ESCALATED":
-        escalation_reason = state.get("escalation_reason", "Unknown")
+        escalation_reason = (
+            state.get("escalation_reason")
+            or state.get("last_error")
+            or "Unknown"
+        )
         report += f"""
 - Manual intervention required
 - Reason: {escalation_reason}
@@ -889,7 +1493,7 @@ def generate_detailed_report(state: dict) -> str:
 """
 
     report += "\n---\n\n"
-    report += "*Report generated by RISC-V Porting Foundry v1.0*\n"
+    report += "*Report generated by Atesor AI*\n"
 
     return report
 
@@ -1062,13 +1666,46 @@ def run_agent(
         final_status = final_state.build_status
 
         if final_status == BuildStatus.SUCCESS:
-            logger.info("PORTING SUCCESSFUL!")
+            verified = final_state.is_verified_success
+            verdict = final_state.artifact_verification or {}
+            if verified:
+                logger.info("PORTING SUCCESSFUL!")
+                print(
+                    colored(
+                        "\nPORTING SUCCESSFUL! (riscv64 output verified)",
+                        "green",
+                        attrs=["bold"],
+                    )
+                )
+            else:
+                # Exit 3: the commands passed but no riscv64 output was
+                # proven. Batch runs count this apart from a pass, and
+                # the result is never cached or learned.
+                reason = verdict.get("reason") or "artifact scan did not run"
+                logger.warning(f"PORTING FINISHED, NOT VERIFIED: {reason}")
+                print(
+                    colored(
+                        "\nPORTING FINISHED, NOT VERIFIED",
+                        "yellow",
+                        attrs=["bold"],
+                    )
+                )
+                print(colored(f"   {reason}", "yellow"))
+            tests = final_state.package_tests or {}
+            if tests:
+                detail = tests.get("framework") or tests.get("reason", "")
+                print(
+                    colored(
+                        f"   Package tests (not gating): "
+                        f"{tests.get('status')} ({detail})",
+                        "white",
+                    )
+                )
             logger.info(
                 f"Recipe generated at: "
                 f"{OUTPUT_DIR}/{final_state.repo_name}_recipe.md"
             )
 
-            print(colored("\nPORTING SUCCESSFUL!", "green", attrs=["bold"]))
             print(
                 colored(
                     f"   Recipe generated at: "
@@ -1099,16 +1736,31 @@ def run_agent(
                     "batch_logs",
                     f"{final_state.repo_name}.log",
                 )
+                # A native zip ends in -<profile>-native.zip, so it never
+                # passes for a QEMU result.
+                platform_name = profile.name
+                if is_native():
+                    platform_name += "-native"
                 try:
+                    if is_native():
+                        # The build tree is on the machine. Copy its
+                        # final state into the mirror before the zip.
+                        from src import mirror
+
+                        mirror.pull(final_state.repo_name, force=True)
                     zip_path = package_build(
                         repo_name=final_state.repo_name,
                         repo_path=repo_path,
                         recipe_path=recipe_path,
-                        platform_name=profile.name,
+                        platform_name=platform_name,
                         packages_dir=PACKAGES_DIR,
                         repo_url=repo_url,
                         agent_log_path=agent_log_path,
                         batch_log_path=batch_log_path,
+                        verification=final_state.artifact_verification,
+                        curated_artifacts=final_state.curated_artifacts,
+                        container_repo_path=final_state.repo_path,
+                        package_tests=final_state.package_tests,
                     )
                 except Exception as exc:
                     logger.error("Packaging failed: %s", exc, exc_info=True)
@@ -1123,7 +1775,7 @@ def run_agent(
                 logger.info(f"Package generated at: {zip_path}")
                 print(colored(f"   Package generated at: {zip_path}", "white"))
 
-            return 0
+            return 0 if verified else 3
         else:
             logger.info("PORTING STOPPED / FAILED")
             logger.info(f"Final Status: {final_status.value}")
@@ -1209,12 +1861,16 @@ def run_agent(
             handler.flush()
 
 
-def cleanup_workspace(dry_run: bool = False) -> None:
+def cleanup_workspace(dry_run: bool = False) -> List[str]:
     """Clean up workspace directory to manage size.
 
     Args:
         dry_run: If True, only show what would be deleted without
             actually deleting.
+
+    Returns:
+        The directory names that the user chose to clean, for example
+        ``["repos"]``. The list is empty when nothing was chosen.
     """
     import shutil
     from pathlib import Path
@@ -1222,7 +1878,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
     workspace_path = Path(WORKSPACE_ROOT)
     if not workspace_path.exists():
         print(colored("Workspace directory does not exist", "yellow"))
-        return
+        return []
 
     # Calculate current size
     total_size = 0
@@ -1270,7 +1926,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
 
     if dry_run:
         print(colored("\n[DRY RUN] No files will be deleted", "yellow"))
-        return
+        return []
 
     try:
         choice = input(
@@ -1280,7 +1936,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
         # Non-interactive stdin (CI, piped input) or Ctrl-C: exit
         # cleanly instead of dumping a traceback.
         print(colored("\nCleanup cancelled (no interactive input)", "yellow"))
-        return
+        return []
 
     dirs_to_clean = []
     if choice == "1":
@@ -1295,10 +1951,10 @@ def cleanup_workspace(dry_run: bool = False) -> None:
         dirs_to_clean = ["repos", "output", "logs", ".cache", "patches"]
     elif choice.lower() == "q":
         print(colored("Cleanup cancelled", "yellow"))
-        return
+        return []
     else:
         print(colored("Invalid option", "red"))
-        return
+        return []
 
     # Perform cleanup
     for dirname in dirs_to_clean:
@@ -1321,6 +1977,7 @@ def cleanup_workspace(dry_run: bool = False) -> None:
     print(colored("\nCleanup Complete!", "green", attrs=["bold"]))
     print(colored(f"   Freed: {freed_mb:.2f} MB", "green"))
     print(colored(f"   New Size: {new_size_mb:.2f} MB", "white"))
+    return dirs_to_clean
 
 
 def cleanup_container(remove_image: bool = False) -> None:
@@ -1448,6 +2105,16 @@ class _CleanHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
 def main() -> int:
     """Run the CLI entry point and return the process exit code."""
+    try:
+        return _main()
+    finally:
+        # On native, each process opens its own ssh connection. Close it
+        # when the command ends, after the container stops.
+        close_connection()
+
+
+def _main() -> int:
+    """Parse the arguments, run the command and return its exit code."""
     parser = argparse.ArgumentParser(
         prog="atesor-ai",
         add_help=False,  # -h is declared in the "other" group below
@@ -1496,6 +2163,13 @@ def main() -> int:
         help="sandbox distro: alpine|debian|ubuntu|auto",
     )
     porting.add_argument(
+        "--target",
+        metavar="NAME",
+        choices=["qemu", "native"],
+        default=None,
+        help="where builds run: qemu|native (default: qemu)",
+    )
+    porting.add_argument(
         "--package",
         action="store_true",
         help="zip recipe + sources on success",
@@ -1514,6 +2188,11 @@ def main() -> int:
         "--setup-only",
         action="store_true",
         help="provision the build sandbox and exit",
+    )
+    sandbox.add_argument(
+        "--preflight",
+        action="store_true",
+        help="check the native machine and exit",
     )
     sandbox.add_argument(
         "--rebuild",
@@ -1563,6 +2242,44 @@ def main() -> int:
     if args.container:
         os.environ["ATESOR_CONTAINER"] = args.container
 
+    # The target is final now that the CLI overrides are in the
+    # environment. Rung 1 of the native preflight runs before any other
+    # action, so a bad configuration never reaches the cache fast path.
+    from src import preflight
+
+    if args.target and args.target != _TARGET_AT_IMPORT:
+        # argparse also accepts a short form such as "--targ". The early
+        # read at import time only knows the full name, so the workspace
+        # paths would belong to the other target.
+        print(
+            colored(
+                "ERROR: write --target in full, for example "
+                "--target native.",
+                "red",
+            )
+        )
+        return 1
+    reset_target_cache()
+    config_report = preflight.run_preflight(first=1, last=1)
+    if not config_report.passed:
+        print(config_report.render(paint=colored))
+        return 1
+    native = is_native()
+
+    if args.preflight:
+        if not native:
+            print(
+                colored(
+                    "--preflight checks the native machine only. Pass "
+                    "--target native, or set ATESOR_TARGET=native.",
+                    "yellow",
+                )
+            )
+            return 1
+        report = preflight.run_preflight()
+        print(report.render(verbose=True, paint=colored))
+        return 0 if report.passed else 1
+
     # Extract repo name early for per-repo logging. Must match the
     # derivation in create_initial_state exactly — the recipe cache is
     # keyed by the state's repo_name, so any divergence here makes
@@ -1609,19 +2326,34 @@ def main() -> int:
             )
         )
 
-    if args.cleanup:
+    # Native cleanup needs only rungs 2 to 8, so it still works on a
+    # full disk. It uses podman on the machine and never the local Docker.
+    if native and (args.cleanup or args.clean_image):
+        report = preflight.run_preflight(
+            first=2, last=preflight.CLEANUP_LAST_RUNG
+        )
+        if not report.passed:
+            print(report.render(paint=colored))
+            return 1
+        cleanup_native_container(remove_image=args.clean_image)
+        if not args.rebuild:
+            return 0
+
+    if args.cleanup and not native:
         cleanup_container(remove_image=args.clean_image)
         if not args.rebuild:
             return 0
 
-    if args.clean_image and not args.cleanup:
+    if args.clean_image and not args.cleanup and not native:
         cleanup_container(remove_image=True)
         if not args.rebuild:
             return 0
 
     # Handle workspace cleanup
     if args.clean_workspace:
-        cleanup_workspace()
+        cleaned = cleanup_workspace()
+        if native and "repos" in cleaned:
+            clean_native_repos()
         return 0
 
     infra_only = args.setup_only or (args.rebuild and not args.repo)
@@ -1630,6 +2362,7 @@ def main() -> int:
         and args.rebuild
         and args.platform == "auto"
         and not args.container
+        and not native
     )
 
     # Require repo URL before starting long-running setup or API checks
@@ -1651,15 +2384,38 @@ def main() -> int:
     if args.repo and not args.setup_only and not args.force:
         from src.memory import get_cached_recipe, materialize_cached_recipe
 
-        cached = get_cached_recipe(repo_name)
+        # The URL check stops a cache entry of another repository with
+        # the same name from answering for this one.
+        cached = get_cached_recipe(repo_name, repo_url=args.repo)
         if cached:
-            print(
-                colored(
-                    f"\n✓ Found cached recipe for '{repo_name}'",
-                    "green",
-                    attrs=["bold"],
+            # Only an entry with a verified verdict proves riscv64 output.
+            # Entries written before verification existed have none.
+            verdict = cached.get("verification") or {}
+            verified = verdict.get("status") == "verified"
+            if verified:
+                print(
+                    colored(
+                        f"\nCACHED (not rebuilt): recipe for '{repo_name}' "
+                        "from an earlier verified run",
+                        "green",
+                        attrs=["bold"],
+                    )
                 )
-            )
+            else:
+                why = (
+                    f"its build was not verified ({verdict['status']})"
+                    if verdict.get("status")
+                    else "it was recorded before riscv64 output "
+                    "verification existed"
+                )
+                print(
+                    colored(
+                        f"\nCACHED (not rebuilt), NOT VERIFIED: recipe for "
+                        f"'{repo_name}'; {why}",
+                        "yellow",
+                        attrs=["bold"],
+                    )
+                )
             print(
                 colored(
                     f"  Build system: {cached.get('build_system', '?')}",
@@ -1671,6 +2427,13 @@ def main() -> int:
                     f"  Last built: {cached.get('last_built', '?')}", "white"
                 )
             )
+            if verdict.get("source_commit"):
+                print(
+                    colored(
+                        f"  Source commit: {verdict['source_commit']}",
+                        "white",
+                    )
+                )
             # Materialize the recipe into the output dir so the user has a
             # real file to open, regenerated from the cache on every hit.
             recipe_path = materialize_cached_recipe(
@@ -1698,7 +2461,24 @@ def main() -> int:
                         "yellow",
                     )
                 )
-            return 0
+            if not verified:
+                print(
+                    colored(
+                        "  Exit code 3: no riscv64 output is proven for "
+                        "this entry. Re-run with --force to build and "
+                        "verify it.",
+                        "yellow",
+                    )
+                )
+            return 0 if verified else 3
+
+    # Native: rungs 2 to 11 run after the cache fast path and before the
+    # key check.
+    if native:
+        report = preflight.run_preflight(first=2)
+        print(report.render(paint=colored))
+        if not report.passed:
+            return 1
 
     # API keys are only required when we are actually running the agent.
     if args.repo and not args.setup_only:
@@ -1708,6 +2488,11 @@ def main() -> int:
     # Set up Docker environment
     if args.rebuild:
         os.environ["REBUILD_IMAGE"] = "true"
+
+    # Native uses podman on the machine and never the local Docker. The
+    # container stops when the command ends.
+    if native:
+        return _run_native(args, infra_only)
 
     if not setup_docker_environment():
         return 1

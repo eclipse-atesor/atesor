@@ -48,6 +48,14 @@ import re
 import sys
 from typing import Iterable
 
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src.packager import legacy_package_stem, package_stem  # noqa: E402
+
 _PACKAGES_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "packages")
 )
@@ -65,41 +73,32 @@ def _resolve_list_path(value: str) -> str:
     return os.path.join(_PACKAGES_DIR, f"{value}.json")
 
 
-def _zip_stem_from_url(url: str) -> str:
-    """Derive the zip filename stem the packager will actually use.
+def _load_packages(list_path: str) -> list[tuple[str, str, str, bool]]:
+    """Return ordered ``(name, new_stem, legacy_stem, legacy_unique)``.
 
-    MUST mirror ``src.state.create_initial_state``/``sanitize_repo_name``:
-    the zip is named after the sanitized URL basename, NOT the list
-    ``name`` field. 91 of 705 ``full.json`` entries have
-    ``name != url basename`` (e.g. ``nginx`` vs ``nginx-binaries``);
-    matching on ``name`` marked those as never-released and rebuilt
-    them on every run, forever.
-    """
-    base = (url or "").rstrip("/").split("/")[-1]
-    if base.endswith(".git"):
-        base = base[: -len(".git")]
-    stem = re.sub(r"[^A-Za-z0-9._-]", "-", base).lstrip(".")
-    return stem or "repo"
-
-
-def _load_packages(list_path: str) -> list[tuple[str, str]]:
-    """Return ordered ``(name, zip_stem)`` pairs from a list JSON file.
-
-    ``zip_stem`` is derived from the entry's ``url`` (what the packager
-    names the zip after); it falls back to ``name`` when no URL is
-    declared.
+    ``new_stem`` uses the owner-prefixed package stem. ``legacy_stem``
+    is accepted only when it is unique in the whole list, because a
+    legacy ``cli-*.zip`` asset cannot identify which ``cli`` repo it
+    belongs to.
     """
     with open(list_path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
     pkgs = data.get("packages", [])
-    out: list[tuple[str, str]] = []
+    raw: list[tuple[str, str, str]] = []
     for p in pkgs:
         name = p.get("name")
         if not name:
             continue
         url = p.get("url") or p.get("repo") or ""
-        stem = _zip_stem_from_url(url) if url else name
-        out.append((name, stem))
+        new_stem = package_stem(url) if url else name
+        legacy_stem = legacy_package_stem(url) if url else name
+        raw.append((name, new_stem, legacy_stem))
+    counts: dict[str, int] = {}
+    for _name, _new_stem, legacy_stem in raw:
+        counts[legacy_stem] = counts.get(legacy_stem, 0) + 1
+    out: list[tuple[str, str, str, bool]] = []
+    for name, new_stem, legacy_stem in raw:
+        out.append((name, new_stem, legacy_stem, counts[legacy_stem] == 1))
     return out
 
 
@@ -144,6 +143,8 @@ def compute_plan(
     released: set[str],
     group_size: int,
     stem_of: dict[str, str] | None = None,
+    legacy_stem_of: dict[str, str] | None = None,
+    legacy_unique: dict[str, bool] | None = None,
 ) -> tuple[list[str], int, list[int]]:
     """Return ``(remaining, total_shards, group_indices)``.
 
@@ -155,7 +156,18 @@ def compute_plan(
     if group_size < 1:
         raise ValueError(f"group-size must be >= 1 (got {group_size})")
     stems = stem_of or {}
-    remaining = [n for n in declared if stems.get(n, n) not in released]
+    legacy_stems = legacy_stem_of or {}
+    legacy_ok = legacy_unique or {}
+    remaining = []
+    for name in declared:
+        new_stem = stems.get(name, name)
+        old_stem = legacy_stems.get(name)
+        released_by_new = new_stem in released
+        released_by_legacy = bool(
+            old_stem and legacy_ok.get(name, False) and old_stem in released
+        )
+        if not released_by_new and not released_by_legacy:
+            remaining.append(name)
     if not remaining:
         return remaining, 0, []
     total = math.ceil(len(remaining) / group_size)
@@ -166,22 +178,33 @@ def _write_remaining(
     path: str,
     remaining: list[str],
     stem_of: dict[str, str] | None = None,
+    legacy_stem_of: dict[str, str] | None = None,
+    legacy_unique: dict[str, bool] | None = None,
 ) -> None:
     """Persist the remaining list as ``{"packages": [...]}`` JSON.
 
-    The additive ``stems`` map (name → zip filename stem) lets the
-    retry workflow's ``missing_pkgs.py`` match zips correctly for
-    entries whose name differs from the URL basename. Readers that only
-    consume ``packages`` are unaffected.
+    The additive ``stems`` map lets the retry workflow's
+    ``missing_pkgs.py`` match both owner-prefixed zips and unambiguous
+    legacy zips. Readers that only consume ``packages`` are unaffected.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     payload: dict = {"packages": remaining}
     if stem_of:
-        payload["stems"] = {
-            n: stem_of[n]
-            for n in remaining
-            if n in stem_of and stem_of[n] != n
-        }
+        stem_payload: dict[str, dict[str, object] | str] = {}
+        for name in remaining:
+            if name not in stem_of:
+                continue
+            legacy_stem = (
+                legacy_stem_of.get(name) if legacy_stem_of else None
+            )
+            unique = bool(legacy_unique and legacy_unique.get(name, False))
+            stem_payload[name] = {
+                "package_stem": stem_of[name],
+                "legacy_package_stem": legacy_stem,
+                "legacy_unique": unique,
+            }
+        if stem_payload:
+            payload["stems"] = stem_payload
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
         fh.write("\n")
@@ -235,8 +258,14 @@ def main(argv: list[str] | None = None) -> int:
     prefix = args.output_key_prefix or args.platform
 
     declared_pairs = _load_packages(_resolve_list_path(args.list))
-    declared = [name for name, _stem in declared_pairs]
-    stem_of = {name: stem for name, stem in declared_pairs}
+    declared = [name for name, _stem, _legacy, _unique in declared_pairs]
+    stem_of = {name: stem for name, stem, _legacy, _unique in declared_pairs}
+    legacy_stem_of = {
+        name: legacy for name, _stem, legacy, _unique in declared_pairs
+    }
+    legacy_unique = {
+        name: unique for name, _stem, _legacy, unique in declared_pairs
+    }
     released_all = _load_released_assets(args.released_assets)
     released = _released_names(released_all, args.platform)
 
@@ -245,9 +274,17 @@ def main(argv: list[str] | None = None) -> int:
         released,
         args.group_size,
         stem_of=stem_of,
+        legacy_stem_of=legacy_stem_of,
+        legacy_unique=legacy_unique,
     )
 
-    _write_remaining(args.remaining_out, remaining, stem_of=stem_of)
+    _write_remaining(
+        args.remaining_out,
+        remaining,
+        stem_of=stem_of,
+        legacy_stem_of=legacy_stem_of,
+        legacy_unique=legacy_unique,
+    )
 
     print(f"{prefix}_total={total}")
     print(f"{prefix}_groups={json.dumps(groups)}")

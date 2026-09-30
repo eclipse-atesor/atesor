@@ -1,0 +1,16 @@
+# data/recipe_cache.json is JSON that Atesor writes. A line-by-line git
+# merge of it (commit 6b50080) left 35 packages twice, mixed fields of
+# neighboring packages and lost 87 packages, so git must not merge it as
+# text. Here git stops with a conflict instead.
+#
+# To merge it by meaning with no conflict, run this once in your clone:
+#   sh .github/scripts/setup_git_merge_driver.sh
+#
+# Without the driver, resolve a conflict by hand (the newest recipe wins):
+#   git show :2:data/recipe_cache.json > /tmp/ours.json
+#   git show :3:data/recipe_cache.json > /tmp/theirs.json
+#   python3 .github/scripts/merge_data_artifacts.py \
+#       --merge-caches /tmp/ours.json /tmp/theirs.json \
+#       --output data/recipe_cache.json
+#   git add data/recipe_cache.json
+data/recipe_cache.json merge=binary

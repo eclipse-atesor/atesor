@@ -1,13 +1,16 @@
 name: Regression Tests
 
 # Full regression suite, split into categories so failures are
-# attributable at a glance. Runs on every push to main/dev; the
-# `report` job aggregates all category JUnit results into a single
-# Markdown table in the run summary and fails if any test file in
+# attributable at a glance. Runs on every push to main/dev and on every
+# pull request into them, so a damaged data/ merge fails before it
+# lands; the `report` job aggregates all category JUnit results into a
+# single Markdown table in the run summary and fails if any test file in
 # tests/ is not claimed by exactly one category.
 
 on:
   push:
+    branches: [main, dev]
+  pull_request:
     branches: [main, dev]
   workflow_dispatch:
 
@@ -51,6 +54,7 @@ jobs:
               tests/test_memory.py
               tests/test_llm_helpers.py
               tests/test_llm_logger.py
+              tests/test_data_files.py
           - category: repo-analysis
             paths: >-
               tests/test_scripted_ops.py
@@ -71,10 +75,17 @@ jobs:
               tests/test_plan_remaining.py
               tests/test_resource_lifecycle.py
               tests/test_shard_planning.py
+          - category: native-target
+            paths: >-
+              tests/test_target.py
+              tests/test_preflight.py
+              tests/test_sandbox.py
+              tests/test_mirror.py
+              tests/test_batch_test.py
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -94,7 +105,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: junit-${{ matrix.category }}
           path: |
@@ -109,14 +120,14 @@ jobs:
     needs: tests
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Download category results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: junit-*
           path: test-results

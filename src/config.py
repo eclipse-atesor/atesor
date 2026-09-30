@@ -18,6 +18,8 @@ throughout the Atesor AI system.
 import os
 from pathlib import Path
 
+from .target import NATIVE, is_native, target_name_from_env
+
 
 def is_running_in_docker() -> bool:
     """Detect if running inside a Docker container."""
@@ -89,11 +91,20 @@ def get_workspace_root() -> str:
     workspace tree too (previously the in-docker shortcut silently
     ignored it, sending state to ``/workspace`` in CI/devcontainers).
     The bare ``/workspace`` default applies only inside the sandbox
-    container when no override is set.
+    container, for the qemu target, when no override is set. The native
+    target always uses ``workspace-native``, even from a container: its
+    repositories live on the machine, and the local mirror of them must
+    not land in the container's own ``/workspace`` tree.
     """
-    if is_running_in_docker() and not os.environ.get("ATESOR_HOME"):
+    native = target_name_from_env() == NATIVE
+    if (
+        is_running_in_docker()
+        and not native
+        and not os.environ.get("ATESOR_HOME")
+    ):
         return "/workspace"
-    workspace = os.path.join(get_state_home(), "workspace")
+    name = "workspace-native" if native else "workspace"
+    workspace = os.path.join(get_state_home(), name)
     os.makedirs(workspace, exist_ok=True)
     return workspace
 
@@ -174,11 +185,61 @@ def to_host_path(path: str) -> str:
 
     Returns:
         The equivalent host path, or ``path`` unchanged when it is not
-        a container path (or when we ARE running inside the container).
+        a container path (or when we ARE running inside the container
+        with a QEMU target).
+
+    Raises:
+        SandboxUnavailableError: On native, if the mirror copy fails.
     """
-    if path.startswith("/workspace") and not os.path.exists("/workspace"):
-        return path.replace("/workspace", WORKSPACE_ROOT, 1)
+    # Match the path component, not the prefix: "/workspaces/x"
+    # (Codespaces) or "/workspace-backup/x" are not container paths.
+    if path != "/workspace" and not path.startswith("/workspace/"):
+        return path
+    # A host path under a workspace root that itself lives in
+    # /workspace (native from a container) is already translated.
+    if WORKSPACE_ROOT != "/workspace" and (
+        path == WORKSPACE_ROOT or path.startswith(WORKSPACE_ROOT + "/")
+    ):
+        return path
+    # Native always needs a mirror refresh and a translation to the
+    # native workspace, even from a development container where
+    # ``/workspace`` also exists locally: without this, host-side reads
+    # would fall through to the local container tree instead of the
+    # remote repository, and QEMU/native state would no longer be
+    # separated. When WORKSPACE_ROOT is already ``/workspace`` (native
+    # from inside the sandbox), the string translation is a no-op but
+    # the mirror still refreshes.
+    if is_native():
+        refresh_mirror(path)
+        if WORKSPACE_ROOT != "/workspace":
+            return WORKSPACE_ROOT + path[len("/workspace"):]
+        return path
+    if not os.path.exists("/workspace"):
+        return WORKSPACE_ROOT + path[len("/workspace"):]
     return path
+
+
+def refresh_mirror(path: str) -> None:
+    """Refresh the local copy of the repository that a path is in.
+
+    Only the native target has this copy (the mirror), because only
+    there the repositories live on another machine. On qemu, and for a
+    path outside ``/workspace/repos/<repo>``, the call does nothing.
+
+    Args:
+        path: A container path, for example ``/workspace/repos/zlib/x.c``.
+
+    Raises:
+        SandboxUnavailableError: If the mirror copy fails.
+    """
+    if not is_native():
+        return
+    # src.mirror imports this module, so this import waits for a call.
+    from . import mirror
+
+    repo = mirror.repo_of(path)
+    if repo:
+        mirror.pull(repo)
 
 
 __all__ = [
@@ -200,6 +261,7 @@ __all__ = [
     "LOGS_DIR",
     "PACKAGES_DIR",
     "to_host_path",
+    "refresh_mirror",
     "CONTAINER_NAME",
     "IMAGE_NAME",
     "_IN_DOCKER",

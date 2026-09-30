@@ -10,6 +10,7 @@ Usage:
   python batch_test.py --list full                # run full catalog
   python batch_test.py --list full anew gron      # filter by name
   python batch_test.py --list path/to/custom.json # absolute / relative path
+  python batch_test.py --target native --platform debian  # your machine
 """
 
 import argparse
@@ -24,14 +25,32 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
+
+from dotenv import load_dotenv
+
+# The script runs from .github/scripts, so the repository root must be on
+# sys.path before "src" can be imported.
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from src import sandbox, target  # noqa: E402
+from src.platforms import PROFILES  # noqa: E402
+from src.state import derive_repo_name  # noqa: E402
 
 # Default worker count auto-detected from the host CPU. Override with
 # --workers <N> (1 .. _MAX_AVAILABLE_WORKERS). os.cpu_count() can return
 # None on exotic platforms, so fall back to a conservative 2.
 _MAX_AVAILABLE_WORKERS = os.cpu_count() or 2
 MAX_WORKERS = _MAX_AVAILABLE_WORKERS
+# On native, all workers share the machine, so its cores and memory set
+# the default: each worker gets one core and 4 GiB of memory.
+_NATIVE_GIB_PER_WORKER = 4
 # RLock so a thread that already holds the lock (e.g. a future _emit caller
 # inside a critical section) cannot self-deadlock.
 _print_lock = threading.RLock()
@@ -97,8 +116,10 @@ def _short_container(name: str) -> str:
 _progress_counter = 0
 _progress_total = 0
 _progress_pass = 0
+_progress_unverified = 0
 _progress_fail = 0
 _progress_timeout = 0
+_progress_skipped = 0
 _progress_active = 0
 _progress_start = 0.0
 _bar_installed = False
@@ -172,14 +193,17 @@ def _redraw_bar() -> None:
 
     prefix_plain = (
         f" {done}/{total}  "
-        f"PASS {_progress_pass}  FAIL {_progress_fail}  "
-        f"TIMEOUT {_progress_timeout}  RUN {_progress_active} "
+        f"PASS {_progress_pass}  UNVER {_progress_unverified}  "
+        f"FAIL {_progress_fail}  TIMEOUT {_progress_timeout}  "
+        f"SKIP {_progress_skipped}  RUN {_progress_active} "
     )
     prefix = (
         f" {_bold(f'{done}/{total}')}  "
         f"{_green('PASS')} {_progress_pass}  "
+        f"{_yellow('UNVER')} {_progress_unverified}  "
         f"{_red('FAIL')} {_progress_fail}  "
         f"{_yellow('TIMEOUT')} {_progress_timeout}  "
+        f"{_dim('SKIP')} {_progress_skipped}  "
         f"{_cyan('RUN')} {_progress_active} "
     )
     suffix_plain = f" {pct * 100:5.1f}%{eta_txt} "
@@ -233,18 +257,48 @@ _PLATFORM_CONTAINERS = {
     "ubuntu": "atesor-ai-sandbox-debian",
 }
 if PLATFORM not in _PLATFORM_CONTAINERS:
-    # SystemExit instead of ValueError: an env-var typo should print a
-    # one-line error, not a traceback.
-    raise SystemExit(
-        f"[ERROR] Unknown ATESOR_PLATFORM={PLATFORM!r}; "
-        f"expected one of {sorted(_PLATFORM_CONTAINERS)}"
-    )
+    # Defer validation until main(): an explicit --platform must win over
+    # a bad inherited env var, and argparse cannot parse that flag if
+    # importing this module already raises.
+    PLATFORM = "debian"
 _BASE_CONTAINER = _PLATFORM_CONTAINERS[PLATFORM]
 
 # Container pool is sized in main() after --workers is parsed, so the
 # default-vs-CLI value is honoured. _populate_container_pool() is
 # idempotent and safe to call once at startup.
 _container_pool: "queue.Queue[str]" = queue.Queue()
+_repo_locks: dict[str, threading.Lock] = {}
+_repo_locks_lock = threading.Lock()
+
+
+STATUS_PASS = "PASS"
+STATUS_UNVERIFIED = "UNVERIFIED"
+STATUS_FAIL = "FAIL"
+STATUS_TIMEOUT = "TIMEOUT"
+STATUS_SKIPPED = "SKIPPED"
+STATUS_CANCELLED = "CANCELLED"
+
+
+@dataclass
+class PackageRunResult:
+    """Outcome of one package run."""
+
+    name: str
+    status: str
+    output: str
+    duration: float
+    returncode: int | None = None
+
+    @property
+    def success(self) -> bool:
+        """Return True only for verified success."""
+        return self.status == STATUS_PASS
+
+    def __iter__(self) -> Iterator[bool | str | float]:
+        """Preserve tuple-unpack compatibility for older unit tests."""
+        yield self.success
+        yield self.output
+        yield self.duration
 
 
 def _populate_container_pool(n: int) -> None:
@@ -256,6 +310,89 @@ def _populate_container_pool(n: int) -> None:
             break
     for i in range(n):
         _container_pool.put(f"{_BASE_CONTAINER}-w{i + 1}")
+
+
+def _repo_lock(repo_url: str) -> threading.Lock:
+    """Return the per-clone-directory lock for ``repo_url``."""
+    key = derive_repo_name(repo_url)
+    with _repo_locks_lock:
+        lock = _repo_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _repo_locks[key] = lock
+        return lock
+
+
+def _status_from_returncode(
+    returncode: int | None,
+    shutdown_requested: bool,
+) -> str:
+    """Map main.py's exit-code contract to a batch status."""
+    if returncode == 0:
+        return STATUS_PASS
+    if returncode == 3:
+        return STATUS_UNVERIFIED
+    if returncode == 130 or shutdown_requested:
+        return STATUS_CANCELLED
+    return STATUS_FAIL
+
+
+def _coerce_result(name: str, raw: object) -> PackageRunResult:
+    """Return a PackageRunResult from new or legacy worker returns."""
+    if isinstance(raw, PackageRunResult):
+        return raw
+    if isinstance(raw, tuple) and len(raw) == 3:
+        success, output, duration = raw
+        return PackageRunResult(
+            name,
+            STATUS_PASS if bool(success) else STATUS_FAIL,
+            str(output),
+            float(duration),
+        )
+    raise TypeError(f"Unexpected package result: {raw!r}")
+
+
+def _native_default_workers(cores: int, mem_gib: int) -> int:
+    """Return the default worker count for the native machine.
+
+    Args:
+        cores: The core count of the machine.
+        mem_gib: The memory of the machine, in whole GiB.
+
+    Returns:
+        ``max(1, min(cores, mem_gib // 4))``.
+    """
+    return max(1, min(cores, mem_gib // _NATIVE_GIB_PER_WORKER))
+
+
+def _read_machine_resources() -> tuple[str, int, int]:
+    """Read the host name, the cores and the memory of the machine.
+
+    One ssh call reads all three values, before any worker starts.
+
+    Returns:
+        The host name, the core count and the memory in whole GiB.
+
+    Raises:
+        RuntimeError: If the call fails or prints something else. A
+            transport error gives ``SandboxUnavailableError``, which is
+            a ``RuntimeError``.
+        subprocess.TimeoutExpired: If the call takes longer than 30 s.
+    """
+    result = sandbox.run_raw(
+        ["sh", "-c", "uname -n && nproc && grep '^MemTotal:' /proc/meminfo"],
+        timeout=30,
+    )
+    match = re.fullmatch(
+        r"(\S+)\n(\d+)\nMemTotal:\s+(\d+) kB\n?", result.stdout or ""
+    )
+    if result.returncode != 0 or not match:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"exit {result.returncode}: {target.redact(detail)}"
+        )
+    name, cores, mem_kib = match.groups()
+    return name, int(cores), int(mem_kib) // (1024 * 1024)
 
 
 # ----------------------------------------------------------------------------
@@ -397,6 +534,16 @@ def _version_lt(current: str, minimum: str) -> bool:
     return current_parsed < minimum_parsed
 
 
+def _target_args() -> list[str]:
+    """Return the ``--target`` flag for each ``main.py`` call.
+
+    On native, each call gets ``--target native``, so a child cannot
+    take another target from its own ``.env``. QEMU calls keep today's
+    argv. The environment gives them ATESOR_TARGET.
+    """
+    return ["--target", target.NATIVE] if target.is_native() else []
+
+
 def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
     """Run ``main.py --setup-only`` for a specific worker container."""
     cmd = [
@@ -408,6 +555,7 @@ def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
         "--container",
         container_name,
     ]
+    cmd.extend(_target_args())
     if rebuild:
         cmd.append("--rebuild")
     if _STREAM_SETUP:
@@ -431,19 +579,31 @@ def _run_setup(container_name: str, rebuild: bool = False) -> tuple[bool, str]:
 
 
 def _probe_toolchains(container_name: str) -> dict[str, str]:
-    """Read toolchain versions from an existing container."""
+    """Read toolchain versions from an existing container.
+
+    On native, a worker container stops when its main.py run ends, so
+    the probe runs in a throwaway container from the same image.
+    """
     out: dict[str, str] = {}
     commands = {
         "go": "go version",
         "cargo": "cargo --version",
     }
     for tool, probe in commands.items():
-        result = subprocess.run(
-            ["docker", "exec", container_name, "sh", "-lc", probe],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if target.is_native():
+            result = sandbox.run_in_throwaway(
+                PROFILES[PLATFORM].image_name, ["sh", "-lc", probe]
+            )
+        else:
+            call = sandbox.build_exec_argv(
+                container_name, ["sh", "-lc", probe]
+            )
+            result = subprocess.run(
+                call.argv,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
         text = ((result.stdout or "") + " " + (result.stderr or "")).strip()
         if tool == "go":
             match = re.search(r"\bgo(\d+\.\d+(?:\.\d+)?)\b", text)
@@ -510,12 +670,7 @@ def _refresh_worker_pool_if_needed() -> bool:
     worker_names = [f"{_BASE_CONTAINER}-w{i + 1}" for i in range(MAX_WORKERS)]
     for container_name in worker_names:
         print(f"[PREFLIGHT] Refreshing worker container: {container_name}")
-        subprocess.run(
-            ["docker", "rm", "-f", container_name],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        sandbox.remove_container(container_name)
         ok, output = _run_setup(container_name, rebuild=False)
         if not ok:
             print(
@@ -638,7 +793,7 @@ def _install_signal_handlers(future_map: dict) -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
-def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
+def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
     """Run the agent on a single repository, streaming to a log file.
 
     Thread-safe: leases one container name from the per-worker pool, runs
@@ -652,22 +807,37 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
     # If a soft shutdown was requested while this future was queued, bail
     # out cheaply before claiming a container slot.
     if _shutdown_event.is_set():
-        return False, "Skipped: shutdown requested", 0.0
+        return PackageRunResult(
+            repo_name,
+            STATUS_SKIPPED,
+            "Skipped: shutdown requested",
+            0.0,
+        )
 
-    container_name = _container_pool.get()  # blocks until a slot is free
+    name_lock = _repo_lock(repo_url)
+    name_lock.acquire()
+    container_name: str | None = None
 
     global _progress_active
-    with _print_lock:
-        _progress_active += 1
-    _emit(
-        f"  {_dim('START  ')} "
-        f"{_cyan(repo_name):<40} "
-        f"{_dim('on')} {_blue(_short_container(container_name)):<6} "
-        f"{_dim('→ ' + log_path)}"
-    )
-
     proc: subprocess.Popen | None = None
     try:
+        if _shutdown_event.is_set():
+            return PackageRunResult(
+                repo_name,
+                STATUS_SKIPPED,
+                "Skipped: shutdown requested",
+                0.0,
+            )
+        container_name = _container_pool.get()  # blocks until a slot is free
+        with _print_lock:
+            _progress_active += 1
+        _emit(
+            f"  {_dim('START  ')} "
+            f"{_cyan(repo_name):<40} "
+            f"{_dim('on')} {_blue(_short_container(container_name)):<6} "
+            f"{_dim('→ ' + log_path)}"
+        )
+
         os.makedirs(BATCH_LOGS_DIR, exist_ok=True)
         with open(log_path, "w") as log_fh:
             log_fh.write(
@@ -689,6 +859,7 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
             ]
             if PLATFORM in {"alpine", "debian", "ubuntu"}:
                 cmd.extend(["--platform", PLATFORM])
+            cmd.extend(_target_args())
             if _PACKAGE_BUILDS:
                 cmd.append("--package")
 
@@ -698,6 +869,15 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
                 stderr=log_fh,
                 text=True,
                 preexec_fn=os.setsid,  # New group → kill children.
+                # main.py cuts its non-gating package tests to fit
+                # before this deadline (the kill below), so a slow test
+                # suite cannot turn a good port into a TIMEOUT.
+                env={
+                    **os.environ,
+                    "ATESOR_RUN_DEADLINE": str(
+                        int(time.time()) + _AGENT_TIMEOUT_SECONDS
+                    ),
+                },
             )
             _register_pid(proc.pid)
 
@@ -713,16 +893,27 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
                 proc.wait()
                 log_fh.write(f"\n\n=== TIMED OUT after {mins} minutes ===\n")
                 duration = time.time() - start_time
-                return (
-                    False,
+                return PackageRunResult(
+                    repo_name,
+                    STATUS_TIMEOUT,
                     f"Timeout ({mins} min) — see {log_path}",
                     duration,
+                    proc.returncode,
                 )
 
         duration = time.time() - start_time
-        success = proc.returncode == 0
+        status = _status_from_returncode(
+            proc.returncode,
+            _shutdown_event.is_set(),
+        )
         tail = _tail(log_path)
-        return success, tail, duration
+        return PackageRunResult(
+            repo_name,
+            status,
+            tail,
+            duration,
+            proc.returncode,
+        )
 
     except Exception as exc:
         duration = time.time() - start_time
@@ -744,11 +935,13 @@ def run_agent(repo_url: str, repo_name: str) -> tuple[bool, str, float]:
         _emit(
             f"  {_red('ERROR  ')} {_cyan(repo_name):<40} " f"{_dim(str(exc))}"
         )
-        return False, msg, duration
+        return PackageRunResult(repo_name, STATUS_FAIL, msg, duration)
     finally:
         if proc is not None:
             _unregister_pid(proc.pid)
-        _container_pool.put(container_name)
+        if container_name is not None:
+            _container_pool.put(container_name)
+        name_lock.release()
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -772,12 +965,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=_MAX_AVAILABLE_WORKERS,
+        default=None,
         metavar="N",
         help=(
             f"Number of parallel worker containers. Must be in "
             f"1..{_MAX_AVAILABLE_WORKERS} (host CPU count). "
-            f"Default: {_MAX_AVAILABLE_WORKERS}."
+            f"Default: {_MAX_AVAILABLE_WORKERS}. On native, the limit is "
+            f"the core count of the machine, and the default is "
+            f"max(1, min(cores, GiB of memory // "
+            f"{_NATIVE_GIB_PER_WORKER}))."
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        choices=target.TARGETS,
+        default=None,
+        help=(
+            "Execution target of every main.py run. Overrides "
+            "ATESOR_TARGET, as in main.py. native runs the builds on the "
+            "riscv64 machine that .env names, for local runs. "
+            "Default: ATESOR_TARGET, else qemu."
         ),
     )
     parser.add_argument(
@@ -861,28 +1068,83 @@ def main() -> int:
     args = _parse_args(sys.argv[1:])
 
     global PLATFORM, _BASE_CONTAINER
-    if args.platform and args.platform != PLATFORM:
-        PLATFORM = args.platform
-        _BASE_CONTAINER = _PLATFORM_CONTAINERS[PLATFORM]
+    if args.platform:
+        if args.platform != PLATFORM:
+            PLATFORM = args.platform
+            _BASE_CONTAINER = _PLATFORM_CONTAINERS[PLATFORM]
         # Downstream helpers read ATESOR_PLATFORM (e.g. main.py); keep
         # env and module state in sync so child processes agree with us.
         os.environ["ATESOR_PLATFORM"] = PLATFORM
 
+    # The --target flag wins over .env, as in main.py.
+    if args.target:
+        os.environ["ATESOR_TARGET"] = args.target
+    # .env gives the target and the SSH settings to src.target.
+    load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+    target.reset_target_cache()
+
+    # .env may also carry ATESOR_PLATFORM (documented setup path). When
+    # no --platform override is present, honour that value here so the
+    # batch and the per-worker child commands agree with the user's
+    # configuration instead of silently falling back to the default.
+    if not args.platform:
+        env_platform = (
+            os.environ.get("ATESOR_PLATFORM", "").strip().lower()
+        )
+        if env_platform and env_platform != PLATFORM:
+            if env_platform not in _PLATFORM_CONTAINERS:
+                print(
+                    f"[ERROR] Unknown ATESOR_PLATFORM={env_platform!r}"
+                    f" from .env; expected one of "
+                    f"{sorted(_PLATFORM_CONTAINERS)}",
+                    file=sys.stderr,
+                )
+                return 2
+            PLATFORM = env_platform
+            _BASE_CONTAINER = _PLATFORM_CONTAINERS[PLATFORM]
+            os.environ["ATESOR_PLATFORM"] = PLATFORM
+
     global MAX_WORKERS
-    if args.workers < 1:
+    machine = ""
+    if target.is_native():
+        try:
+            name, cores, mem_gib = _read_machine_resources()
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(
+                f"[ERROR] Cannot read the cores and memory of "
+                f"{target.machine_label()}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "[ERROR] Check the machine with: "
+                "python3 main.py --target native --preflight",
+                file=sys.stderr,
+            )
+            return 1
+        target.set_machine_name(name)
+        machine = f"{target.machine_label()}, {cores} cores, {mem_gib} GiB"
+        limit = cores
+        limit_text = f"the {cores} cores of {target.machine_label()}"
+        workers = _native_default_workers(cores, mem_gib)
+    else:
+        limit = _MAX_AVAILABLE_WORKERS
+        limit_text = f"available CPU count ({_MAX_AVAILABLE_WORKERS})"
+        workers = _MAX_AVAILABLE_WORKERS
+    if args.workers is not None:
+        workers = args.workers
+    if workers < 1:
         print(
-            f"[ERROR] --workers must be >= 1 (got {args.workers}).",
+            f"[ERROR] --workers must be >= 1 (got {workers}).",
             file=sys.stderr,
         )
         return 2
-    if args.workers > _MAX_AVAILABLE_WORKERS:
+    if workers > limit:
         print(
-            f"[ERROR] --workers={args.workers} exceeds available CPU "
-            f"count ({_MAX_AVAILABLE_WORKERS}).",
+            f"[ERROR] --workers={workers} exceeds {limit_text}.",
             file=sys.stderr,
         )
         return 2
-    MAX_WORKERS = args.workers
+    MAX_WORKERS = workers
     _populate_container_pool(MAX_WORKERS)
 
     global _PACKAGE_BUILDS
@@ -973,9 +1235,16 @@ def main() -> int:
         return 1
 
     global _progress_total, _progress_counter, _progress_start
-    global _progress_pass, _progress_fail, _progress_timeout, _progress_active
+    global _progress_pass, _progress_unverified, _progress_fail
+    global _progress_timeout, _progress_skipped, _progress_active
     _progress_total = len(packages_to_run)
     _progress_counter = 0
+    _progress_pass = 0
+    _progress_unverified = 0
+    _progress_fail = 0
+    _progress_timeout = 0
+    _progress_skipped = 0
+    _progress_active = 0
     _progress_start = time.time()
 
     started_at = time.time()
@@ -1003,6 +1272,9 @@ def main() -> int:
         ),
         ("Logs", logs_disp),
     ]
+    if machine:
+        # After the Platform row.
+        rows[5:5] = [("Target", "native"), ("Machine", machine)]
     if _LIST_DESCRIPTION:
         rows.insert(2, ("Desc", _LIST_DESCRIPTION))
     title = "ATESOR AI - RISC-V PORTING AGENT "
@@ -1033,7 +1305,7 @@ def main() -> int:
     _install_sticky_bar()
     _redraw_bar()
 
-    results: list[tuple[str, bool, float, str]] = []
+    results: list[PackageRunResult] = []
 
     try:
         with concurrent.futures.ThreadPoolExecutor(
@@ -1047,42 +1319,59 @@ def main() -> int:
             for future in concurrent.futures.as_completed(future_to_pkg):
                 name, _url = future_to_pkg[future]
                 if future.cancelled():
-                    continue
-                try:
-                    success, output, duration = future.result()
-                except concurrent.futures.CancelledError:
-                    continue
-                except Exception as exc:
-                    success, output, duration = (
-                        False,
-                        f"Unhandled exception: {exc}",
+                    result = PackageRunResult(
+                        name,
+                        STATUS_CANCELLED,
+                        "Cancelled: shutdown requested",
                         0.0,
                     )
-                if output == "Skipped: shutdown requested":
-                    continue
+                else:
+                    try:
+                        result = _coerce_result(name, future.result())
+                    except concurrent.futures.CancelledError:
+                        result = PackageRunResult(
+                            name,
+                            STATUS_CANCELLED,
+                            "Cancelled: shutdown requested",
+                            0.0,
+                        )
+                    except Exception as exc:
+                        result = PackageRunResult(
+                            name,
+                            STATUS_FAIL,
+                            f"Unhandled exception: {exc}",
+                            0.0,
+                        )
 
-                results.append((name, success, duration, output))
+                results.append(result)
                 log_path = os.path.join(BATCH_LOGS_DIR, f"{name}.log")
-                is_timeout = not success and output.startswith("Timeout")
                 with _print_lock:
                     _progress_counter += 1
                     _progress_active = max(_progress_active - 1, 0)
-                    if success:
+                    if result.status == STATUS_PASS:
                         _progress_pass += 1
-                    elif is_timeout:
+                    elif result.status == STATUS_UNVERIFIED:
+                        _progress_unverified += 1
+                    elif result.status == STATUS_TIMEOUT:
                         _progress_timeout += 1
+                    elif result.status in {STATUS_SKIPPED, STATUS_CANCELLED}:
+                        _progress_skipped += 1
                     else:
                         _progress_fail += 1
-                if success:
+                if result.status == STATUS_PASS:
                     badge = _green("✔ PASS   ")
-                elif is_timeout:
+                elif result.status == STATUS_UNVERIFIED:
+                    badge = _yellow("? UNVER  ")
+                elif result.status == STATUS_TIMEOUT:
                     badge = _yellow("⏱ TIMEOUT")
+                elif result.status in {STATUS_SKIPPED, STATUS_CANCELLED}:
+                    badge = _dim("↷ SKIPPED")
                 else:
                     badge = _red("✘ FAIL   ")
                 _emit(
                     f"{_dim(_progress_tag())} {badge} "
                     f"{_cyan(name):<40} "
-                    f"{_fmt_duration(duration):>10}  "
+                    f"{_fmt_duration(result.duration):>10}  "
                     f"{_dim(log_path)}"
                 )
     finally:
@@ -1094,16 +1383,30 @@ def main() -> int:
             f"{_dim('all running agents drained; printing summary so far.')}"
         )
 
-    passed = sum(1 for _, s, _, _ in results if s)
-    failed = len(results) - passed
-    timeouts = sum(
-        1 for _, s, _, o in results if (not s and o.startswith("Timeout"))
+    passed = sum(1 for r in results if r.status == STATUS_PASS)
+    unverified = sum(1 for r in results if r.status == STATUS_UNVERIFIED)
+    skipped = sum(
+        1 for r in results if r.status in {STATUS_SKIPPED, STATUS_CANCELLED}
     )
-    errors = failed - timeouts
+    timeouts = sum(1 for r in results if r.status == STATUS_TIMEOUT)
+    errors = sum(1 for r in results if r.status == STATUS_FAIL)
+    failed = errors + timeouts
+    attempted = len(results) - skipped
     elapsed = time.time() - started_at
 
     # Sort: failures first, then by duration desc, keeps eyes on what matters.
-    sorted_results = sorted(results, key=lambda r: (r[1], -r[2]))
+    status_rank = {
+        STATUS_FAIL: 0,
+        STATUS_TIMEOUT: 1,
+        STATUS_UNVERIFIED: 2,
+        STATUS_CANCELLED: 3,
+        STATUS_SKIPPED: 4,
+        STATUS_PASS: 5,
+    }
+    sorted_results = sorted(
+        results,
+        key=lambda r: (status_rank.get(r.status, 0), -r.duration),
+    )
 
     # ---- Results table ----
     col_idx, col_status, col_pkg, col_dur = 4, 9, 36, 12
@@ -1128,15 +1431,22 @@ def main() -> int:
         + _bold("┤")
     )
 
-    for i, (name, success, duration, output) in enumerate(sorted_results, 1):
-        is_timeout = not success and output.startswith("Timeout")
-        if success:
+    for i, result in enumerate(sorted_results, 1):
+        if result.status == STATUS_PASS:
             status_txt = _green("✔ PASS".ljust(col_status))
-        elif is_timeout:
+        elif result.status == STATUS_UNVERIFIED:
+            status_txt = _yellow("? UNVER".ljust(col_status))
+        elif result.status == STATUS_TIMEOUT:
             status_txt = _yellow("⏱ TIMEOUT".ljust(col_status))
+        elif result.status in {STATUS_SKIPPED, STATUS_CANCELLED}:
+            status_txt = _dim("↷ SKIP".ljust(col_status))
         else:
             status_txt = _red("✘ FAIL".ljust(col_status))
-        name_disp = name if len(name) <= col_pkg else name[: col_pkg - 1] + "…"
+        name_disp = (
+            result.name
+            if len(result.name) <= col_pkg
+            else result.name[: col_pkg - 1] + "…"
+        )
         print(
             _bold("│")
             + f" {i:>{col_idx}} "
@@ -1145,14 +1455,14 @@ def main() -> int:
             + _bold("│")
             + f" {name_disp:<{col_pkg}} "
             + _bold("│")
-            + f" {_fmt_duration(duration):>{col_dur}} "
+            + f" {_fmt_duration(result.duration):>{col_dur}} "
             + _bold("│")
         )
 
     print(_bold("└" + "─" * (table_w - 2) + "┘"))
 
     # ---- Stats panel ----
-    rate = (passed / len(results) * 100) if results else 0.0
+    rate = (passed / attempted * 100) if attempted else 0.0
     rate_color = _green if rate >= 80 else (_yellow if rate >= 50 else _red)
 
     print()
@@ -1167,19 +1477,21 @@ def main() -> int:
         print(_bold("║") + " " + colored + " " * max(pad - 1, 0) + _bold("║"))
 
     summary_plain = (
-        f"TOTAL {len(results)}   PASS {passed}   "
-        f"FAIL {errors}   TIMEOUT {timeouts}"
+        f"TOTAL {attempted}   PASS {passed}   UNVERIFIED {unverified}   "
+        f"FAIL {errors}   TIMEOUT {timeouts}   SKIPPED {skipped}"
     )
     summary_colored = (
-        f"{_bold('TOTAL')} {len(results)}   "
+        f"{_bold('TOTAL')} {attempted}   "
         f"{_green('PASS')} {passed}   "
+        f"{_yellow('UNVERIFIED')} {unverified}   "
         f"{_red('FAIL')} {errors}   "
-        f"{_yellow('TIMEOUT')} {timeouts}"
+        f"{_yellow('TIMEOUT')} {timeouts}   "
+        f"{_dim('SKIPPED')} {skipped}"
     )
     _stat_row_colored(summary_plain, summary_colored)
 
-    rate_plain = f"SUCCESS RATE   {rate:5.1f}%"
-    rate_colored = f"{_bold('SUCCESS RATE')}   {rate_color(f'{rate:5.1f}%')}"
+    rate_plain = f"PASS RATE      {rate:5.1f}%"
+    rate_colored = f"{_bold('PASS RATE')}      {rate_color(f'{rate:5.1f}%')}"
     _stat_row_colored(rate_plain, rate_colored)
 
     _stat_row(f"ELAPSED        {_fmt_duration(elapsed)}")
@@ -1187,8 +1499,14 @@ def main() -> int:
     _stat_row(f"LOGS           {logs_abs}")
     print(_bold("╚" + "═" * (table_w - 2) + "╝"))
 
-    return 0 if failed == 0 else 1
+    if _shutdown_event.is_set():
+        return 130
+    return 0 if failed == 0 and unverified == 0 else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        # Close the ssh connection that the native helpers opened.
+        target.close_connection()

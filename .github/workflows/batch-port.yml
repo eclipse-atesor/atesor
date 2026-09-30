@@ -74,9 +74,10 @@ jobs:
     secrets: inherit
     with:
       provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
-      # Gate via the output, not by failing: a dead provider should skip
-      # the batch cleanly rather than report the run as failed.
-      fail_on_unavailable: "false"
+      # Manual runs skip cleanly when the selected provider is down.
+      # Scheduled runs must fail so provider outages do not look green.
+      fail_on_unavailable: >-
+        ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
 
   # ------------------------------------------------------------------------- #
   # 1. atesor-debian-smoke
@@ -103,12 +104,12 @@ jobs:
       PREBUILT_IMAGE: cloudv10x/atesor-sandbox:debian-latest
       LOCAL_IMAGE: atesor-ai-sandbox-debian:latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
         with:
           platforms: riscv64
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -143,7 +144,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: debian-smoke-logs-${{ github.run_id }}
           path: |
@@ -199,7 +200,7 @@ jobs:
       GROUP_SIZE: ${{ inputs.group_size || '50' }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Snapshot current monthly release assets
         id: snapshot
@@ -253,7 +254,7 @@ jobs:
           done
 
       - name: Upload remaining-pkgs plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: remaining-pkgs
           path: remaining/remaining-*.json
@@ -290,12 +291,12 @@ jobs:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_TOTAL: ${{ needs.plan-full.outputs.debian_total }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
         with:
           platforms: riscv64
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -314,7 +315,7 @@ jobs:
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
           EOF
       - name: Download remaining-pkgs plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: remaining-pkgs
           path: remaining
@@ -358,7 +359,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: debian-full-logs-${{ github.run_id }}-shard-${{ matrix.shard }}
           path: |
@@ -396,12 +397,12 @@ jobs:
       PREBUILT_IMAGE: cloudv10x/atesor-sandbox:alpine-latest
       LOCAL_IMAGE: atesor-ai-sandbox:latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
         with:
           platforms: riscv64
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -436,7 +437,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: alpine-smoke-logs-${{ github.run_id }}
           path: |
@@ -481,12 +482,12 @@ jobs:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_TOTAL: ${{ needs.plan-full.outputs.alpine_total }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
         with:
           platforms: riscv64
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -505,7 +506,7 @@ jobs:
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
           EOF
       - name: Download remaining-pkgs plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: remaining-pkgs
           path: remaining
@@ -544,7 +545,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: alpine-full-logs-${{ github.run_id }}-shard-${{ matrix.shard }}
           path: |
@@ -576,7 +577,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download debian full shard artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: debian-full-logs-${{ github.run_id }}-shard-*
           path: collected/debian
@@ -584,7 +585,7 @@ jobs:
         continue-on-error: true
 
       - name: Download alpine full shard artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: alpine-full-logs-${{ github.run_id }}-shard-*
           path: collected/alpine
@@ -607,7 +608,7 @@ jobs:
 
       - name: Upload platform full logs (debian)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: full-logs-debian
           path: collected-logs/debian/
@@ -616,7 +617,7 @@ jobs:
 
       - name: Upload platform full logs (alpine)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: full-logs-alpine
           path: collected-logs/alpine/
@@ -639,12 +640,12 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
       - name: Download debian full shard artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: debian-full-logs-${{ github.run_id }}-shard-*
           path: data-artifacts/debian
@@ -652,7 +653,7 @@ jobs:
         continue-on-error: true
 
       - name: Download alpine full shard artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: alpine-full-logs-${{ github.run_id }}-shard-*
           path: data-artifacts/alpine

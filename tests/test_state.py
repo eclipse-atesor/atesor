@@ -222,12 +222,40 @@ class TestErrorLoop(unittest.TestCase):
             )
         self.assertFalse(state.is_in_error_loop())
 
-    def test_loop_when_three_consecutive_same_category(self) -> None:
-        """Test loop when three consecutive same category."""
+    def test_loop_when_three_consecutive_same_signature(self) -> None:
+        """Test loop when three consecutive errors have same signature."""
         state = create_initial_state("https://github.com/a/b")
         for _ in range(3):
             state.add_error(
                 create_error_record("e", ErrorCategory.COMPILATION)
+            )
+        self.assertTrue(state.is_in_error_loop())
+
+    def test_distinct_compilation_errors_are_not_a_loop(self) -> None:
+        """Different compile failures in different files show progress."""
+        state = create_initial_state("https://github.com/a/b")
+        messages = [
+            "/workspace/repos/b/src/a.c:10:2: error: 'alpha' undeclared",
+            "/workspace/repos/b/src/b.c:22:4: error: expected ';'",
+            "/workspace/repos/b/src/c.c:31:1: error: unknown type name 'T'",
+        ]
+        for message in messages:
+            state.add_error(
+                create_error_record(message, ErrorCategory.COMPILATION)
+            )
+        self.assertFalse(state.is_in_error_loop())
+
+    def test_same_error_different_line_numbers_is_a_loop(self) -> None:
+        """Volatile paths and line numbers do not hide repeated errors."""
+        state = create_initial_state("https://github.com/a/b")
+        messages = [
+            "/workspace/repos/b/src/a.c:10:2: error: 'foo' undeclared",
+            "/workspace/repos/b/src/a.c:27:9: error: 'foo' undeclared",
+            "/workspace/repos/b/src/a.c:103:4: error: 'foo' undeclared",
+        ]
+        for message in messages:
+            state.add_error(
+                create_error_record(message, ErrorCategory.COMPILATION)
             )
         self.assertTrue(state.is_in_error_loop())
 
@@ -285,7 +313,7 @@ class TestClassifyError(unittest.TestCase):
         ),
         ("autoreconf: error: aclocal failed", ErrorCategory.CONFIGURATION),
         # Compilation
-        ("undefined reference to 'main'", ErrorCategory.COMPILATION),
+        ("undefined reference to 'main'", ErrorCategory.LINKING),
         ("error: 'foo' undeclared", ErrorCategory.COMPILATION),
         ("implicit declaration of function", ErrorCategory.COMPILATION),
         ("PATH_MAX unset, refusing to compile", ErrorCategory.COMPILATION),
@@ -382,6 +410,153 @@ class TestClassifyError(unittest.TestCase):
         self.assertEqual(
             classify_error("Permission Denied"), ErrorCategory.PERMISSION
         )
+
+
+class TestRiscvToolchainClassification(unittest.TestCase):
+    """Regression tests for realistic RISC-V build diagnostics."""
+
+    CASES = [
+        (
+            "ld: foo.o: relocation R_RISCV_HI20 against `bar' "
+            "truncated to fit",
+            ErrorCategory.LINKING,
+        ),
+        ("relocation R_RISCV_JAL out of range", ErrorCategory.LINKING),
+        (
+            "undefined reference to `__atomic_fetch_add_1'",
+            ErrorCategory.LINKING,
+        ),
+        (
+            "undefined reference to `__atomic_compare_exchange_1'",
+            ErrorCategory.LINKING,
+        ),
+        ("multiple definition of `main'", ErrorCategory.LINKING),
+        (
+            "collect2: error: ld returned 1 exit status",
+            ErrorCategory.LINKING,
+        ),
+        (
+            "cc: error: unrecognized command-line option '-msse2'",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "cc: error: unrecognized command-line option '-mavx2'",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "cc: error: unrecognized command-line option '-m64'",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "cc: error: unknown value 'native' for '-march'",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "config.guess: unable to guess system type",
+            ErrorCategory.CONFIGURATION,
+        ),
+        (
+            "configure: error: Invalid configuration "
+            "'riscv64-unknown-linux-gnu'",
+            ErrorCategory.CONFIGURATION,
+        ),
+        (
+            "fatal error: immintrin.h: No such file or directory",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "fatal error: cpuid.h: No such file",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "fatal error: sys/io.h: No such file or directory",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "fatal error: asm/msr.h: No such file or directory",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "unsupported GOOS/GOARCH pair linux/riscv64",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "build constraints exclude all Go files in /workspace/repos/x",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "error[E0425]: cannot find value `foo` in this scope",
+            ErrorCategory.COMPILATION,
+        ),
+        (
+            "error: could not compile `crate` (lib) due to 1 previous error",
+            ErrorCategory.COMPILATION,
+        ),
+        ("Killed", ErrorCategory.DISK_SPACE),
+        ("process exited with exit code 137", ErrorCategory.DISK_SPACE),
+        (
+            "virtual memory exhausted: Cannot allocate memory",
+            ErrorCategory.DISK_SPACE,
+        ),
+        ("process exited with exit status 124", ErrorCategory.NETWORK),
+        ("Command timed out after 1800 seconds", ErrorCategory.NETWORK),
+        (
+            "CMake Error: Could NOT find OpenSSL",
+            ErrorCategory.DEPENDENCY,
+        ),
+        ("fatal error: zlib.h: No such file", ErrorCategory.DEPENDENCY),
+        ("No package 'libfoo' found", ErrorCategory.DEPENDENCY),
+        (
+            "failed to select a version for the requirement `regex = ^1`",
+            ErrorCategory.DEPENDENCY,
+        ),
+        (
+            "E: Could not get lock /var/lib/dpkg/lock-frontend",
+            ErrorCategory.DEPENDENCY,
+        ),
+        ("ERROR: Unable to lock database", ErrorCategory.DEPENDENCY),
+        ("#error \"Unsupported architecture\"", ErrorCategory.ARCHITECTURE),
+        ("No space left on device", ErrorCategory.DISK_SPACE),
+        ("Error: unrecognized opcode `rdtsc'", ErrorCategory.ARCHITECTURE),
+        (
+            "error: invalid instruction mnemonic 'pause'",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "make[2]: Entering directory '/workspace/repos/x'\n"
+            "warning: unused variable\n"
+            "src/simd.c:4:10: fatal error: immintrin.h: "
+            "No such file or directory\n"
+            "make[2]: *** [Makefile:10: simd.o] Error 1",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "[ 44%] Building C object foo.c.o\n"
+            "CMake Error at CMakeLists.txt:9 (find_package):\n"
+            "  Could NOT find OpenSSL\n"
+            "ninja: build stopped: subcommand failed.",
+            ErrorCategory.DEPENDENCY,
+        ),
+        (
+            "go: downloading example.com/lib v1.2.3\n"
+            "package example\n"
+            "\timports example/internal: "
+            "build constraints exclude all Go files",
+            ErrorCategory.ARCHITECTURE,
+        ),
+        (
+            "Compiling demo v0.1.0\n"
+            "error[E0425]: cannot find function `port` in this scope\n"
+            "error: could not compile `demo` due to previous error",
+            ErrorCategory.COMPILATION,
+        ),
+    ]
+
+    def test_riscv_toolchain_snippets(self) -> None:
+        """Classify buried toolchain errors before broad patterns."""
+        for message, expected in self.CASES:
+            with self.subTest(message=message):
+                self.assertEqual(classify_error(message), expected)
 
 
 # ===========================================================================
@@ -533,6 +708,30 @@ class TestShouldEscalate(unittest.TestCase):
         ok, reason = should_escalate(s)
         self.assertTrue(ok)
         self.assertIn("Fundamental blocker", reason)
+
+    def test_escalate_on_infrastructure_blockers(self) -> None:
+        """Disk and permission failures need human infrastructure fixes."""
+        for category in (ErrorCategory.DISK_SPACE, ErrorCategory.PERMISSION):
+            with self.subTest(category=category):
+                s = self._state(last_error_category=category)
+                ok, reason = should_escalate(s)
+                self.assertTrue(ok)
+                self.assertIn("Fundamental blocker", reason)
+
+    def test_package_manager_locks_remain_retryable(self) -> None:
+        """Transient apt/apk locks classify as dependency, not permission."""
+        messages = [
+            "E: Could not get lock /var/lib/dpkg/lock-frontend",
+            "ERROR: Unable to lock database",
+        ]
+        for message in messages:
+            with self.subTest(message=message):
+                category = classify_error(message)
+                s = self._state(last_error_category=category)
+                ok, reason = should_escalate(s)
+                self.assertEqual(category, ErrorCategory.DEPENDENCY)
+                self.assertFalse(ok)
+                self.assertEqual(reason, "")
 
     def test_escalate_when_cost_exceeded(self) -> None:
         """Test escalate when cost exceeded."""
