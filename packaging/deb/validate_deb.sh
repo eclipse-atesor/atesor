@@ -112,22 +112,33 @@ docker run --rm -e DEB="${deb}" -e VERSION="${version}" \
 
     echo "--- [6/9] end-to-end recipe-cache hit (no docker, no keys) ---"
     export ATESOR_HOME=/root/atesor-state
-    pkg=$(/opt/atesor-ai/venv/bin/python3 - <<PY
+    # A cache hit needs the stored repository URL: an entry of another
+    # owner with the same name is a miss, and the CLI goes on to ask
+    # for keys.
+    seed=$(/opt/atesor-ai/venv/bin/python3 - <<PY
 import json, re
 data = json.load(open("/opt/atesor-ai/app/data/recipe_cache.json"))
 for name, entry in data.get("packages", {}).items():
     if not re.fullmatch(r"[A-Za-z0-9_.\-]+", name):
         continue
-    if isinstance(entry, dict) and "debian-riscv64" in entry:
-        print(name)
+    recipe = entry.get("debian-riscv64") if isinstance(entry, dict) else None
+    url = (recipe or {}).get("repo_url") or ""
+    if url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1] == name:
+        print(name, url)
         break
 PY
 )
+    pkg=${seed%% *}
+    url=${seed#* }
     [ -n "${pkg}" ] \
         || { echo "FAIL: no debian seed recipe in bundled cache"; exit 1; }
-    echo "    seed package: ${pkg}"
-    atesor-ai --repo "https://github.com/seed/${pkg}" --platform debian \
-        </dev/null
+    echo "    seed package: ${pkg} (${url})"
+    # Exit 0: the entry holds a verified verdict. Exit 3: the entry was
+    # recorded before artifact verification existed.
+    rc=0
+    atesor-ai --repo "${url}" --platform debian </dev/null || rc=$?
+    [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ] \
+        || { echo "FAIL: cache hit exited ${rc}"; exit 1; }
     recipe="${ATESOR_HOME}/workspace/output/${pkg}_recipe.md"
     test -s "${recipe}" \
         || { echo "FAIL: cache hit did not write ${recipe}"; exit 1; }
