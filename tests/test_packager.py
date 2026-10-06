@@ -301,6 +301,87 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(manifest["logs_in_zip"], [])
 
 
+class TestOptimizedPackage(unittest.TestCase):
+    """Performance mode adds schema 3 sections and optimized files."""
+
+    # The same scratch repository as TestPackageBuild, without running
+    # its tests a second time.
+    setUp = TestPackageBuild.setUp
+    tearDown = TestPackageBuild.tearDown
+    _build = TestPackageBuild._build
+
+    def _optimization(self) -> dict:
+        return {
+            "status": "done",
+            "kind": "native",
+            "reason": "GCC -O3 is faster: median time ratio 0.9",
+            "workload": {"description": "compress 64 MiB"},
+            "accepted": "v3-o3",
+            "accepted_ratio": 0.9,
+            "accepted_artifacts": ["build/amass", "../escape", "link"],
+            "variants": [
+                {"variant": {"vid": "v1-tune", "flags": ["-mtune=x"]},
+                 "verdict": "no change", "ratio": 0.99},
+                {"variant": {"vid": "v3-o3", "flags": ["-O3"]},
+                 "verdict": "faster", "ratio": 0.9},
+            ],
+        }
+
+    def test_manifest_v3_lists_machine_and_variant(self) -> None:
+        """The accepted artifacts go in optimized/ with their hashes."""
+        import hashlib
+
+        accepted = os.path.join(self.root, "repos", "amass.opt", "accepted")
+        os.makedirs(os.path.join(accepted, "build"))
+        tool = os.path.join(accepted, "build", "amass")
+        with open(tool, "wb") as fh:
+            fh.write(b"\x7fELF optimized")
+        with open(os.path.join(self.root, "repos", "escape"), "w") as fh:
+            fh.write("outside")
+        os.symlink(tool, os.path.join(accepted, "link"))
+        machine = {"kind": "native", "label": "rv64gc+zba+zbb",
+                   "core_name": "sifive-p550", "misaligned": "slow",
+                   "extensions": ["zba", "zbb"], "board": {"x": 1}}
+        zp = self._build(
+            optimization=self._optimization(),
+            machine=machine,
+            optimized_dir=accepted,
+        )
+        with zipfile.ZipFile(zp) as zf:
+            m = json.loads(zf.read("manifest.json"))
+            names = zf.namelist()
+            payload = zf.read("optimized/build/amass")
+        self.assertEqual(m["schema_version"], 3)
+        self.assertEqual(m["machine"]["core_name"], "sifive-p550")
+        self.assertNotIn("board", m["machine"])
+        section = m["optimization"]
+        self.assertEqual(section["accepted"], "v3-o3")
+        self.assertEqual(section["accepted_variant"]["flags"], ["-O3"])
+        self.assertEqual(section["workload"], "compress 64 MiB")
+        self.assertEqual(
+            section["artifacts"],
+            [{"path_in_zip": "optimized/build/amass",
+              "sha256": hashlib.sha256(b"\x7fELF optimized").hexdigest()}],
+        )
+        self.assertEqual(len(section["variants"]), 2)
+        self.assertEqual(payload, b"\x7fELF optimized")
+        self.assertNotIn("optimized/link", names)
+        self.assertNotIn("optimized/../escape", names)
+
+    def test_optimization_without_accepted_dir(self) -> None:
+        """A run that accepted nothing still records schema 3."""
+        record = dict(self._optimization(), accepted=None,
+                      accepted_artifacts=[])
+        zp = self._build(optimization=record, machine=None)
+        with zipfile.ZipFile(zp) as zf:
+            m = json.loads(zf.read("manifest.json"))
+            names = zf.namelist()
+        self.assertEqual(m["schema_version"], 3)
+        self.assertIsNone(m["optimization"]["accepted_variant"])
+        self.assertEqual(m["machine"]["kind"], None)
+        self.assertFalse(any(n.startswith("optimized/") for n in names))
+
+
 class TestLegacyPackageStem(unittest.TestCase):
     """The legacy stem must equal the zip stem that old releases used."""
 

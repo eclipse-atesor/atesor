@@ -901,6 +901,94 @@ def save_to_recipe_cache(
         return False
 
 
+def record_optimization(
+    repo_name: str,
+    optimization: Optional[Dict[str, Any]],
+    machine: Optional[Dict[str, Any]] = None,
+    sandbox: Optional[str] = None,
+) -> bool:
+    """Store a measured performance mode result in the recipe cache.
+
+    Only native results with a workload are kept: a QEMU run makes no
+    speed claim. The result goes in the verified build's entry, under
+    ``optimizations`` and keyed by the machine's core (or ISA label),
+    so results from different boards stay apart.
+
+    Args:
+        repo_name: The repository name key.
+        optimization: The record from ``src.optimize.run_optimization``.
+        machine: The machine profile (``MachineProfile.to_dict``).
+        sandbox: Sandbox key; defaults to the active platform.
+
+    Returns:
+        True if the cache was written, else False.
+    """
+    result = optimization or {}
+    if (
+        result.get("kind") != "native"
+        or result.get("status") not in ("accepted", "no gain")
+        or not result.get("workload")
+    ):
+        return False
+    if sandbox is None:
+        sandbox = _default_sandbox()
+    machine = machine or {}
+    key = machine.get("core_name") or machine.get("label") or "unknown"
+    accepted = None
+    for item in result.get("variants") or []:
+        variant = item.get("variant") or {}
+        if result.get("accepted") and variant.get("vid") == result["accepted"]:
+            accepted = variant
+            break
+    record = {
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "machine": machine.get("label"),
+        "status": result.get("status"),
+        "accepted": result.get("accepted"),
+        "ratio": result.get("accepted_ratio"),
+        "workload": (result.get("workload") or {}).get("description"),
+    }
+    if accepted:
+        # PGO paths point into a removed tree; only the settings that
+        # can be repeated are kept.
+        record["variant"] = {
+            "label": accepted.get("label"),
+            "technique": accepted.get("technique"),
+            "title": accepted.get("title"),
+            "compiler": accepted.get("compiler"),
+            "flags": [
+                flag
+                for flag in accepted.get("flags") or []
+                if not flag.startswith("-fprofile")
+            ],
+            "env": {
+                name: value
+                for name, value in (accepted.get("env") or {}).items()
+                if name not in ("GOFLAGS", "CCACHE_DISABLE")
+            },
+            "pgo": bool(accepted.get("pgo")),
+        }
+    lock_path = _lock_path_for(RECIPE_CACHE_PATH)
+    try:
+        lock = filelock.FileLock(lock_path, timeout=5)
+        with lock:
+            cache = load_recipe_cache()
+            entry = (cache.get("packages", {}).get(repo_name) or {}).get(
+                sandbox
+            )
+            if not isinstance(entry, dict) or "build_plan" not in entry:
+                return False
+            entry.setdefault("optimizations", {})[key] = record
+            _atomic_write_json(RECIPE_CACHE_PATH, cache)
+        logger.info(
+            f"Recipe cache: optimization of {repo_name} on {key} recorded"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to record the optimization of {repo_name}: {e}")
+        return False
+
+
 def render_recipe_markdown(repo_name: str, recipe: Dict[str, Any]) -> str:
     """Render a Markdown porting recipe from a cached recipe entry.
 

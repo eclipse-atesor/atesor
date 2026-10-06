@@ -207,6 +207,7 @@ def llm_call_with_validation(
     fallback_llms: Optional[
         list
     ] = None,  # rotate to next model on provider errors
+    rotate_on_timeout: bool = False,  # a timeout rotates too
 ) -> LLMCallOutcome:
     """Call ``llm`` with ``prompt``, parse, validate, retry, fall back.
 
@@ -225,7 +226,9 @@ def llm_call_with_validation(
     found"), the helper rotates to the next LLM in the list and
     continues the retry loop with a fresh attempt budget. This handles
     transient OpenRouter free-tier outages without escalating the whole
-    agent state.
+    agent state. With ``rotate_on_timeout``, a call that times out also
+    rotates to the next LLM, and a timeout on the last LLM ends the call
+    instead of asking the same model again.
 
     Returns:
         An ``LLMCallOutcome`` describing the parsed data and how it was
@@ -338,7 +341,11 @@ def llm_call_with_validation(
                     )
             # Provider-side error → try next model in the pool (if any).
             # Free rotation: does not consume critique-retry budget.
-            if _is_provider_error(exc) and pool_idx + 1 < len(llm_pool):
+            timed_out = rotate_on_timeout and isinstance(exc, TimeoutError)
+            if (
+                (_is_provider_error(exc) or timed_out)
+                and pool_idx + 1 < len(llm_pool)
+            ):
                 pool_idx += 1
                 active_llm = llm_pool[pool_idx]
                 logger.warning(
@@ -346,6 +353,10 @@ def llm_call_with_validation(
                     f"{_model_id(active_llm)}"
                 )
                 continue
+            if timed_out:
+                # Every model of the pool timed out: asking one again
+                # costs another full timeout.
+                break
             # Non-provider error (or pool exhausted): treat as retryable
             # against the same model, using the critique-retry budget.
             if critique_retries_used < max_retries:

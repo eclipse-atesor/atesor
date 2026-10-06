@@ -1435,3 +1435,104 @@ class TestMemoryEdgeCases(unittest.TestCase):
         fake_memory.save_learned_example.assert_called_once_with(
             {"name": "New", "build_system": "go"}
         )
+
+
+class TestRecordOptimization(unittest.TestCase):
+    """Measured native results are stored per machine in the cache."""
+
+    def setUp(self) -> None:
+        """Seed a cache with one verified entry."""
+        import src.memory as memory
+
+        self.tmp_dir = _make_test_dir("record-optimization")
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        self.cache_path = self.tmp_dir / "recipe_cache.json"
+        entry = {"build_plan": {"phases": []}, "build_system": "cmake"}
+        self.cache_path.write_text(json.dumps({
+            "version": "2.0",
+            "packages": {"zlib": {"debian-riscv64": entry}},
+        }))
+        patch = mock.patch.object(memory, "RECIPE_CACHE_PATH",
+                                  self.cache_path)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _result(self, **overrides):
+        result = {
+            "status": "accepted",
+            "kind": "native",
+            "workload": {"description": "compress"},
+            "accepted": "v6-pgo",
+            "accepted_ratio": 0.88,
+            "variants": [{"variant": {
+                "vid": "v6-pgo",
+                "label": "Tune-6",
+                "technique": "profile-guided optimization",
+                "title": "GCC -O3 + PGO",
+                "compiler": "gcc",
+                "flags": ["-O3", "-fprofile-use=/w/x.opt/pgo",
+                          "-fprofile-prefix-path=/w/x.opt/v6-pgo"],
+                "env": {"CCACHE_DISABLE": "1"},
+                "pgo": "use",
+            }}],
+        }
+        result.update(overrides)
+        return result
+
+    def test_native_result_is_stored_per_core(self) -> None:
+        """The accepted settings stay; PGO paths do not."""
+        from src.memory import record_optimization
+
+        machine = {"core_name": "sifive-p550", "label": "rv64gc+zba+zbb"}
+        self.assertTrue(record_optimization(
+            "zlib", self._result(), machine, sandbox="debian-riscv64"
+        ))
+        cache = json.loads(self.cache_path.read_text())
+        stored = cache["packages"]["zlib"]["debian-riscv64"]
+        record = stored["optimizations"]["sifive-p550"]
+        self.assertEqual(record["accepted"], "v6-pgo")
+        self.assertEqual(record["status"], "accepted")
+        self.assertEqual(record["ratio"], 0.88)
+        self.assertEqual(record["variant"]["label"], "Tune-6")
+        self.assertEqual(record["variant"]["technique"],
+                         "profile-guided optimization")
+        self.assertEqual(record["variant"]["flags"], ["-O3"])
+        self.assertEqual(record["variant"]["env"], {})
+        self.assertTrue(record["variant"]["pgo"])
+        self.assertEqual(stored["build_system"], "cmake")
+
+    def test_unmeasured_or_unknown_results_are_not_stored(self) -> None:
+        """QEMU runs, missing workloads and unknown entries are skipped."""
+        from src.memory import record_optimization
+
+        before = self.cache_path.read_text()
+        cases = (
+            ("zlib", self._result(kind="qemu")),
+            ("zlib", self._result(workload=None)),
+            ("zlib", self._result(status="error")),
+            ("zlib", self._result(status="not measured")),
+            ("zlib", self._result(status="checked")),
+            ("other", self._result()),
+            ("zlib", None),
+        )
+        for name, result in cases:
+            self.assertFalse(record_optimization(
+                name, result, {}, sandbox="debian-riscv64"
+            ))
+        self.assertEqual(self.cache_path.read_text(), before)
+
+    def test_result_without_accepted_variant(self) -> None:
+        """A measured run that accepted nothing is still recorded."""
+        from src.memory import record_optimization
+
+        self.assertTrue(record_optimization(
+            "zlib",
+            self._result(status="no gain", accepted=None,
+                         accepted_ratio=None),
+            {"label": "rv64gc"}, sandbox="debian-riscv64",
+        ))
+        cache = json.loads(self.cache_path.read_text())
+        record = cache["packages"]["zlib"]["debian-riscv64"][
+            "optimizations"]["rv64gc"]
+        self.assertIsNone(record["accepted"])
+        self.assertNotIn("variant", record)

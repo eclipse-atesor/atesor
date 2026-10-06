@@ -3,8 +3,11 @@
 import unittest
 
 from src.graph import (
+    create_workflow,
     route_analyst_to_next,
     route_build_result,
+    route_cached_recipe_to_next,
+    route_finish_to_next,
     route_fix_result,
     route_heuristic_plan_to_next,
     route_init_to_next,
@@ -404,3 +407,43 @@ class TestEscalatedRouting(unittest.TestCase):
         """A crashed init_node must not hand a missing clone on."""
         s = _base_state(build_status=BuildStatus.ESCALATED)
         self.assertEqual(route_init_to_next(s), "escalate_node")
+
+
+class TestRouteCachedRecipe(unittest.TestCase):
+    """--optimize with a verified cached recipe skips the planning."""
+
+    def test_init_goes_to_the_cached_recipe(self):
+        """A cached recipe replaces the analyst; a failed init escalates."""
+        s = _base_state(cached_recipe={"build_plan": {"phases": []}})
+        self.assertEqual(route_init_to_next(s), "cached_recipe_node")
+        s.build_status = BuildStatus.FAILED
+        self.assertEqual(route_init_to_next(s), "escalate_node")
+
+    def test_cached_recipe_builds_or_falls_back(self):
+        """A plan goes to the supervisor; no plan plans as usual."""
+        plan = BuildPlan("cmake", 1.0, [BuildPhase(1, "b", ["make"])], "1m")
+        self.assertEqual(
+            route_cached_recipe_to_next(_base_state(build_plan=plan)),
+            "supervisor_node",
+        )
+        self.assertEqual(route_cached_recipe_to_next(_base_state()),
+                         "analyst_node")
+
+    def test_the_node_is_wired(self):
+        """The compiled graph has the node between init and supervisor."""
+        graph = create_workflow().get_graph()
+        self.assertIn("cached_recipe_node", graph.nodes)
+        targets = {(edge.source, edge.target) for edge in graph.edges}
+        self.assertIn(("init_node", "cached_recipe_node"), targets)
+        self.assertIn(("cached_recipe_node", "supervisor_node"), targets)
+        self.assertIn(("cached_recipe_node", "analyst_node"), targets)
+
+
+class TestRouteFinish(unittest.TestCase):
+    """--optimize adds one step after finish_node."""
+
+    def test_finish_ends_unless_optimize_was_requested(self):
+        """Only a run with --optimize goes on to optimize_node."""
+        self.assertEqual(route_finish_to_next(_base_state()), "__end__")
+        s = _base_state(optimize_requested=True)
+        self.assertEqual(route_finish_to_next(s), "optimize_node")

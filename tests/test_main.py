@@ -2319,6 +2319,12 @@ class TestNativeDockerfiles(unittest.TestCase):
         for line in native.splitlines():
             self.assertFalse(line.startswith(("COPY", "ADD")), line)
 
+    def test_native_image_has_the_optimize_toolchain(self) -> None:
+        """--optimize needs clang-19 and its PGO tool in the image."""
+        packages = self._read("Dockerfile.native").split()
+        for name in ("clang-19", "lld-19", "llvm-19", "libclang-rt-19-dev"):
+            self.assertIn(name, packages)
+
     def test_alpine_base_name_is_fully_qualified(self) -> None:
         """Podman needs a full image name without a short-name alias."""
         self.assertIn(
@@ -2744,6 +2750,442 @@ class TestReportDataclassShapes(_MainTestCase):
         self.assertIn("Build System**: make", report)
         self.assertIn("make", report)
         self.assertIn("zlib-dev", report)
+
+
+class TestPerformanceMode(_MainTestCase):
+    """--optimize, --emulate-cpu and --probe from the CLI to the zip."""
+
+    def _optimization(self) -> dict:
+        return {
+            "status": "accepted",
+            "kind": "native",
+            "reason": "Tune-3 (GCC -O3) takes 10.0% less time than the "
+                      "verified build (time ratio 0.9)",
+            "accepted": "tune3",
+            "accepted_label": "Tune-3",
+            "accepted_title": "GCC -O3",
+            "accepted_ratio": 0.9,
+            "accepted_dir": "/workspace/repos/project.opt/accepted",
+            "duration_seconds": 1200.0,
+            "budget_seconds": 3600,
+            "package": {"kind": "library", "language": "c",
+                        "build_system": "cmake",
+                        "libraries": ["build/libdemo.so.1"],
+                        "programs": []},
+            "baseline": {"build_seconds": 31.0, "same_code": 1,
+                         "artifacts": 1},
+            "workload": {"mode": "harness", "command": "{bin} {input}",
+                         "description": "sum the input", "origin": "agent",
+                         "source_language": "c", "iterations": 12,
+                         "run_seconds": 1.9,
+                         "files": {".atesor/bench/harness.c":
+                                   "int main(void) { return 0; }\n"}},
+            "warnings": ["cpufreq governor is ondemand"],
+            "notes": ["not repeated: apt-get install -y cmake"],
+            "variants": [
+                {"variant": {"vid": "tune1", "label": "Tune-1",
+                             "technique": "core tuning",
+                             "value": "-mtune=sifive-p550",
+                             "compiler": "gcc",
+                             "flags": ["-mtune=sifive-p550"], "env": {}},
+                 "verdict": "no change", "ratio": 0.99,
+                 "reason": "median time ratio 0.99"},
+                {"variant": {"vid": "tune3", "label": "Tune-3",
+                             "technique": "optimization level",
+                             "value": "-O3", "compiler": "gcc",
+                             "flags": ["-O3"], "env": {}},
+                 "verdict": "faster", "ratio": 0.9,
+                 "measurement": {"comparison": {"ci_low": 0.89,
+                                                "ci_high": 0.91}},
+                 "reason": "median time ratio 0.9 | p=0.001"},
+                {"variant": {"vid": "tune4", "label": "Tune-4",
+                             "technique": "link-time optimization",
+                             "value": "-flto=auto", "compiler": "gcc",
+                             "flags": ["-O3", "-flto=auto"], "env": {}},
+                 "verdict": "same as tune3", "same_as_label": "Tune-3",
+                 "ratio": 0.9, "reason": "result reused"},
+            ],
+        }
+
+    def test_optimize_builds_from_a_verified_cached_recipe(self) -> None:
+        """--optimize skips the fast path and builds the cached recipe."""
+        cached = {"build_system": "cmake", "last_built": "2026-10-02",
+                  "verification": {"status": "verified"}}
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--optimize", "--emulate-cpu",
+             "rva22u64"],
+            cache=cached,
+        )
+        self.assertEqual(0, code)
+        patches["materialize"].assert_not_called()
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+            cached_recipe=cached,
+            emulate_cpu="rva22u64",
+        )
+
+    def test_optimize_plans_again_without_a_verified_recipe(self) -> None:
+        """An unverified entry, or --force, means a full port."""
+        for args, cache in (
+            (["--optimize"], {"build_system": "cmake",
+                              "verification": {"status": "unverified"}}),
+            (["--optimize"], None),
+            (["--optimize", "--force"], {"build_system": "cmake",
+                                         "verification": {
+                                             "status": "verified"}}),
+        ):
+            with self.subTest(args=args, cache=bool(cache)):
+                code, patches = self._call_cli(["--repo", _REPO_URL] + args,
+                                               cache=cache)
+                self.assertEqual(0, code)
+                patches["run_agent"].assert_called_once_with(
+                    repo_url=_REPO_URL, max_attempts=5, verbose=False,
+                    package=False, optimize=True,
+                )
+                if "--force" in args:
+                    patches["get_cached"].assert_not_called()
+
+    def test_bad_model_and_probe_with_repo_stop_early(self) -> None:
+        """A bad model and --probe with --repo exit 1."""
+        for model in ("max;reboot", "2"):
+            with self.subTest(model=model):
+                code, patches = self._call_cli(
+                    ["--repo", _REPO_URL, "--optimize", "--emulate-cpu",
+                     model]
+                )
+                self.assertEqual(1, code)
+                patches["run_agent"].assert_not_called()
+        code, patches = self._call_cli(["--probe", "--repo", _REPO_URL])
+        self.assertEqual(1, code)
+        patches["setup"].assert_not_called()
+
+    def test_emulate_cpu_falls_back_to_the_environment(self) -> None:
+        """--emulate-cpu wins; ATESOR_QEMU_CPU is the env form."""
+        with mock.patch.dict(os.environ, {"ATESOR_QEMU_CPU": " rva22u64 "}):
+            self.assertEqual(main._emulate_cpu_value(None), "rva22u64")
+            self.assertEqual(main._emulate_cpu_value("rv64"), "rv64")
+        with mock.patch.dict(os.environ, {"ATESOR_QEMU_CPU": ""}):
+            self.assertIsNone(main._emulate_cpu_value(None))
+
+    def test_model_only_matters_for_performance_mode(self) -> None:
+        """A port without --optimize ignores the model completely."""
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--emulate-cpu", "2"]
+        )
+        self.assertEqual(0, code)
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL, max_attempts=5, verbose=False,
+            package=False,
+        )
+
+    def test_probe_needs_no_api_key(self) -> None:
+        """--probe sets up the sandbox and probes; no agent, no keys."""
+        with mock.patch.object(main, "_run_probe", return_value=0) as probe:
+            code, patches = self._call_cli(["--probe"])
+        self.assertEqual(0, code)
+        probe.assert_called_once()
+        patches["check_keys"].assert_not_called()
+        patches["run_agent"].assert_not_called()
+
+    def test_run_probe_prints_and_saves_the_profile(self) -> None:
+        """The profile is printed with its rules and saved as JSON."""
+        import json
+
+        from src.machine import MachineProfile
+
+        profile = MachineProfile(
+            kind="qemu",
+            emulated_cpu="rva22u64",
+            extensions=["a", "c", "d", "f", "i", "m", "zba", "zbb", "zbs"],
+            label="rv64gc+zba+zbb+zbs",
+        )
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main, "setup_docker_environment", return_value=True
+            ),
+            mock.patch(
+                "src.machine.probe_machine", return_value=(profile, None)
+            ) as probe,
+            contextlib.redirect_stdout(out),
+        ):
+            code = main._run_probe(
+                argparse.Namespace(emulate_cpu="rva22u64"), native=False
+            )
+            saved = os.path.join(main.OUTPUT_DIR,
+                                 "machine_profile_qemu.json")
+            with open(saved) as handle:
+                data = json.load(handle)
+        self.assertEqual(0, code)
+        probe.assert_called_once_with("qemu", "rva22u64")
+        self.assertIn("ISA label:   rv64gc+zba+zbb+zbs", out.getvalue())
+        self.assertEqual(data["emulated_cpu"], "rva22u64")
+
+    def test_native_probe_failure_still_stops_the_container(self) -> None:
+        """The native container stops even when the probe fails."""
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                main, "setup_native_environment", return_value=True
+            ),
+            mock.patch.object(main, "stop_native_container") as stop,
+            mock.patch(
+                "src.machine.probe_machine",
+                return_value=(None, "exit 1: boom"),
+            ) as probe,
+            contextlib.redirect_stdout(out),
+        ):
+            code = main._run_probe(
+                argparse.Namespace(emulate_cpu="rva22u64"), native=True
+            )
+        self.assertEqual(1, code)
+        stop.assert_called_once_with()
+        probe.assert_called_once_with("native", None)
+        self.assertIn("ignored on the native target", out.getvalue())
+        self.assertIn("boom", out.getvalue())
+
+    def test_native_run_removes_the_variant_trees(self) -> None:
+        """After --optimize the machine loses <name>.opt as well."""
+        args = argparse.Namespace(
+            repo=_REPO_URL, max_attempts=5, verbose=False, package=False,
+            optimize=True, emulate_cpu=None, setup_only=False,
+            rebuild=False,
+        )
+        with (
+            mock.patch.object(
+                main, "setup_native_environment", return_value=True
+            ),
+            mock.patch.object(main, "run_agent", return_value=0) as run,
+            mock.patch.object(main, "remove_native_repo") as remove,
+            mock.patch.object(main, "stop_native_container"),
+            mock.patch.object(main, "_verified_cached_recipe",
+                              return_value=None),
+        ):
+            self.assertEqual(0, main._run_native(args, infra_only=False))
+        run.assert_called_once_with(
+            repo_url=_REPO_URL, max_attempts=5, verbose=False,
+            package=False, optimize=True,
+        )
+        self.assertEqual(
+            remove.call_args_list,
+            [mock.call("project"), mock.call("project.opt")],
+        )
+
+    def test_report_has_the_performance_section(self) -> None:
+        """The report lists every tune; without --optimize, nothing."""
+        state = {
+            "repo_name": "demo",
+            "build_status": "SUCCESS",
+            "artifact_verification": {"status": "verified"},
+            "optimization": self._optimization(),
+            "machine_profile": {"kind": "native",
+                                "label": "rv64gc+zba+zbb",
+                                "core_name": "sifive-p550",
+                                "misaligned": "slow",
+                                "misaligned_source": "timing test"},
+        }
+        report = main.generate_detailed_report(state)
+        self.assertIn("## Performance Mode (--optimize)", report)
+        self.assertIn(
+            "**Optimized**: YES: Tune-3 (GCC -O3) is 10.0% faster than the "
+            "verified build",
+            report,
+        )
+        self.assertIn(
+            "**Result**: accepted: Tune-3 (GCC -O3) takes 10.0% less time",
+            report,
+        )
+        self.assertIn(
+            "core sifive-p550, misaligned access slow (source: timing "
+            "test)",
+            report,
+        )
+        self.assertIn(
+            "**Package**: library (c, cmake); libraries: "
+            "build/libdemo.so.1; programs: none",
+            report,
+        )
+        self.assertIn("rebuilt in a copy in 31.0s; 1 of 1 riscv64",
+                      report)
+        self.assertIn(
+            "**Workload**: C harness by the optimizer agent: sum the "
+            "input, N=12, 1.90 s per run",
+            report,
+        )
+        self.assertIn(
+            "| Tune-3 | optimization level | gcc -O3 | 10.0% faster | "
+            "0.9 (0.89-0.91) | median time ratio 0.9 / p=0.001 |",
+            report,
+        )
+        self.assertIn("| Tune-4 | link-time optimization | gcc -O3 "
+                      "-flto=auto | same code as Tune-3, 10.0% faster |",
+                      report)
+        self.assertIn("### Workload source: `.atesor/bench/harness.c`",
+                      report)
+        self.assertIn("```c\nint main(void) { return 0; }\n```", report)
+        self.assertIn("- not repeated: apt-get install -y cmake", report)
+        self.assertIn("## Machine Profile", report)
+        self.assertIn("ISA label:   rv64gc+zba+zbb", report)
+        self.assertLess(report.index("## Machine Profile"),
+                        report.index("## Performance Mode"))
+        plain = main.generate_detailed_report(
+            {"repo_name": "demo", "build_status": "SUCCESS"}
+        )
+        self.assertNotIn("Performance Mode", plain)
+        self.assertNotIn("Machine Profile", plain)
+
+    def test_optimize_step_prints_its_header_first(self) -> None:
+        """Step 9 shows before its lines; without --optimize it is gone."""
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            yield {"finish_node": state}
+            if state.optimize_requested:
+                print("   Tune-1   : core tuning = -mtune=x", flush=True)
+                state.optimization = {"status": "no gain",
+                                      "reason": "nothing", "variants": []}
+                yield {"optimize_node": state}
+
+        from src.graph import route_finish_to_next
+
+        for optimize in (True, False):
+            out = io.StringIO()
+            # The real routing rule decides whether Step 9 follows.
+            fake_graph = SimpleNamespace(
+                app=_FakeApp(stream_factory),
+                route_finish_to_next=route_finish_to_next,
+            )
+            with (
+                self.subTest(optimize=optimize),
+                self._patched_main_paths(),
+                mock.patch.dict(sys.modules, {"src.graph": fake_graph}),
+                mock.patch(
+                    "src.platforms.get_active_profile",
+                    return_value=self._profile(),
+                ),
+                mock.patch.object(main, "save_porting_outputs"),
+                contextlib.redirect_stdout(out),
+            ):
+                code = main.run_agent(_REPO_URL, optimize=optimize)
+            self.assertEqual(0, code)
+            text = out.getvalue()
+            self.assertIn("[Step 1] finish_node", text)
+            if optimize:
+                header = text.index("[Step 2] optimize_node")
+                self.assertLess(header, text.index("Status: OPTIMIZING"))
+                self.assertLess(text.index("Status: OPTIMIZING"),
+                                text.index("Tune-1   : core tuning"))
+                self.assertEqual(text.count("[Step 2]"), 1)
+                self.assertNotIn("[Step 3]", text)
+                self.assertIn(
+                    "Optimized: NO: no tune was clearly faster than the "
+                    "verified build",
+                    text,
+                )
+                self.assertIn("Why: nothing", text)
+            else:
+                self.assertNotIn("optimize_node", text)
+                self.assertNotIn("OPTIMIZING", text)
+
+    def test_run_agent_packages_the_accepted_variant(self) -> None:
+        """The zip gets the accepted artifacts and the optimization."""
+        package_build = mock.MagicMock(return_value="pkg.zip")
+        record = self._optimization()
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            state.optimization = record
+            state.machine_profile = {"kind": "qemu"}
+            yield {"Finish": state}
+
+        fake_packager = SimpleNamespace(package_build=package_build)
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(_FakeApp(stream_factory)),
+            mock.patch.dict(sys.modules, {"src.packager": fake_packager}),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile("debian"),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(out),
+        ):
+            code = main.run_agent(_REPO_URL, package=True, optimize=True)
+            repos_dir = main.REPOS_DIR
+
+        self.assertEqual(0, code)
+        kwargs = package_build.call_args.kwargs
+        self.assertEqual(
+            kwargs["optimized_dir"],
+            os.path.join(repos_dir, "project.opt", "accepted"),
+        )
+        self.assertEqual(kwargs["optimization"], record)
+        self.assertEqual(kwargs["machine"], {"kind": "qemu"})
+        text = out.getvalue()
+        self.assertIn("Optimize:    yes", text)
+        self.assertIn(
+            "Optimized: YES: Tune-3 (GCC -O3) is 10.0% faster than the "
+            "verified build",
+            text,
+        )
+        self.assertNotIn("Why:", text)
+        self.assertRegex(
+            text, r"Tune-3 +optimization level +-O3 +10\.0% faster  "
+                  r"<- accepted"
+        )
+        self.assertRegex(
+            text, r"Tune-1 +core tuning +-mtune=sifive-p550 +1\.0% faster "
+                  r"\(inside the noise\)"
+        )
+        self.assertRegex(
+            text, r"Tune-4 +link-time optimization +-flto=auto +same code "
+                  r"as Tune-3, 10\.0% faster"
+        )
+        self.assertIn(
+            "Optimized files: /workspace/repos/project.opt/accepted",
+            text,
+        )
+
+    def test_header_names_the_cached_recipe(self) -> None:
+        """The run says when it builds from the cache."""
+
+        def stream_factory(state):
+            self.assertEqual(state.cached_recipe["build_system"], "cmake")
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            yield {"Finish": state}
+
+        cached = {"build_system": "cmake",
+                  "last_built": "2026-10-02T15:35:35",
+                  "verification": {"status": "verified",
+                                   "source_commit": "767c4c947852e143f58"}}
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(_FakeApp(stream_factory)),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(out),
+        ):
+            code = main.run_agent(_REPO_URL, optimize=True,
+                                  cached_recipe=cached)
+        self.assertEqual(0, code)
+        self.assertIn(
+            "Recipe:      from the cache (verified run of "
+            "2026-10-02T15:35:35, commit 767c4c947852); no new planning",
+            out.getvalue(),
+        )
 
 
 if __name__ == "__main__":

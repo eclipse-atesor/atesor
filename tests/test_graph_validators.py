@@ -1610,3 +1610,25 @@ class TestPackageTestPhase(unittest.TestCase):
             outcome = graph._run_package_tests(self.state)
         self.assertEqual(outcome["status"], "error")
         self.assertIn("boom", outcome["reason"])
+
+    def test_variant_tree_runs_the_given_command(self) -> None:
+        """Performance mode tests a variant tree with its environment."""
+        from src import graph
+
+        result = CommandResult("make check", 0, "ok", "", 1.0)
+        with mock.patch.object(
+            graph, "execute_command", return_value=result
+        ) as run:
+            outcome = graph._run_package_tests(
+                self.state,
+                repo_path="/workspace/repos/b.opt/v1-tune",
+                extra_env={"CC": "/w/cc"},
+                detected=("make check", "make check"),
+            )
+        self.assertEqual(outcome["status"], "passed")
+        run.assert_called_once_with(
+            "make check",
+            cwd="/workspace/repos/b.opt/v1-tune",
+            timeout=graph.PACKAGE_TEST_TIMEOUT,
+            extra_env={"CC": "/w/cc"},
+        )

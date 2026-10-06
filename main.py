@@ -8,13 +8,15 @@ workflow.
 import argparse
 import contextlib
 import fcntl
+import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 import docker
 from dotenv import load_dotenv
@@ -83,6 +85,11 @@ _NATIVE_DISTROS = {
     "debian": {"debian", "ubuntu"},
     "ubuntu": {"debian", "ubuntu"},
 }
+
+# A QEMU_CPU model: a name such as rva22u64, or rv64i with properties
+# such as "rv64i,m=true,zba=true". It goes to the sandbox as one value.
+# Every QEMU model name starts with a letter.
+_EMULATE_CPU_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.,=+-]{0,511}$")
 
 
 # Configure logging
@@ -1144,6 +1151,44 @@ def remove_native_repo(repo_name: str) -> None:
         )
 
 
+def _emulate_cpu_value(cli_value: Optional[str]) -> Optional[str]:
+    """Return the QEMU_CPU model: --emulate-cpu, else ATESOR_QEMU_CPU."""
+    return cli_value or os.environ.get("ATESOR_QEMU_CPU", "").strip() or None
+
+
+def _verified_cached_recipe(repo_url: str) -> Optional[Dict[str, Any]]:
+    """Return the verified recipe-cache entry of a repository, or None.
+
+    Only an entry with a verified verdict proves that its recipe made
+    riscv64 output; any other entry is not used.
+    """
+    from src.memory import get_cached_recipe
+    from src.state import derive_repo_name
+
+    cached = get_cached_recipe(derive_repo_name(repo_url), repo_url=repo_url)
+    verdict = (cached or {}).get("verification") or {}
+    return cached if verdict.get("status") == "verified" else None
+
+
+def _performance_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Return the run_agent arguments of performance mode, if it is on.
+
+    With --optimize (and no --force), a verified cached recipe of the
+    package becomes the build plan, so the port builds again without
+    planning.
+    """
+    kwargs: Dict[str, Any] = {}
+    if args.optimize:
+        kwargs["optimize"] = True
+        if not getattr(args, "force", False) and args.repo:
+            cached = _verified_cached_recipe(args.repo)
+            if cached:
+                kwargs["cached_recipe"] = cached
+    if args.emulate_cpu:
+        kwargs["emulate_cpu"] = args.emulate_cpu
+    return kwargs
+
+
 def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
     """Set up the native container, run the command, then stop it.
 
@@ -1176,11 +1221,66 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
             max_attempts=args.max_attempts,
             verbose=args.verbose,
             package=args.package,
+            **_performance_kwargs(args),
         )
     finally:
         if ported:
             remove_native_repo(derive_repo_name(args.repo))
+            if args.optimize:
+                # The variant trees and accepted artifacts; the mirror
+                # keeps its copy.
+                remove_native_repo(derive_repo_name(args.repo) + ".opt")
         stop_native_container()
+
+
+def _run_probe(args: argparse.Namespace, native: bool) -> int:
+    """Probe the machine in the sandbox, print the result, and exit.
+
+    The probe only reads: /proc, /sys, compiler checks on stdin, and
+    test instructions in child processes.
+
+    Args:
+        args: The parsed command-line arguments.
+        native: True on the native target.
+
+    Returns:
+        0 when the probe ran, else 1.
+    """
+    from src.machine import describe, describe_rules, probe_machine
+
+    try:
+        if native:
+            if not setup_native_environment():
+                return 1
+        elif not setup_docker_environment():
+            return 1
+        if native and args.emulate_cpu:
+            print(
+                colored(
+                    "--emulate-cpu applies to QEMU runs only; it is "
+                    "ignored on the native target.",
+                    "yellow",
+                )
+            )
+        kind = "native" if native else "qemu"
+        profile, error = probe_machine(
+            kind, None if native else args.emulate_cpu
+        )
+        if profile is None:
+            print(colored(f"ERROR: the machine probe failed: {error}", "red"))
+            return 1
+        print(colored("\nMachine probe", "cyan", attrs=["bold"]))
+        for line in describe(profile) + describe_rules(profile):
+            print(f"   {line}")
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        path = os.path.join(OUTPUT_DIR, f"machine_profile_{kind}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(profile.to_dict(), handle, indent=2)
+        print(colored(f"   Profile saved: {path}", "green"))
+        return 0
+    finally:
+        if native:
+            stop_native_container()
 
 
 def save_porting_outputs(state: AgentState, output_dir: str) -> None:
@@ -1314,6 +1414,164 @@ def _package_tests_section(tests: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _machine_section(machine: Optional[Dict[str, Any]]) -> str:
+    """Render the machine probe of performance mode for the report."""
+    if not machine:
+        return ""
+    from src.machine import MachineProfile, describe, describe_rules
+
+    profile = MachineProfile.from_dict(machine)
+    lines = ["## Machine Profile", "", "```"]
+    lines += describe(profile) + describe_rules(profile)
+    lines += ["```", "", "---", "", ""]
+    return "\n".join(lines)
+
+
+def _variant_settings(variant: Dict[str, Any]) -> str:
+    """Return the flags and environment of one variant, for a table."""
+    parts = []
+    if variant.get("compiler"):
+        parts.append(variant["compiler"])
+    parts += [
+        flag for flag in variant.get("flags") or [] if "-fprofile" not in flag
+    ]
+    parts += [
+        f"{key}={value}"
+        for key, value in (variant.get("env") or {}).items()
+        if key not in ("CCACHE_DISABLE",)
+    ]
+    if variant.get("pgo"):
+        parts.append(f"PGO {variant['pgo']}")
+    return " ".join(parts).replace("|", "/")
+
+
+def _cell(text: Any, limit: int = 200) -> str:
+    """Return one markdown table cell: one line, no pipe characters."""
+    return " ".join(str(text or "").replace("|", "/").split())[:limit]
+
+
+def _optimization_section(
+    optimization: Optional[Dict[str, Any]],
+    machine: Optional[Dict[str, Any]],
+) -> str:
+    """Render the performance mode result (--optimize) for the report."""
+    if not optimization:
+        return ""
+    from src.workload import describe as describe_workload
+    from src.bench import Workload
+
+    from src.optimize import headline, tune_result
+
+    lines = ["## Performance Mode (--optimize)", ""]
+    lines.append(
+        f"**Optimized**: "
+        f"{optimization.get('headline') or headline(optimization)}  "
+    )
+    lines.append(
+        f"**Result**: {optimization.get('status', 'unknown')}: "
+        f"{optimization.get('reason') or 'N/A'}  "
+    )
+    if optimization.get("advice"):
+        lines.append(f"**Fix**: {optimization['advice']}  ")
+    if machine:
+        lines.append(
+            f"**Machine**: {machine.get('kind')}, {machine.get('label')}, "
+            f"core {machine.get('core_name') or 'unknown'}, misaligned "
+            f"access {machine.get('misaligned')} (source: "
+            f"{machine.get('misaligned_source') or 'none'})  "
+        )
+    package = optimization.get("package") or {}
+    if package:
+        libraries = ", ".join(package.get("libraries") or []) or "none"
+        programs = ", ".join(package.get("programs") or []) or "none"
+        lines.append(
+            f"**Package**: {package.get('kind')} ({package.get('language')}, "
+            f"{package.get('build_system')}); libraries: {libraries}; "
+            f"programs: {programs}  "
+        )
+    baseline = optimization.get("baseline") or {}
+    if baseline:
+        lines.append(
+            f"**Baseline**: the verified build, rebuilt in a copy in "
+            f"{baseline.get('build_seconds')}s; {baseline.get('same_code')} "
+            f"of {baseline.get('artifacts')} riscv64 artifacts have the "
+            "code of the verified build  "
+        )
+    workload = optimization.get("workload")
+    if workload:
+        lines.append(
+            f"**Workload**: {describe_workload(Workload.from_dict(workload))}"
+            "  "
+        )
+    if optimization.get("duration_seconds") is not None:
+        lines.append(
+            f"**Duration**: {optimization['duration_seconds']}s of "
+            f"{optimization.get('budget_seconds')}s  "
+        )
+    if optimization.get("accepted_dir"):
+        lines.append(
+            f"**Optimized artifacts**: `{optimization['accepted_dir']}`"
+        )
+    variants = optimization.get("variants") or []
+    if variants:
+        lines += [
+            "",
+            "| Tune | Technique | Settings | Result | Time ratio "
+            "(95% CI) | Details |",
+            "|---|---|---|---|---|---|",
+        ]
+        for record in variants:
+            variant = record.get("variant") or {}
+            comparison = (record.get("measurement") or {}).get(
+                "comparison"
+            ) or {}
+            ratio = record.get("ratio")
+            interval = (
+                f"{ratio} ({comparison['ci_low']}-{comparison['ci_high']})"
+                if ratio and comparison
+                else (ratio or "-")
+            )
+            check = record.get("second_check") or {}
+            details = record.get("reason") or ""
+            if check:
+                details += (
+                    f"; second check ({check.get('check')}): "
+                    f"{check.get('verdict')} {check.get('ratio') or ''}"
+                )
+            lines.append(
+                f"| {_cell(variant.get('label') or variant.get('vid'))} "
+                f"| {_cell(variant.get('technique') or '-')} "
+                f"| {_cell(_variant_settings(variant))} "
+                f"| {_cell(tune_result(record))} "
+                f"| {_cell(interval)} "
+                f"| {_cell(details, 300)} |"
+            )
+    for title, key in (("Warnings", "warnings"), ("Notes", "notes")):
+        items = optimization.get(key) or []
+        if items:
+            lines += ["", f"### {title}", ""]
+            lines += [f"- {item}" for item in items[:30]]
+    for name, source in ((workload or {}).get("files") or {}).items():
+        language = {"c++": "cpp"}.get(
+            (workload or {}).get("source_language") or "",
+            (workload or {}).get("source_language") or "",
+        )
+        lines += [
+            "",
+            f"### Workload source: `{name}`",
+            "",
+            f"```{language}",
+            str(source).rstrip(),
+            "```",
+        ]
+    lines += [
+        "",
+        "A time ratio below 1 means the tune ran faster than the "
+        "baseline. Only native runs measure time.",
+    ]
+    return "\n".join(lines) + "\n\n---\n\n"
+
+
 def generate_detailed_report(state: dict) -> str:
     """Generate a comprehensive detailed report."""
     tokens = (
@@ -1330,6 +1588,11 @@ def generate_detailed_report(state: dict) -> str:
             if verdict == "verified"
             else "SUCCESS, NOT VERIFIED (no riscv64 output proven)"
         )
+    optimization_text = _machine_section(
+        state.get("machine_profile")
+    ) + _optimization_section(
+        state.get("optimization"), state.get("machine_profile")
+    )
     report = f"""# RISC-V Porting Report: {state.get("repo_name", "Unknown")}
 
 ## Executive Summary
@@ -1361,7 +1624,7 @@ def generate_detailed_report(state: dict) -> str:
 {_package_tests_section(state.get("package_tests") or {})}
 ---
 
-## Build System Analysis
+{optimization_text}## Build System Analysis
 
 """
 
@@ -1498,11 +1761,75 @@ def generate_detailed_report(state: dict) -> str:
     return report
 
 
+def _optimize_follows(state: Any) -> bool:
+    """Return True when the graph runs optimize_node after finish_node."""
+    from src.graph import route_finish_to_next
+
+    return route_finish_to_next(state) == "optimize_node"
+
+
+def _tune_columns(variant: Dict[str, Any]) -> str:
+    """Return ``Tune-2   machine ISA   -march=...`` for one tune."""
+    label = variant.get("label") or variant.get("vid") or "?"
+    technique = variant.get("technique") or ""
+    value = variant.get("value") or variant.get("title") or ""
+    if len(value) > 34:
+        value = value[:31] + "..."
+    return f"{label:<7} {technique:<28} {value:<34}"
+
+
+def _print_optimization(optimization: Optional[Dict[str, Any]]) -> None:
+    """Print the performance mode result (--optimize) on the console.
+
+    The first line answers the question the user asked with
+    --optimize: did Atesor make a faster build, and by how much.
+    """
+    if not optimization:
+        return
+    from src.optimize import headline, tune_result
+
+    status = optimization.get("status")
+    accepted = optimization.get("accepted")
+    color = "green" if status == "accepted" else "yellow"
+    if status == "checked":
+        color = "white"
+    answer = optimization.get("headline") or headline(optimization)
+    print(colored(f"   Optimized: {answer}", color, attrs=["bold"]))
+    if status != "accepted" and optimization.get("reason"):
+        print(colored(f"     Why: {optimization['reason']}", color))
+    if optimization.get("advice"):
+        print(colored(f"     Fix: {optimization['advice']}", color))
+    for record in optimization.get("variants") or []:
+        variant = record.get("variant") or {}
+        mark = (
+            "  <- accepted"
+            if accepted and variant.get("vid") == accepted
+            else ""
+        )
+        print(
+            colored(
+                f"     {_tune_columns(variant)} {tune_result(record)}{mark}",
+                "white",
+            )
+        )
+    if optimization.get("accepted_dir"):
+        print(
+            colored(
+                f"   Optimized files: {optimization['accepted_dir']} "
+                "(with --package also in the zip under optimized/)",
+                "green",
+            )
+        )
+
+
 def run_agent(
     repo_url: str,
     max_attempts: int = 5,
     verbose: bool = False,
     package: bool = False,
+    optimize: bool = False,
+    emulate_cpu: Optional[str] = None,
+    cached_recipe: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run the RISC-V porting agent on a repository.
 
@@ -1514,6 +1841,11 @@ def run_agent(
             ``PACKAGES_DIR`` containing the recipe + source tree. Failure
             to package is treated as a fatal error (exit 2) when this is
             requested explicitly.
+        optimize: If True, run performance mode after a verified build.
+            It never changes the exit code of the port.
+        emulate_cpu: The QEMU_CPU model for performance mode under QEMU.
+        cached_recipe: A verified recipe-cache entry; the port builds
+            with it instead of planning again (performance mode).
 
     Returns:
         Exit code (0 for success, 1 for build failure, 2 for packaging failure)
@@ -1536,9 +1868,35 @@ def run_agent(
     print(colored(f"   Repository: {repo_url}", "white"))
     print(colored(f"   Max attempts: {max_attempts}", "white"))
     print(colored(f"   Platform:    {profile.display_name}", "white"))
+    if optimize:
+        model = f", QEMU_CPU={emulate_cpu}" if emulate_cpu else ""
+        print(
+            colored(
+                f"   Optimize:    yes, after a verified build{model}",
+                "white",
+            )
+        )
+    if cached_recipe:
+        verdict = cached_recipe.get("verification") or {}
+        commit = (verdict.get("source_commit") or "")[:12]
+        print(
+            colored(
+                f"   Recipe:      from the cache (verified run of "
+                f"{cached_recipe.get('last_built', '?')}"
+                + (f", commit {commit}" if commit else "")
+                + "); no new planning (--force plans again)",
+                "white",
+            )
+        )
     print(colored("-" * 60, "cyan"))
 
-    initial_state = create_initial_state(repo_url, max_attempts=max_attempts)
+    initial_state = create_initial_state(
+        repo_url,
+        max_attempts=max_attempts,
+        optimize=optimize,
+        emulate_cpu=emulate_cpu,
+        cached_recipe=cached_recipe,
+    )
     initial_state.messages = [
         HumanMessage(
             content=(
@@ -1558,12 +1916,13 @@ def run_agent(
         # tight for a full replan + multi-fix run and aborts with
         # GraphRecursionError; the real loop bound is max_attempts +
         # the cost cap, so give the graph generous headroom.
+        # The optimize step prints its header before it starts (see
+        # below), so its own update must not print a second one.
+        optimize_announced = False
         for output in app.stream(
             initial_state, config={"recursion_limit": 120}
         ):
             for node_name, state_update in output.items():
-                step_count += 1
-
                 # In LangGraph, state_update can be a dict of updates
                 if isinstance(state_update, dict):
                     # Update final_state fields from dict
@@ -1572,6 +1931,10 @@ def run_agent(
                             setattr(final_state, k, v)
                 elif isinstance(state_update, AgentState):
                     final_state = state_update
+
+                if node_name == "optimize_node" and optimize_announced:
+                    continue
+                step_count += 1
 
                 # Print progress
                 status = getattr(
@@ -1656,6 +2019,27 @@ def run_agent(
                         flush=True,
                     )
 
+                if node_name == "finish_node" and _optimize_follows(
+                    final_state
+                ):
+                    # The optimize step can take an hour and prints its
+                    # own lines, so its header goes first.
+                    step_count += 1
+                    optimize_announced = True
+                    logger.info(
+                        f"[Step {step_count}] optimize_node - Status: "
+                        "OPTIMIZING"
+                    )
+                    print(
+                        colored(
+                            f"\n[Step {step_count}] optimize_node",
+                            "cyan",
+                            attrs=["bold"],
+                        ),
+                        flush=True,
+                    )
+                    print(colored("   Status: OPTIMIZING", "cyan"), flush=True)
+
         # Save and print results
         logger.info("=" * 60)
 
@@ -1701,6 +2085,7 @@ def run_agent(
                         "white",
                     )
                 )
+            _print_optimization(final_state.optimization)
             logger.info(
                 f"Recipe generated at: "
                 f"{OUTPUT_DIR}/{final_state.repo_name}_recipe.md"
@@ -1741,6 +2126,12 @@ def run_agent(
                 platform_name = profile.name
                 if is_native():
                     platform_name += "-native"
+                optimization = final_state.optimization or {}
+                optimized_dir = None
+                if optimization.get("accepted"):
+                    optimized_dir = os.path.join(
+                        REPOS_DIR, f"{final_state.repo_name}.opt", "accepted"
+                    )
                 try:
                     if is_native():
                         # The build tree is on the machine. Copy its
@@ -1748,6 +2139,10 @@ def run_agent(
                         from src import mirror
 
                         mirror.pull(final_state.repo_name, force=True)
+                        if optimized_dir:
+                            mirror.pull(
+                                f"{final_state.repo_name}.opt", force=True
+                            )
                     zip_path = package_build(
                         repo_name=final_state.repo_name,
                         repo_path=repo_path,
@@ -1761,6 +2156,9 @@ def run_agent(
                         curated_artifacts=final_state.curated_artifacts,
                         container_repo_path=final_state.repo_path,
                         package_tests=final_state.package_tests,
+                        optimization=final_state.optimization,
+                        machine=final_state.machine_profile,
+                        optimized_dir=optimized_dir,
                     )
                 except Exception as exc:
                     logger.error("Packaging failed: %s", exc, exc_info=True)
@@ -2131,6 +2529,10 @@ def _main() -> int:
             "  atesor-ai --repo https://github.com/madler/zlib --verbose\n"
             "  atesor-ai --repo https://github.com/sqlite/sqlite "
             "--platform debian --package\n"
+            "  atesor-ai --repo https://github.com/madler/zlib "
+            "--target native --optimize\n"
+            "  atesor-ai --probe --target native"
+            "             # what the machine supports\n"
             "\n"
             "environment:\n"
             "  LLM_PROVIDER   gemini | openai | openrouter, plus the "
@@ -2138,6 +2540,10 @@ def _main() -> int:
             "  GIT_TOKEN      token for cloning private GitHub repos\n"
             "  ATESOR_HOME    runtime state dir "
             "(default: ~/.local/share/atesor-ai)\n"
+            "  ATESOR_OPTIMIZE_BUDGET  seconds for --optimize "
+            "(default: 3600)\n"
+            "  ATESOR_QEMU_CPU         QEMU_CPU model (env form of "
+            "--emulate-cpu)\n"
             "  Full list in .env-example; a .env in the current dir or\n"
             "  ~/.config/atesor-ai/ is loaded automatically.\n"
         ),
@@ -2181,6 +2587,26 @@ def _main() -> int:
     )
     porting.add_argument(
         "-v", "--verbose", action="store_true", help="show agent activity"
+    )
+
+    performance = parser.add_argument_group("performance")
+    performance.add_argument(
+        "--optimize",
+        action="store_true",
+        help="after a verified port, build and measure faster variants; "
+        "a verified cached recipe replaces the planning (--force plans "
+        "again)",
+    )
+    performance.add_argument(
+        "--emulate-cpu",
+        metavar="MODEL",
+        default=None,
+        help="QEMU_CPU model for --optimize/--probe under QEMU",
+    )
+    performance.add_argument(
+        "--probe",
+        action="store_true",
+        help="show what the machine supports and exit",
     )
 
     sandbox = parser.add_argument_group("sandbox")
@@ -2265,6 +2691,37 @@ def _main() -> int:
         print(config_report.render(paint=colored))
         return 1
     native = is_native()
+
+    # The model matters only for --optimize and --probe under QEMU. On
+    # native, only an explicit --emulate-cpu reaches the run, which then
+    # warns that it ignores it.
+    cli_model = args.emulate_cpu
+    if not (args.optimize or args.probe):
+        args.emulate_cpu = None
+    elif native:
+        args.emulate_cpu = cli_model
+    else:
+        args.emulate_cpu = _emulate_cpu_value(cli_model)
+    if args.emulate_cpu and not _EMULATE_CPU_RE.match(args.emulate_cpu):
+        source = "--emulate-cpu" if cli_model else "ATESOR_QEMU_CPU"
+        print(
+            colored(
+                f"ERROR: {source} {args.emulate_cpu!r} is not a QEMU CPU "
+                "model, for example rva22u64 or "
+                "'rv64i,m=true,a=true,f=true,d=true,c=true,zba=true'.",
+                "red",
+            )
+        )
+        return 1
+    if args.probe and args.repo:
+        print(
+            colored(
+                "ERROR: --probe runs alone. Remove --repo, or remove "
+                "--probe to port the repository.",
+                "red",
+            )
+        )
+        return 1
 
     if args.preflight:
         if not native:
@@ -2366,7 +2823,7 @@ def _main() -> int:
     )
 
     # Require repo URL before starting long-running setup or API checks
-    if not args.repo and not infra_only:
+    if not args.repo and not infra_only and not args.probe:
         print(colored("ERROR: --repo argument is required", "red"))
         parser.print_help()
         return 1
@@ -2381,7 +2838,15 @@ def _main() -> int:
     # neither API keys nor a running sandbox — it only rewrites the
     # recipe file from the cache — so check it BEFORE key validation
     # and Docker provisioning instead of paying for both first.
-    if args.repo and not args.setup_only and not args.force:
+    # --optimize needs a real build tree, so it skips this fast path;
+    # a verified cached recipe becomes its build plan instead
+    # (_performance_kwargs).
+    if (
+        args.repo
+        and not args.setup_only
+        and not args.force
+        and not args.optimize
+    ):
         from src.memory import get_cached_recipe, materialize_cached_recipe
 
         # The URL check stops a cache entry of another repository with
@@ -2480,6 +2945,12 @@ def _main() -> int:
         if not report.passed:
             return 1
 
+    # The probe needs the sandbox but no API key.
+    if args.probe:
+        if args.rebuild:
+            os.environ["REBUILD_IMAGE"] = "true"
+        return _run_probe(args, native)
+
     # API keys are only required when we are actually running the agent.
     if args.repo and not args.setup_only:
         if not check_keys():
@@ -2511,6 +2982,7 @@ def _main() -> int:
         max_attempts=args.max_attempts,
         verbose=args.verbose,
         package=args.package,
+        **_performance_kwargs(args),
     )
 
     return exit_code

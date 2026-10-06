@@ -24,7 +24,7 @@ import time
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -42,6 +42,7 @@ from .llm_helpers import (
 from .llm_logger import log_llm_call
 from .memory import (
     format_few_shot_examples,
+    record_optimization,
     save_learned_example,
     save_to_recipe_cache,
 )
@@ -4201,11 +4202,24 @@ def _detect_test_command(state: AgentState) -> Optional[tuple]:
     return None
 
 
-def _run_package_tests(state: AgentState) -> Dict[str, Any]:
+def _run_package_tests(
+    state: AgentState,
+    repo_path: Optional[str] = None,
+    extra_env: Optional[Dict[str, str]] = None,
+    detected: Optional[tuple] = None,
+) -> Dict[str, Any]:
     """Run the package's own test suite once and describe the outcome.
 
     Never raises: the phase must not turn a finished port into an
     escalation. The build status is not changed.
+
+    Args:
+        state: The run state.
+        repo_path: The tree to test; the port's tree by default.
+            Performance mode tests each variant tree.
+        extra_env: Extra environment for the test command, or None.
+        detected: ``(framework, command)`` to run instead of detecting
+            it, or None.
 
     Returns:
         A dict with ``status`` (passed, failed, timeout, skipped or
@@ -4219,7 +4233,7 @@ def _run_package_tests(state: AgentState) -> Dict[str, Any]:
                 "status": "skipped",
                 "reason": "disabled, or no time left in the run budget",
             }
-        detected = _detect_test_command(state)
+        detected = detected or _detect_test_command(state)
         if not detected:
             return {
                 "status": "skipped",
@@ -4232,7 +4246,10 @@ def _run_package_tests(state: AgentState) -> Dict[str, Any]:
         logger.info(f"Running package tests: {command} (<= {timeout}s)")
         started = time.time()
         result = execute_command(
-            command, cwd=state.repo_path, timeout=timeout
+            command,
+            cwd=repo_path or state.repo_path,
+            timeout=timeout,
+            extra_env=extra_env,
         )
         duration = round(time.time() - started, 1)
         output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
@@ -4408,6 +4425,258 @@ def finish_node(state: AgentState) -> AgentState:
 
 
 # ============================================================================
+# NODE: CACHED RECIPE (--optimize with a verified recipe-cache entry)
+# ============================================================================
+
+
+def _cached_purpose(recipe: Dict[str, Any], repo_name: str) -> str:
+    """Return the first sentence of the cached recipe's summary."""
+    text = str(recipe.get("recipe_markdown") or "")
+    match = re.search(r"#+\s*Executive Summary\s*\n+(.+)", text)
+    if not match:
+        return repo_name
+    sentence = re.split(r"(?<=\.)\s", match.group(1).strip())[0]
+    return sentence[:300] or repo_name
+
+
+@agent_node(AgentRole.PLANNER)
+def cached_recipe_node(state: AgentState) -> AgentState:
+    """Use a verified cached recipe as the build plan, without planning.
+
+    Performance mode needs a real build tree, so the port builds again.
+    The recipe of an earlier verified run replaces the analyst and the
+    scout: no planning LLM call. Its patches are applied first. When the
+    build fails anyway (the source moved on), the normal fixer and
+    re-plan loop takes over.
+    """
+    recipe = state.cached_recipe or {}
+    phases = []
+    for phase in (recipe.get("build_plan") or {}).get("phases") or []:
+        commands = [
+            str(command)
+            for command in phase.get("commands") or []
+            if str(command).strip()
+        ]
+        if commands:
+            phases.append(
+                BuildPhase(
+                    len(phases) + 1,
+                    str(phase.get("name") or f"phase{len(phases) + 1}"),
+                    commands,
+                )
+            )
+    if not phases:
+        logger.warning("The cached recipe has no command; planning again")
+        state.cached_recipe = None
+        return state
+    build_system = str(recipe.get("build_system") or "unknown")
+    built = recipe.get("last_built") or "an earlier run"
+    commit = (recipe.get("verification") or {}).get("source_commit")
+    state.build_plan = BuildPlan(
+        build_system=build_system,
+        build_system_confidence=1.0,
+        phases=phases,
+        total_estimated_duration=(
+            f"{recipe.get('build_duration_seconds', '?')}s (cached)"
+        ),
+        notes=[f"From the recipe cache: the verified run of {built}"],
+    )
+    artifacts = [
+        os.path.basename(str(item.get("path") or ""))
+        for item in recipe.get("artifacts") or []
+        if isinstance(item, dict) and item.get("path")
+    ]
+    state.package_analysis = PackageAnalysis(
+        purpose=_cached_purpose(recipe, state.repo_name),
+        language="unknown",
+        build_system=build_system,
+        build_system_confidence=1.0,
+        build_system_reasoning="recipe cache: a verified earlier run",
+        dependencies=[
+            {"name": str(name), "reason": "recipe cache"}
+            for name in (recipe.get("dependencies") or [])[:15]
+        ],
+        riscv_risks=[],
+        build_strategy="build with the cached recipe",
+        expected_artifacts=[name for name in artifacts if name][:10],
+        needs_custom_plan=False,
+        complexity=1,
+        llm_grounded=False,
+    )
+    applied = 0
+    patches = [str(patch) for patch in recipe.get("patches") or []]
+    for patch in patches:
+        if apply_patch(patch, cwd=state.repo_path, use_docker=True):
+            applied += 1
+            state.patches_generated.append(patch)
+        else:
+            logger.warning("A cached patch did not apply; the build decides")
+    head = execute_command(
+        ["git", "-C", state.repo_path, "rev-parse", "HEAD"],
+        timeout=60,
+        validate=False,
+    )
+    head_commit = (head.stdout or "").strip() if head.success else ""
+    note = (
+        f"Recipe from the cache (verified run of {built}): "
+        f"{sum(len(p.commands) for p in phases)} commands in "
+        f"{len(phases)} phases"
+        + (f", {applied} of {len(patches)} patches applied" if patches else "")
+    )
+    if commit and head_commit and head_commit != commit:
+        note += (
+            f"; the recipe was verified on commit {commit[:12]}, and the "
+            f"source is now at {head_commit[:12]}"
+        )
+    logger.info(note)
+    state.context_cache["cached_recipe_note"] = note
+    state.log_scripted_op("cached_recipe")
+    return state
+
+
+# ============================================================================
+# NODE: OPTIMIZE (performance mode, --optimize)
+# ============================================================================
+
+
+# A harness is a whole source file: a free coder model can need more
+# than the default wall time to write one.
+OPTIMIZER_CODE_TIMEOUT = 240
+
+
+def _llm_name(llm: Any) -> str:
+    return getattr(llm, "model_name", None) or getattr(llm, "model", "")
+
+
+def _optimizer_agent(
+    state: AgentState,
+) -> Callable[
+    [str, str, Callable[[Dict[str, Any]], Optional[str]]],
+    Tuple[Optional[Dict[str, Any]], str],
+]:
+    """Return the optimizer agent: one validated LLM question per call.
+
+    A harness is code, so the builder's (coder) model writes it, with
+    :data:`OPTIMIZER_CODE_TIMEOUT`; the planner's model chooses a
+    program run. When no model of the role answers in time, the other
+    role's models get the question once. Every call goes through
+    ``llm_call_with_validation``: the reply must be JSON and pass the
+    caller's check, with critique retries and model fallbacks.
+    """
+
+    def ask(
+        phase: str,
+        prompt: str,
+        check: Callable[[Dict[str, Any]], Optional[str]],
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        code = phase.startswith("harness")
+        role = AgentRole.BUILDER if code else AgentRole.PLANNER
+        other = AgentRole.PLANNER if code else AgentRole.BUILDER
+        pool = get_model_pool_for_role(role)
+
+        def validator(data: Dict[str, Any]) -> ValidationResult:
+            problem = check(data)
+            if problem:
+                return ValidationResult.bad(problem)
+            return ValidationResult.good()
+
+        def call(models: List[Any]) -> Any:
+            outcome = llm_call_with_validation(
+                invoke_fn=invoke_llm,
+                llm=models[0],
+                fallback_llms=models[1:],
+                prompt=prompt,
+                validator=validator,
+                fallback_factory=None,
+                role="optimizer",
+                audit_metadata={
+                    "repo": state.repo_name,
+                    "phase": f"optimize-{phase}",
+                },
+                max_retries=2,
+                timeout=OPTIMIZER_CODE_TIMEOUT if code else LLM_WALL_TIMEOUT,
+                rotate_on_timeout=True,
+            )
+            state.log_api_call(
+                cost=outcome.cost_usd,
+                tokens_in=outcome.input_tokens,
+                tokens_out=outcome.output_tokens,
+                calls=outcome.attempts,
+            )
+            return outcome
+
+        outcome = call(pool)
+        if outcome.data is None and "timed out" in (outcome.last_error or ""):
+            # No model of the role answered in time: the other role's
+            # models get the question once.
+            names = {_llm_name(llm) or id(llm) for llm in pool}
+            spare = [
+                llm for llm in get_model_pool_for_role(other)
+                if (_llm_name(llm) or id(llm)) not in names
+            ]
+            if spare:
+                outcome = call(spare)
+        return outcome.data, outcome.last_error
+
+    return ask
+
+
+def _optimize_progress(message: str) -> None:
+    """Print one line of the optimize step; the step can take an hour."""
+    # The console shows only errors unless --verbose, so a long silent
+    # step would look stuck.
+    print(f"   {message}", flush=True)
+    logger.info(f"Optimize: {message}")
+
+
+@agent_node(AgentRole.SUPERVISOR)
+def optimize_node(state: AgentState) -> AgentState:
+    """Build, check and measure optimized variants (``--optimize``).
+
+    The verified baseline stays the result of the port. Nothing here
+    raises: an error goes into ``state.optimization``, so the
+    agent_node wrapper never escalates a finished port.
+    """
+    from .optimize import run_optimization
+
+    state.current_phase = "optimizing"
+    baseline = state.package_tests or {}
+    detected = None
+    if baseline.get("command"):
+        detected = (baseline.get("framework"), baseline["command"])
+
+    def run_tests(
+        tree: str, extra_env: Optional[Dict[str, str]]
+    ) -> Optional[Dict[str, Any]]:
+        if not detected:
+            return None
+        return _run_package_tests(
+            state, repo_path=tree, extra_env=extra_env, detected=detected
+        )
+
+    try:
+        state.optimization = run_optimization(
+            state,
+            agent=_optimizer_agent(state),
+            run_tests=run_tests,
+            progress=_optimize_progress,
+        )
+    except Exception as exc:  # performance mode never fails a port
+        logger.exception(f"Optimization stopped: {exc}")
+        state.optimization = {
+            "status": "error",
+            "reason": f"{type(exc).__name__}: {exc}"[:300],
+            "variants": [],
+        }
+    # Native measured results only; the call never raises.
+    record_optimization(
+        state.repo_name, state.optimization, state.machine_profile
+    )
+    state.current_phase = "finished"
+    return state
+
+
+# ============================================================================
 # ROUTING FUNCTION
 # ============================================================================
 
@@ -4419,6 +4688,15 @@ def finish_node(state: AgentState) -> AgentState:
 # (or a list of Send() for fan-out). No string-phase indirection.
 
 
+def route_finish_to_next(state: AgentState) -> str:
+    """After finish: run performance mode when --optimize asked for it."""
+    # optimize_node itself skips a port that is not verified, so the
+    # report always says why no variant was built.
+    if state.optimize_requested:
+        return "optimize_node"
+    return END
+
+
 def route_init_to_next(state: AgentState) -> str:
     """After init: go to the analyst, or escalate if init failed."""
     # ESCALATED means init_node crashed (agent_node wrapper). The clone
@@ -4426,6 +4704,15 @@ def route_init_to_next(state: AgentState) -> str:
     if state.build_status in (BuildStatus.FAILED, BuildStatus.ESCALATED):
         logger.warning("Initialization failed; forcing escalation")
         return "escalate_node"
+    if state.cached_recipe:
+        return "cached_recipe_node"
+    return "analyst_node"
+
+
+def route_cached_recipe_to_next(state: AgentState) -> str:
+    """After the cached recipe: build it, or plan as usual without one."""
+    if state.build_plan:
+        return "supervisor_node"
     return "analyst_node"
 
 
@@ -5042,6 +5329,7 @@ def create_workflow() -> StateGraph:
                                                        (LLM plan) │
         supervisor ──→ build_fix_subgraph (subgraph) ────→ supervisor
         supervisor ──→ finish_node ──→ END
+                       finish_node ──→ optimize_node ──→ END (--optimize)
         supervisor ──→ escalate_node ──→ END
         supervisor ──→ analyst_node (re-analyze)
         supervisor ──→ scout_node (error-aware re-scout)
@@ -5053,6 +5341,8 @@ def create_workflow() -> StateGraph:
 
     # --- Nodes ---
     workflow.add_node("init_node", init_node)
+    # --optimize with a verified cached recipe: that recipe is the plan.
+    workflow.add_node("cached_recipe_node", cached_recipe_node)
     # LLM "understand" step: reads real build files/docs, produces the
     # PackageAnalysis consumed by every downstream node.
     workflow.add_node("analyst_node", analyst_node)
@@ -5066,17 +5356,33 @@ def create_workflow() -> StateGraph:
     # Terminal nodes
     workflow.add_node("finish_node", finish_node)
     workflow.add_node("escalate_node", escalate_node)
+    # Performance mode after a finished port (--optimize)
+    workflow.add_node("optimize_node", optimize_node)
 
     # --- Entry point ---
     workflow.set_entry_point("init_node")
 
     # --- Edges ---
 
-    # init → analyst (or escalate)
+    # init → analyst (or the cached recipe, or escalate)
     workflow.add_conditional_edges(
         "init_node",
         route_init_to_next,
-        {"analyst_node": "analyst_node", "escalate_node": "escalate_node"},
+        {
+            "analyst_node": "analyst_node",
+            "cached_recipe_node": "cached_recipe_node",
+            "escalate_node": "escalate_node",
+        },
+    )
+
+    # Cached recipe → supervisor (build it); no usable recipe → analyst
+    workflow.add_conditional_edges(
+        "cached_recipe_node",
+        route_cached_recipe_to_next,
+        {
+            "supervisor_node": "supervisor_node",
+            "analyst_node": "analyst_node",
+        },
     )
 
     # analyst → heuristic plan (or escalate)
@@ -5116,8 +5422,13 @@ def create_workflow() -> StateGraph:
     # Build-fix subgraph exits back to supervisor for re-evaluation
     workflow.add_edge("build_fix_subgraph", "supervisor_node")
 
-    # Terminals
-    workflow.add_edge("finish_node", END)
+    # Terminals; --optimize adds the performance step after finish.
+    workflow.add_conditional_edges(
+        "finish_node",
+        route_finish_to_next,
+        {"optimize_node": "optimize_node", END: END},
+    )
+    workflow.add_edge("optimize_node", END)
     workflow.add_edge("escalate_node", END)
 
     compiled = workflow.compile()

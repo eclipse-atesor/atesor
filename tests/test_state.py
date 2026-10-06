@@ -86,6 +86,21 @@ class TestInitialState(unittest.TestCase):
         )
         self.assertEqual(state.max_attempts, 12)
 
+    def test_performance_mode_fields(self) -> None:
+        """--optimize and --emulate-cpu reach the state; off by default."""
+        plain = create_initial_state("https://github.com/foo/bar")
+        self.assertFalse(plain.optimize_requested)
+        self.assertIsNone(plain.emulate_cpu)
+        self.assertIsNone(plain.optimization)
+        self.assertIsNone(plain.machine_profile)
+        state = create_initial_state(
+            "https://github.com/foo/bar",
+            optimize=True,
+            emulate_cpu="rva22u64",
+        )
+        self.assertTrue(state.optimize_requested)
+        self.assertEqual(state.emulate_cpu, "rva22u64")
+
     def test_history_collections_are_independent_instances(self) -> None:
         """Regression: mutable defaults must use field(default_factory)."""
         s1 = create_initial_state("https://github.com/a/b")

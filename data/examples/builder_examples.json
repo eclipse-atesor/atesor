@@ -218,64 +218,6 @@
       "reasoning": "CMake needs build/ directory for out-of-source builds. Use -j$(nproc) for parallel compilation."
     },
     {
-      "name": "Auto: airixss build execution",
-      "tags": [
-        "go",
-        "airixss"
-      ],
-      "build_system": "go",
-      "repo_name": "airixss",
-      "phases": [
-        {
-          "name": "setup",
-          "commands": [
-            "apt-get update && apt-get install -y --no-install-recommends build-essential"
-          ]
-        },
-        {
-          "name": "build",
-          "commands": [
-            "cd /workspace/repos/airixss && go build -buildvcs=false -o airixss airixss.go"
-          ]
-        }
-      ],
-      "timeout_recommendation": "120s",
-      "reasoning": "Auto-learned build execution from airixss.",
-      "id": "builder-auto-095",
-      "source": "auto",
-      "timestamp": "2026-06-17",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: axel build execution",
-      "tags": [
-        "autotools",
-        "axel"
-      ],
-      "build_system": "autotools",
-      "repo_name": "axel",
-      "phases": [
-        {
-          "name": "setup",
-          "commands": [
-            "apt-get update && apt-get install -y --no-install-recommends build-essential autoconf automake libtool pkg-config libcurl4-openssl-dev libssl-dev zlib1g-dev"
-          ]
-        },
-        {
-          "name": "build",
-          "commands": [
-            "cp /usr/share/gettext/m4/*.m4 m4/ 2>/dev/null || true && aclocal -I m4 -I /usr/share/aclocal && autoconf"
-          ]
-        }
-      ],
-      "timeout_recommendation": "120s",
-      "reasoning": "Auto-learned build execution from axel.",
-      "id": "builder-auto-095",
-      "source": "auto",
-      "timestamp": "2026-06-17",
-      "sandbox": "debian-riscv64"
-    },
-    {
       "name": "Auto: allxfr build execution",
       "tags": [
         "go",
@@ -3078,6 +3020,76 @@
       "source": "auto",
       "timestamp": "2026-07-02",
       "sandbox": "debian-riscv64"
+    },
+    {
+      "name": "Auto: zstd build execution",
+      "tags": [
+        "cmake",
+        "zstd"
+      ],
+      "build_system": "cmake",
+      "repo_name": "zstd",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends build-essential cmake"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd build && cmake --build . -- -j$(nproc)"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from zstd.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-109",
+      "source": "auto",
+      "timestamp": "2026-10-03"
+    },
+    {
+      "name": "Auto: xz build execution",
+      "tags": [
+        "cmake",
+        "xz"
+      ],
+      "build_system": "cmake",
+      "repo_name": "xz",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends build-essential cmake libc6-dev"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DXZ_NLS=OFF"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd build && make -j$(nproc)"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from xz.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-110",
+      "source": "auto",
+      "timestamp": "2026-10-03"
     }
   ]
 }

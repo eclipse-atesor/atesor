@@ -20,6 +20,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Core build essentials only. Project-specific libs (libpng-dev, gfortran,
 # libprotobuf-dev, etc.) are installed on demand by the agent.
+# clang-19, lld-19, llvm-19 (llvm-profdata-19) and libclang-rt-19-dev
+# serve --optimize: a second compiler to compare with GCC, its PGO tool,
+# and the profile runtime that clang PGO and --coverage builds link.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -38,6 +41,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patch \
     diffutils \
     ccache \
+    clang-19 \
+    lld-19 \
+    llvm-19 \
+    libclang-rt-19-dev \
     zlib1g-dev \
     libssl-dev \
     python3 \
@@ -64,6 +71,12 @@ ARG RUST_TOOLCHAIN=1.90.0
 ARG RUSTUP_VERSION=1.28.2
 ARG RUSTUP_SHA256=09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100d165c98a8fd7a7
 # SHA256 source: https://static.rust-lang.org/rustup/archive/1.28.2/riscv64gc-unknown-linux-gnu/rustup-init.sha256
+# On the Megrez, rustup sometimes stops with "failed to extract package:
+# lzma data error" on a component whose checksum passed, each time on a
+# different component. The host xz decodes the same file without error.
+# rustup rolls back after the error, so a new attempt starts clean.
+# RUSTUP_IO_THREADS=1 keeps the error visible: the threaded unpacker
+# hides it behind a RecvError panic (rust-lang/rustup#2926).
 RUN mkdir -p /opt/atesor-downloads \
     && curl -fsSL \
         "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/riscv64gc-unknown-linux-gnu/rustup-init" \
@@ -71,9 +84,14 @@ RUN mkdir -p /opt/atesor-downloads \
     && echo "${RUSTUP_SHA256}  /opt/atesor-downloads/rustup-init" \
         | sha256sum -c - \
     && chmod +x /opt/atesor-downloads/rustup-init \
-    && /opt/atesor-downloads/rustup-init -y \
-        --profile minimal \
-        --default-toolchain ${RUST_TOOLCHAIN} \
+    && for attempt in 1 2 3; do \
+           RUSTUP_IO_THREADS=1 /opt/atesor-downloads/rustup-init -y \
+               --profile minimal \
+               --default-toolchain ${RUST_TOOLCHAIN} \
+           && break; \
+           [ "$attempt" -lt 3 ] || exit 1; \
+           echo "rustup-init failed (attempt $attempt of 3); trying again"; \
+       done \
     && /root/.cargo/bin/rustc --version \
     && /root/.cargo/bin/cargo --version \
     && rm -f /opt/atesor-downloads/rustup-init

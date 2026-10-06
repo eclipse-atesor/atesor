@@ -363,6 +363,20 @@ class AgentState:
     # duration and the output tail. None until finish_node runs it.
     package_tests: Optional[Dict[str, Any]] = None
 
+    # ========== Performance mode (--optimize) ==========
+    # Set from the CLI. optimize_node runs only when optimize_requested
+    # is True; emulate_cpu is the QEMU_CPU model for QEMU runs.
+    optimize_requested: bool = False
+    emulate_cpu: Optional[str] = None
+    # A verified recipe-cache entry for this package (--optimize only):
+    # cached_recipe_node turns it into the build plan, so the port
+    # builds again without the planning LLM calls.
+    cached_recipe: Optional[Dict[str, Any]] = None
+    # The machine probe (MachineProfile.to_dict) and the optimization
+    # record (src.optimize.run_optimization). None until optimize_node.
+    machine_profile: Optional[Dict[str, Any]] = None
+    optimization: Optional[Dict[str, Any]] = None
+
     # ========== Debugging & Audit ==========
     audit_trail: List[Dict[str, Any]] = field(default_factory=list)
     current_agent: Optional[AgentRole] = None
@@ -646,8 +660,22 @@ def derive_repo_name(repo_url: str) -> str:
     return sanitize_repo_name(basename)
 
 
-def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
+def create_initial_state(
+    repo_url: str,
+    max_attempts: int = 5,
+    optimize: bool = False,
+    emulate_cpu: Optional[str] = None,
+    cached_recipe: Optional[Dict[str, Any]] = None,
+) -> AgentState:
     """Create initial state for a new porting task.
+
+    Args:
+        repo_url: The repository URL.
+        max_attempts: Fix attempts before escalation.
+        optimize: True to run performance mode after a verified build.
+        emulate_cpu: The QEMU_CPU model for performance mode under QEMU.
+        cached_recipe: A verified recipe-cache entry to build from
+            instead of planning again (performance mode), or None.
 
     Raises:
         ValueError: If ``repo_url`` is not a plain http(s) URL. URLs
@@ -669,6 +697,9 @@ def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
         repo_name=repo_name,
         repo_path=f"/workspace/repos/{repo_name}",
         max_attempts=max_attempts,
+        optimize_requested=optimize,
+        emulate_cpu=emulate_cpu,
+        cached_recipe=cached_recipe,
     )
 
 

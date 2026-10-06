@@ -244,6 +244,84 @@ def _manifest_artifacts(
     return entries
 
 
+_MACHINE_KEYS = (
+    "kind",
+    "emulated_cpu",
+    "label",
+    "extensions",
+    "vlen",
+    "core_name",
+    "misaligned",
+    "kernel",
+    "libc",
+)
+
+
+def _optimization_manifest(
+    optimization: Dict[str, Any],
+    optimized_dir: Optional[str],
+) -> tuple:
+    """Return the manifest section of performance mode and its files.
+
+    The accepted variant's artifacts go in the zip under
+    ``optimized/``, next to the verified baseline. Symlinks and paths
+    that leave ``optimized_dir`` are skipped.
+
+    Returns:
+        ``(section, [(host_path, arcname), ...])``.
+    """
+    files: List[tuple] = []
+    entries: List[Dict[str, Any]] = []
+    if optimized_dir and os.path.isdir(optimized_dir):
+        base = os.path.realpath(optimized_dir)
+        for rel in optimization.get("accepted_artifacts") or []:
+            host = os.path.realpath(os.path.join(optimized_dir, rel))
+            if not host.startswith(base + os.sep):
+                continue
+            path = os.path.join(optimized_dir, rel)
+            if os.path.isfile(path) and not os.path.islink(path):
+                arcname = f"optimized/{rel}"
+                files.append((path, arcname))
+                entries.append(
+                    {"path_in_zip": arcname, "sha256": _sha256(path)}
+                )
+    variants = optimization.get("variants") or []
+    accepted = next(
+        (
+            record.get("variant")
+            for record in variants
+            if (record.get("variant") or {}).get("vid")
+            == optimization.get("accepted")
+        ),
+        None,
+    )
+    workload = optimization.get("workload") or {}
+    section = {
+        "status": optimization.get("status"),
+        "kind": optimization.get("kind"),
+        "reason": optimization.get("reason"),
+        "workload": workload.get("description"),
+        "workload_mode": workload.get("mode"),
+        "workload_origin": workload.get("origin"),
+        "accepted": optimization.get("accepted"),
+        "accepted_label": optimization.get("accepted_label"),
+        "accepted_ratio": optimization.get("accepted_ratio"),
+        "accepted_variant": accepted,
+        "artifacts": entries,
+        "variants": [
+            {
+                "vid": (record.get("variant") or {}).get("vid"),
+                "label": (record.get("variant") or {}).get("label"),
+                "technique": (record.get("variant") or {}).get("technique"),
+                "verdict": record.get("verdict"),
+                "ratio": record.get("ratio"),
+            }
+            for record in variants
+        ],
+    }
+    return section, files
+
+
 def package_build(
     repo_name: str,
     repo_path: str,
@@ -257,6 +335,9 @@ def package_build(
     curated_artifacts: Optional[List[Dict[str, Any]]] = None,
     container_repo_path: Optional[str] = None,
     package_tests: Optional[Dict[str, Any]] = None,
+    optimization: Optional[Dict[str, Any]] = None,
+    machine: Optional[Dict[str, Any]] = None,
+    optimized_dir: Optional[str] = None,
 ) -> str:
     """Produce a zip artifact for a successful build.
 
@@ -285,6 +366,13 @@ def package_build(
         package_tests: The non-gating package test result
             (``AgentState.package_tests``); its summary goes in the
             manifest.
+        optimization: The performance mode record
+            (``AgentState.optimization``), or None. When it is given,
+            the manifest has schema version 3 with ``machine`` and
+            ``optimization`` sections; otherwise it stays version 2.
+        machine: The machine profile (``AgentState.machine_profile``).
+        optimized_dir: Host directory with the accepted variant's
+            artifacts (``<repo>.opt/accepted``), or None.
 
     Returns:
         Absolute path to the created zip file.
@@ -352,6 +440,17 @@ def package_build(
         "source_root_in_zip": repo_name,
         "logs_in_zip": [],
     }
+    optimized_files: List[tuple] = []
+    if optimization:
+        # Schema 3 adds the two sections; a run without --optimize
+        # keeps writing schema 2.
+        manifest["schema_version"] = 3
+        manifest["machine"] = {
+            key: (machine or {}).get(key) for key in _MACHINE_KEYS
+        }
+        manifest["optimization"], optimized_files = _optimization_manifest(
+            optimization, optimized_dir
+        )
 
     # Resolve which optional logs are actually present on disk. We log
     # (don't fail) when a caller hands us a missing path — the most
@@ -388,6 +487,8 @@ def package_build(
                 "manifest.json", json.dumps(manifest, indent=2) + "\n"
             )
             for host_path, arcname in logs_to_add:
+                zf.write(host_path, arcname=arcname)
+            for host_path, arcname in optimized_files:
                 zf.write(host_path, arcname=arcname)
             files_added, symlinks_skipped = _add_repo_tree(
                 zf, repo_path, arc_root=repo_name

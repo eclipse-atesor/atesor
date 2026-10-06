@@ -108,6 +108,42 @@ class TestRateLimitHandling(unittest.TestCase):
         self.assertTrue(out.used_fallback)
         self.assertIn("free-model quota exhausted", out.last_error)
 
+    def test_timeout_rotates_only_when_asked(self) -> None:
+        """rotate_on_timeout moves on; the last model's timeout ends it."""
+        models = []
+
+        def run(responses, **kwargs):
+            invoke, calls = _make_invoke(responses)
+
+            def recording(llm, messages, timeout=120):
+                models.append((llm.model_name, timeout))
+                return invoke(llm, messages, timeout)
+
+            with mock.patch("src.llm_helpers.log_llm_call"):
+                out = llm_call_with_validation(
+                    invoke_fn=recording,
+                    llm=SimpleNamespace(model_name="primary"),
+                    fallback_llms=[SimpleNamespace(model_name="backup")],
+                    prompt="p",
+                    validator=lambda d: ValidationResult.good(),
+                    timeout=240,
+                    **kwargs,
+                )
+            return out, calls["n"]
+
+        late = TimeoutError("LLM call timed out after 240s")
+        out, n = run([late, '{"x": 1}'], rotate_on_timeout=True)
+        self.assertEqual((out.data, n), ({"x": 1}, 2))
+        self.assertEqual(models, [("primary", 240), ("backup", 240)])
+        models.clear()
+        out, n = run([late, late, '{"x": 1}'], rotate_on_timeout=True)
+        self.assertEqual((out.data, n), (None, 2))
+        self.assertIn("timed out", out.last_error)
+        models.clear()
+        out, n = run([late, '{"x": 1}'])
+        self.assertEqual(out.data, {"x": 1})
+        self.assertEqual(models, [("primary", 240), ("primary", 240)])
+
     def test_short_retry_after_sleeps_and_retries_same_model(self) -> None:
         """A short Retry-After waits once instead of rotating."""
         err = RuntimeError(
