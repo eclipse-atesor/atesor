@@ -14,12 +14,15 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
     """The decorator retries on rate-limit errors with backoff."""
 
     def _make_node(self, side_effects):
-        """Make node."""
+        """Return a SCOUT node that replays ``side_effects``, and a counter.
+
+        Each call takes the next effect: an exception is raised, and any
+        other value becomes ``state.current_phase``.
+        """
         calls = {"n": 0}
 
         @agent_node(AgentRole.SCOUT)
         def node(state):
-            """Node."""
             calls["n"] += 1
             eff = side_effects[calls["n"] - 1]
             if isinstance(eff, Exception):
@@ -30,7 +33,6 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
         return node, calls
 
     def test_rate_limit_then_success_returns_normal_state(self) -> None:
-        """Test rate limit then success returns normal state."""
         node, calls = self._make_node(
             [RuntimeError("Rate limit exceeded"), "scouting"]
         )
@@ -45,7 +47,6 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
         self.assertLess(first_wait, 45)
 
     def test_three_rate_limits_then_escalate(self) -> None:
-        """Test three rate limits then escalate."""
         node, calls = self._make_node(
             [
                 RuntimeError("429 Too Many Requests"),
@@ -63,7 +64,6 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
         self.assertEqual(calls["n"], 3)
 
     def test_backoff_doubles_each_retry(self) -> None:
-        """Test backoff doubles each retry."""
         node, _ = self._make_node(
             [
                 RuntimeError("rate limit"),
@@ -81,7 +81,6 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
         self.assertLess(calls[1], 75)
 
     def test_all_rate_limit_terms_recognised(self) -> None:
-        """Test all rate limit terms recognised."""
         terms = [
             "rate limit",
             "429 too many",
@@ -101,14 +100,14 @@ class TestAgentNodeRateLimitRetry(unittest.TestCase):
 
 
 class TestAgentNodeGenericError(unittest.TestCase):
-    """Generic exceptions escalate; they don't bubble."""
+    """Generic exceptions escalate; they don't bubble.
+
+    The class also checks that the wrapper sets ``current_agent``.
+    """
 
     def test_runtime_error_escalates(self) -> None:
-        """Test runtime error escalates."""
-
         @agent_node(AgentRole.BUILDER)
         def node(state) -> None:
-            """Node."""
             raise ValueError("kaboom — invalid foo")
 
         state = create_initial_state("https://x/y.git")
@@ -116,15 +115,11 @@ class TestAgentNodeGenericError(unittest.TestCase):
         self.assertEqual(out.build_status, BuildStatus.ESCALATED)
         self.assertEqual(out.current_phase, "escalate")
         self.assertIn("kaboom", out.last_error)
-        # Error should be recorded
         self.assertTrue(len(out.error_history) >= 1)
 
     def test_exception_does_not_propagate(self) -> None:
-        """Test exception does not propagate."""
-
         @agent_node(AgentRole.FIXER)
         def node(state) -> None:
-            """Node."""
             raise KeyError("missing 'plan'")
 
         try:
@@ -133,13 +128,11 @@ class TestAgentNodeGenericError(unittest.TestCase):
             self.fail(f"agent_node should swallow exceptions, got {e!r}")
         self.assertEqual(out.current_phase, "escalate")
 
-    def test_current_agent_set_before_invocation(self):
-        """Test current agent set before invocation."""
+    def test_current_agent_set_before_invocation(self) -> None:
         captured = {}
 
         @agent_node(AgentRole.PLANNER)
         def node(state):
-            """Node."""
             captured["role"] = state.current_agent
             return state
 

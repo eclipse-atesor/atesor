@@ -1,7 +1,9 @@
 # Atesor AI - RISC-V Porting Sandbox
-# 
-# This Dockerfile creates a native RISC-V 64-bit development environment using Alpine Linux.
-# It uses QEMU user-mode emulation via Docker's multi-platform support (binfmt_misc).
+#
+# Native riscv64 build environment on Alpine Linux (musl). Under the qemu
+# target the image runs emulated via binfmt_misc; on the native target the
+# alpine platform keeps this same Dockerfile and runs it on real riscv64
+# hardware.
 
 # Base image: Alpine Linux for RISC-V 64-bit. The name is fully
 # qualified, because podman on a native machine may have no short-name
@@ -11,7 +13,9 @@ FROM docker.io/library/alpine:latest
 LABEL maintainer="Atesor AI"
 LABEL description="Minimal RISC-V 64-bit sandbox for automated software porting"
 
-# Install essentials for building and analysis
+# Shared build toolchain and frequently needed libraries. Package-specific
+# dependencies are installed by the agent at run time, so this layer stays
+# stable and cacheable.
 RUN apk add --no-cache \
     build-base \
     cmake \
@@ -50,7 +54,9 @@ RUN apk add --no-cache \
     util-linux \
     coreutils
 
-# Install Go from the official riscv64 tarball instead of `apk add go`.
+# Go toolchain: pinned and checksum-verified from the official riscv64
+# tarball, not `apk add go`. The distro package floats with the Alpine
+# release, so image rebuilds would silently change the compiler.
 ARG GO_VERSION=1.26.5
 ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
 # SHA256 source: https://go.dev/dl/?mode=json&include=all
@@ -80,30 +86,36 @@ RUN apk add --no-cache rustup \
     && /root/.cargo/bin/rustc --version \
     && /root/.cargo/bin/cargo --version
 
-# Set up environment variables for native compilation inside the sandbox
+# Compile natively inside the sandbox; Atesor never cross-compiles.
 ENV CC=gcc
 ENV CXX=g++
-# Go environment: use direct proxy to avoid network issues in isolated containers
 ENV GOPATH=/root/go
 ENV PATH="${CARGO_HOME}/bin:${GOPATH}/bin:/usr/local/go/bin:${PATH}"
+# Fetch modules through the proxy to avoid network issues in isolated
+# containers.
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GONOSUMCHECK=*
+# -buildvcs=false: builds run as root, and Go's VCS stamping would trip
+# git's repository ownership check.
 ENV GOFLAGS=-buildvcs=false
 # Pin the bundled toolchain hard: never let `go` auto-download a newer
 # version mid-build, because such downloads regularly OOM-kill (exit 137)
 # under QEMU emulation and produce empty stderr that masks the real error.
 ENV GOTOOLCHAIN=local
 
-# Set up workspace structure matching the agent's expectations
+# The agent's path constants (src/config.py) expect this layout in the
+# container.
 WORKDIR /workspace
 RUN mkdir -p /workspace/repos /workspace/output /workspace/logs /workspace/patches
 
-# Volume for persistent output
+# An anonymous volume: each new container gets a new, empty one. The host
+# process writes recipes and reports to `OUTPUT_DIR` (src/config.py).
 VOLUME /workspace/output
 
-# Health check to ensure the environment is ready
+# Health check: a working gcc stands in for the whole toolchain.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD gcc --version || exit 1
 
-# Keep container running for the agent to connect and execute commands
+# Idle forever; the agent drives builds with `docker exec` (native target:
+# `podman exec` over SSH).
 CMD ["tail", "-f", "/dev/null"]

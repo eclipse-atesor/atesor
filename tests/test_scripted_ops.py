@@ -11,6 +11,7 @@ import os
 import tempfile
 import textwrap
 import unittest
+from typing import Iterator
 from unittest import mock
 
 import pytest
@@ -18,11 +19,10 @@ import pytest
 from src.scripted_ops import ScriptedOperations, quick_analysis
 from src.state import CommandResult
 
-# ---------- helpers ----------
+# Helpers
 
 
 def _write(root, rel, content=""):
-    """Write."""
     p = os.path.join(root, rel)
     (
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -35,7 +35,7 @@ def _write(root, rel, content=""):
 
 
 @pytest.fixture
-def repo():
+def repo() -> Iterator[str]:
     """Create a repository-local temporary repo tree."""
     scratch_root = os.path.abspath(
         os.path.join("workspace", "test_scripted_ops")
@@ -62,36 +62,34 @@ def _empty_execute(cmd, **kwargs):
     return _command_result(cmd)
 
 
-# ---------- Build system detection ----------
+# Build system detection
 
 
 class TestDetectBuildSystem:
-    """Tests for DetectBuildSystem."""
+    """Tests for build-system detection."""
 
-    def test_no_build_files_returns_unknown(self, repo) -> None:
-        """Test no build files returns unknown."""
+    def test_no_build_files_returns_unknown(self, repo: str) -> None:
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "unknown"
         assert info.confidence == 0.0
 
-    def test_cmake_wins_when_marker_present(self, repo) -> None:
-        """Test cmake wins when marker present."""
+    def test_cmake_wins_when_marker_present(self, repo: str) -> None:
         _write(repo, "CMakeLists.txt", "project(foo)\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "cmake"
         assert info.confidence >= 0.9
         assert info.primary_file == "CMakeLists.txt"
 
-    def test_cmake_wins_over_makefile_when_both_present(self, repo) -> None:
-        # cmake gets 0.95, make gets ~0.3 → cmake wins
-        """Test cmake wins over makefile when both present."""
+    def test_cmake_wins_over_makefile_when_both_present(
+        self, repo: str
+    ) -> None:
+        # CMakeLists.txt scores 0.95 against Makefile's 0.3.
         _write(repo, "CMakeLists.txt", "project(foo)\n")
         _write(repo, "Makefile", "all:\n\techo hi\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "cmake"
 
-    def test_cargo_detected(self, repo) -> None:
-        """Test cargo detected."""
+    def test_cargo_detected(self, repo: str) -> None:
         _write(
             repo, "Cargo.toml", '[package]\nname = "foo"\nversion = "0.1.0"\n'
         )
@@ -99,80 +97,75 @@ class TestDetectBuildSystem:
         assert info.type == "cargo"
         assert info.confidence >= 0.9
 
-    def test_go_detected(self, repo) -> None:
-        """Test go detected."""
+    def test_go_detected(self, repo: str) -> None:
         _write(repo, "go.mod", "module foo\ngo 1.21\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "go"
 
-    def test_go_in_subdirectory_falls_back(self, repo) -> None:
-        # No top-level go.mod, but a subdir has one
-        """Test go in subdirectory falls back."""
+    def test_go_in_subdirectory_falls_back(self, repo: str) -> None:
         os.makedirs(os.path.join(repo, "src/sub"))
         _write(repo, "src/sub/go.mod", "module foo\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "go"
         assert info.module_dir.endswith("src/sub")
 
-    def test_vendor_go_mod_is_not_primary_build_system(self, repo) -> None:
-        """Vendored go.mod files must not make a C repo look like Go."""
+    def test_vendor_go_mod_is_not_primary_build_system(
+        self, repo: str
+    ) -> None:
         _write(repo, "src/main.c", "int main(void) { return 0; }\n")
         _write(repo, "vendor/tool/go.mod", "module vendored\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "unknown"
 
-    def test_legitimate_nested_go_mod_is_still_primary(self, repo) -> None:
-        """Non-vendored nested go.mod files remain build roots."""
+    def test_legitimate_nested_go_mod_is_still_primary(
+        self, repo: str
+    ) -> None:
         _write(repo, "cmd/tool/go.mod", "module example.com/tool\n")
         _write(repo, "cmd/tool/main.go", "package main\nfunc main() {}\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "go"
         assert info.module_dir == "cmd/tool"
 
-    def test_third_party_cargo_is_not_primary_build_system(self, repo) -> None:
-        """third_party Cargo.toml files must not make a C repo Rust."""
+    def test_third_party_cargo_is_not_primary_build_system(
+        self, repo: str
+    ) -> None:
         _write(repo, "src/main.c", "int main(void) { return 0; }\n")
         _write(repo, "third_party/rust/Cargo.toml", "[package]\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "unknown"
 
-    def test_legitimate_nested_cargo_is_still_primary(self, repo) -> None:
-        """Non-vendored nested Cargo.toml files remain build roots."""
+    def test_legitimate_nested_cargo_is_still_primary(self, repo: str) -> None:
         _write(repo, "rust/Cargo.toml", "[package]\nname = 'app'\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "cargo"
         assert info.module_dir == "rust"
 
-    def test_gopath_style_go_without_mod_detected(self, repo) -> None:
-        """Test GOPATH-style Go repo is detected as Go."""
+    def test_gopath_style_go_without_mod_detected(self, repo: str) -> None:
         _write(repo, "cmd/tool/main.go", "package main\nfunc main() {}\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "go"
         assert info.confidence >= 0.6
 
-    def test_autotools_detected(self, repo) -> None:
-        """Test autotools detected."""
+    def test_autotools_detected(self, repo: str) -> None:
         _write(repo, "configure.ac", "AC_INIT(foo, 1.0)\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
         assert info.type == "autotools"
         assert info.confidence >= 0.9
 
-    def test_meson_detected(self, repo) -> None:
-        """Test meson detected."""
+    def test_meson_detected(self, repo: str) -> None:
         _write(repo, "meson.build", "project('foo', 'c')\n")
         info = ScriptedOperations(repo).detect_build_system(repo)
-        # meson uses lower-confidence (+0.3) heuristic but should win alone
+        # meson.build scores only 0.3 but wins as the sole marker.
         assert info.type == "meson"
 
 
-# ---------- Dependency extraction ----------
+# Dependency extraction
 
 
 class TestExtractDependencies:
-    """Tests for ExtractDependencies."""
+    """Tests for dependency extraction."""
 
-    def test_cmake_finds_find_package_calls(self, repo) -> None:
-        """Test cmake finds find package calls."""
+    def test_cmake_finds_find_package_calls(self, repo: str) -> None:
         _write(
             repo,
             "CMakeLists.txt",
@@ -190,8 +183,9 @@ class TestExtractDependencies:
         assert deps.install_method == "apk"
         assert "cmake" in deps.build_tools
 
-    def test_cmake_uses_nested_build_root_for_dependencies(self, repo) -> None:
-        """Nested CMake dependency extraction reads module_dir."""
+    def test_cmake_uses_nested_build_root_for_dependencies(
+        self, repo: str
+    ) -> None:
         _write(repo, "CMakeLists.txt", "project(root)\n")
         _write(
             repo,
@@ -215,8 +209,7 @@ class TestExtractDependencies:
         assert "gtk+-3.0" in deps.libraries
         assert "boost-dev" in deps.system_packages
 
-    def test_cargo_extracts_dependencies(self, repo) -> None:
-        """Test cargo extracts dependencies."""
+    def test_cargo_extracts_dependencies(self, repo: str) -> None:
         _write(
             repo,
             "Cargo.toml",
@@ -234,8 +227,7 @@ class TestExtractDependencies:
         assert set(deps.libraries) == {"serde", "tokio"}
         assert "cargo" in deps.build_tools
 
-    def test_python_extracts_requirements(self, repo) -> None:
-        """Test python extracts requirements."""
+    def test_python_extracts_requirements(self, repo: str) -> None:
         _write(
             repo,
             "requirements.txt",
@@ -249,8 +241,7 @@ class TestExtractDependencies:
         deps = ScriptedOperations(repo)._extract_python_dependencies(repo)
         assert set(deps.libraries) == {"requests", "numpy", "click"}
 
-    def test_npm_extracts_both_dep_buckets(self, repo) -> None:
-        """Test npm extracts both dep buckets."""
+    def test_npm_extracts_both_dep_buckets(self, repo: str) -> None:
         _write(
             repo,
             "package.json",
@@ -265,8 +256,7 @@ class TestExtractDependencies:
         deps = ScriptedOperations(repo)._extract_npm_dependencies(repo)
         assert set(deps.libraries) == {"express", "jest"}
 
-    def test_go_mod_extracts_require_lines(self, repo) -> None:
-        """Test go mod extracts require lines."""
+    def test_go_mod_extracts_require_lines(self, repo: str) -> None:
         _write(
             repo,
             "go.mod",
@@ -282,35 +272,30 @@ class TestExtractDependencies:
         assert "github.com/spf13/cobra" in deps.libraries
         assert "golang.org/x/sys" in deps.libraries
 
-    def test_missing_file_returns_empty_deps(self, repo) -> None:
-        """Test missing file returns empty deps."""
+    def test_missing_file_returns_empty_deps(self, repo: str) -> None:
         deps = ScriptedOperations(repo)._extract_cmake_dependencies(repo)
         assert deps.libraries == []
 
 
-# ---------- find_go_main_package ----------
+# find_go_main_package
 
 
 class TestFindGoMainPackage:
-    """Tests for FindGoMainPackage."""
+    """Tests for find_go_main_package."""
 
-    def test_no_go_files_returns_empty(self, repo) -> None:
-        """Test no go files returns empty."""
+    def test_no_go_files_returns_empty(self, repo: str) -> None:
         info = ScriptedOperations(repo).find_go_main_package(repo)
         assert info["has_main"] is False
         assert info["has_go_mod"] is False
         assert info["needs_go_init"] is False
 
-    def test_gopath_style_repo_needs_init(self, repo) -> None:
-        # .go files but no go.mod
-        """Test gopath style repo needs init."""
+    def test_gopath_style_repo_needs_init(self, repo: str) -> None:
         _write(repo, "main.go", "package main\nfunc main() {}\n")
         info = ScriptedOperations(repo).find_go_main_package(repo)
         assert info["needs_go_init"] is True
         assert info["has_main"] is True
 
-    def test_simple_root_main(self, repo) -> None:
-        """Test simple root main."""
+    def test_simple_root_main(self, repo: str) -> None:
         _write(repo, "go.mod", "module foo\n")
         _write(repo, "main.go", "package main\nfunc main() {}\n")
         info = ScriptedOperations(repo).find_go_main_package(repo)
@@ -319,9 +304,9 @@ class TestFindGoMainPackage:
         assert info["main_path"] == "."
         assert info["build_command"] == "go build ."
 
-    def test_cmd_reponame_beats_root_main(self, repo) -> None:
-        # repo basename matters for scoring
-        """Test cmd reponame beats root main."""
+    def test_cmd_reponame_beats_root_main(self, repo: str) -> None:
+        # The fixture names the repo "myapp" because the cmd/<repo
+        # basename> match outranks a root main in scoring.
         app_repo = os.path.join(repo, "myapp")
         os.makedirs(app_repo)
         _write(app_repo, "go.mod", "module myapp\n")
@@ -335,8 +320,7 @@ class TestFindGoMainPackage:
         assert info["main_path"] == "cmd/myapp"
         assert info["build_command"] == "go build ./cmd/myapp"
 
-    def test_cmd_test_dir_demoted(self, repo) -> None:
-        """Test cmd test dir demoted."""
+    def test_cmd_test_dir_demoted(self, repo: str) -> None:
         app_repo = os.path.join(repo, "myapp")
         os.makedirs(app_repo)
         _write(app_repo, "go.mod", "module myapp\n")
@@ -347,18 +331,17 @@ class TestFindGoMainPackage:
         )
         _write(app_repo, "main.go", "package main\nfunc main() {}\n")
         info = ScriptedOperations(repo).find_go_main_package(app_repo)
-        # root main (score 3) > cmd/test-runner (score 1)
+        # root main (score 6) beats the test-penalized cmd/test-runner (2)
         assert info["main_path"] == "."
 
 
-# ---------- quick_analysis integration ----------
+# quick_analysis integration
 
 
 class TestQuickAnalysis:
-    """Tests for QuickAnalysis."""
+    """Tests for quick_analysis."""
 
-    def test_runs_on_simple_cmake_repo(self, repo) -> None:
-        """Test runs on simple cmake repo."""
+    def test_runs_on_simple_cmake_repo(self, repo: str) -> None:
         _write(repo, "CMakeLists.txt", "project(foo)\nfind_package(ZLIB)\n")
         _write(repo, "main.c", "int main(){return 0;}\n")
         with mock.patch(
@@ -370,8 +353,7 @@ class TestQuickAnalysis:
         assert "ZLIB" in result["dependencies"].libraries
         assert isinstance(result["file_tree"], str)
 
-    def test_gopath_style_go_exposes_go_main_info(self, repo) -> None:
-        """Test quick analysis keeps Go context for repos without go.mod."""
+    def test_gopath_style_go_exposes_go_main_info(self, repo: str) -> None:
         _write(repo, "main.go", "package main\nfunc main() {}\n")
         with mock.patch(
             "src.scripted_ops.execute_command",
@@ -386,7 +368,7 @@ class TestQuickAnalysis:
 class TestArchitectureScan:
     """Tests for deterministic architecture portability scanning."""
 
-    def test_detects_common_riscv_blockers(self, repo) -> None:
+    def test_detects_common_riscv_blockers(self, repo: str) -> None:
         """Scan reports headers, flags, asm, Go constraints, and autotools."""
         _write(repo, "src/simd.c", "#include <immintrin.h>\n")
         _write(
@@ -417,8 +399,7 @@ class TestArchitectureScan:
         assert all(finding.file != "" for finding in findings)
         assert all(finding.suggested_fix for finding in findings)
 
-    def test_arch_scan_skips_vendored_dirs(self, repo) -> None:
-        """Vendored source does not produce architecture warnings."""
+    def test_arch_scan_skips_vendored_dirs(self, repo: str) -> None:
         _write(repo, "vendor/lib/simd.c", "#include <immintrin.h>\n")
         _write(repo, "third_party/lib/Makefile", "CFLAGS=-mavx2\n")
 
@@ -428,7 +409,7 @@ class TestArchitectureScan:
 
         assert findings == []
 
-    def test_go_fallback_files_are_not_blockers(self, repo) -> None:
+    def test_go_fallback_files_are_not_blockers(self, repo: str) -> None:
         """A `!amd64` file or a riscv64 file is a fallback, not a blocker."""
         _write(repo, "a/fast_amd64.go", "package a\n")
         _write(repo, "a/slow.go", "//go:build !amd64\n\npackage a\n")
@@ -443,9 +424,9 @@ class TestArchitectureScan:
         assert "go_build_constraints" not in by_type
         assert "go_arch_files" not in by_type
 
-    def test_go_files_that_skip_riscv64_are_blockers(self, repo) -> None:
+    def test_go_files_that_skip_riscv64_are_blockers(self, repo: str) -> None:
         """Tags and names that exclude riscv64 give no fallback."""
-        # +build: space is OR, comma is AND; neither line holds on riscv64.
+        # +build: space is OR, comma is AND; no option holds on riscv64.
         _write(
             repo,
             "a/legacy.go",
@@ -477,22 +458,20 @@ class TestArchitectureScan:
         assert ("go_arch_files", "d/fast_amd64.go") in flagged
 
 
-# ---------- Path translation ----------
+# Path translation
 
 
 class TestPathTranslation:
-    """Tests for PathTranslation."""
+    """Tests for host/container path translation."""
 
     def test_to_host_path_translates_workspace(self) -> None:
         """Translate a /workspace path to the host root outside Docker."""
         ops = ScriptedOperations()
         # /workspace/repos/foo -> {WORKSPACE_ROOT}/repos/foo on host
         out = ops._to_host_path("/workspace/repos/foo")
-        # When not running inside Docker, /workspace becomes WORKSPACE_ROOT
         assert out.endswith("/repos/foo")
 
     def test_to_host_path_passes_through_other_paths(self) -> None:
-        """Test to host path passes through other paths."""
         ops = ScriptedOperations()
         assert ops._to_host_path("/tmp/x") == "/tmp/x"
         assert ops._to_host_path("/workspaces/x") == "/workspaces/x"
@@ -501,25 +480,22 @@ class TestPathTranslation:
         )
 
 
-# ---------- Homepage → git URL resolution ----------
+# Homepage → git URL resolution
 
 
 class TestResolveHomepageToGitUrls:
     """Tests for ScriptedOperations._resolve_homepage_to_git_urls."""
 
     def _ops(self) -> ScriptedOperations:
-        """Helper: build a ScriptedOperations bound to a tmp workspace."""
         return ScriptedOperations()
 
     def test_gnu_homepage_maps_to_savannah(self) -> None:
-        """`gnu.org/software/wget/` -> savannah `wget.git`."""
         got = self._ops()._resolve_homepage_to_git_urls(
             "https://www.gnu.org/software/wget/", "wget"
         )
         assert got == ["https://git.savannah.gnu.org/git/wget.git"]
 
     def test_gnu_homepage_without_trailing_slash(self) -> None:
-        """`gnu.org/software/grep` (no slash) also resolves."""
         got = self._ops()._resolve_homepage_to_git_urls(
             "http://www.gnu.org/software/grep", "grep"
         )
@@ -533,41 +509,35 @@ class TestResolveHomepageToGitUrls:
         assert got == ["https://git.savannah.gnu.org/git/gawk.git"]
 
     def test_yorhel_maps_to_blicky(self) -> None:
-        """`dev.yorhel.nl` -> `code.blicky.net/yorhel/<name>.git`."""
         got = self._ops()._resolve_homepage_to_git_urls(
             "https://dev.yorhel.nl", "ncdu"
         )
         assert got == ["https://code.blicky.net/yorhel/ncdu.git"]
 
     def test_generic_github_url_yields_no_rewrite(self) -> None:
-        """Regular GitHub URLs have no homepage rewrite."""
         got = self._ops()._resolve_homepage_to_git_urls(
             "https://github.com/foo/bar", "bar"
         )
         assert got == []
 
 
-# ---------- Container-health precheck ----------
+# Container-health precheck
 
 
 class TestEnsureContainerHealthy:
     """Tests for ScriptedOperations._ensure_container_healthy."""
 
     def test_git_missing_triggers_install(self, stub_execute_command) -> None:
-        """Missing git in container -> profile.install_cmd(['git']) runs."""
         from src.state import CommandResult
 
         calls: list = []
 
         def fake(cmd, **kwargs):
-            """Fake."""
             calls.append(cmd)
-            # First probe: git --version fails with 127
             if isinstance(cmd, list) and cmd == ["git", "--version"]:
                 return CommandResult(
                     "git --version", 127, "", "git: not found", 0.0
                 )
-            # Install command succeeds
             return CommandResult(str(cmd), 0, "installed", "", 0.0)
 
         stub_execute_command("src.scripted_ops", fake)
@@ -581,13 +551,11 @@ class TestEnsureContainerHealthy:
     def test_healthy_container_makes_only_probes(
         self, stub_execute_command
     ) -> None:
-        """A working sandbox runs only the read-only probes, no install."""
         from src.state import CommandResult
 
         calls: list = []
 
         def fake(cmd, **kwargs):
-            """Fake."""
             calls.append(cmd)
             return CommandResult(str(cmd), 0, "", "", 0.0)
 
@@ -600,26 +568,22 @@ class TestEnsureContainerHealthy:
             isinstance(c, list) and c[:2] == ["git", "--version"]
             for c in calls
         )
-        # No install command
         assert not any(isinstance(c, str) and "install" in c for c in calls)
 
 
-# ---------- Submodule init after clone ----------
+# Submodule init after clone
 
 
 class TestInitSubmodulesIfPresent:
     """Tests for ScriptedOperations._init_submodules_if_present."""
 
     def test_no_gitmodules_is_no_op(self, stub_execute_command) -> None:
-        """When ``.gitmodules`` is absent, no submodule call is made."""
         from src.state import CommandResult
 
         calls: list = []
 
         def fake(cmd, **kwargs):
-            """Fake."""
             calls.append(cmd)
-            # test -f returns non-zero when the file doesn't exist
             if isinstance(cmd, str) and cmd.startswith("test -f"):
                 return CommandResult(cmd, 1, "", "", 0.0)
             return CommandResult(str(cmd), 0, "", "", 0.0)
@@ -629,7 +593,6 @@ class TestInitSubmodulesIfPresent:
             "/workspace/repos/foo"
         )
 
-        # test -f check ran, but no submodule command should follow.
         assert any(isinstance(c, str) and "test -f" in c for c in calls)
         assert not any(
             isinstance(c, str) and "submodule update" in c for c in calls
@@ -638,13 +601,11 @@ class TestInitSubmodulesIfPresent:
     def test_gitmodules_triggers_submodule_init(
         self, stub_execute_command
     ) -> None:
-        """When ``.gitmodules`` exists, git submodule update runs."""
         from src.state import CommandResult
 
         calls: list = []
 
         def fake(cmd, **kwargs):
-            """Fake."""
             calls.append(cmd)
             return CommandResult(str(cmd), 0, "", "", 0.0)
 
@@ -667,12 +628,12 @@ class TestCloneResetsExistingRepo:
     a syntactically-invalid Makefile) or half-applied patches; ``git
     pull`` alone preserves them, causing every subsequent run to replay
     the same failure. See src/scripted_ops.py::clone_or_update_repository.
+    An existing clone with a different ``origin`` must be cloned again.
     """
 
     def test_existing_repo_runs_fetch_reset_and_clean(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When the clone directory exists, fetch+reset+clean must run."""
         from src.state import CommandResult
 
         # Pretend the .git directory exists so we hit the "exists" branch.
@@ -725,7 +686,7 @@ class TestCloneResetsExistingRepo:
         )
 
     def test_existing_repo_origin_mismatch_reclones(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A basename collision must delete and clone the requested URL."""
         from src.state import CommandResult
@@ -841,13 +802,11 @@ class TestNativeRepoChecks:
         assert any("git reset --hard" in str(c) for c in commands)
 
     def test_missing_clone_is_cloned(self, stub_execute_command) -> None:
-        """No .git folder on the machine selects a fresh clone."""
         commands = self._clone(stub_execute_command, exists=False)
         assert ["test", "-e", "/workspace/repos/bar/.git"] in commands
         assert any("git clone" in str(c) for c in commands)
 
     def test_container_path_refreshes_the_mirror(self) -> None:
-        """A host read of a repository path copies the repository first."""
         ops = ScriptedOperations("/tmp/atesor-test-ws")
         with mock.patch("src.scripted_ops.refresh_mirror") as refresh:
             host = ops._to_host_path("/workspace/repos/bar/Makefile")
@@ -889,7 +848,6 @@ class TestScriptedOpsCloneHelpers(unittest.TestCase):
     """Tests for clone helper methods and auth environment handling."""
 
     def test_init_reraises_workspace_permission_errors(self) -> None:
-        """Re-raise PermissionError when workspace dirs cannot be made."""
         with mock.patch(
             "src.scripted_ops.os.makedirs",
             side_effect=PermissionError("denied"),
@@ -898,7 +856,6 @@ class TestScriptedOpsCloneHelpers(unittest.TestCase):
                 ScriptedOperations("workspace/no-access")
 
     def test_github_auth_env_uses_token_only_for_github(self) -> None:
-        """Inject bearer auth only for HTTPS GitHub clone URLs."""
         ops = ScriptedOperations()
         with mock.patch.dict(
             os.environ,
@@ -917,7 +874,6 @@ class TestScriptedOpsCloneHelpers(unittest.TestCase):
         self.assertEqual(other_env, {})
 
     def test_git_env_merges_thread_local_auth_overlay(self) -> None:
-        """Merge fail-fast git settings with per-clone auth settings."""
         ops = ScriptedOperations()
         ops._auth_tls.env = {"GIT_CONFIG_COUNT": "1"}
         try:
@@ -929,7 +885,6 @@ class TestScriptedOpsCloneHelpers(unittest.TestCase):
         self.assertEqual(env["GIT_CONFIG_COUNT"], "1")
 
     def test_build_clone_cmd_rejects_non_http_and_quotes_path(self) -> None:
-        """Reject unsafe schemes and quote the destination path."""
         ops = ScriptedOperations()
         with self.assertRaises(ValueError):
             ops._build_clone_cmd("git@github.com:foo/bar.git", "/workspace/r")
@@ -943,7 +898,6 @@ class TestScriptedOpsCloneHelpers(unittest.TestCase):
         self.assertIn("'/workspace/repos/space name'", cmd)
 
     def test_is_auth_error_matches_known_messages(self) -> None:
-        """Classify common credential failures as auth errors."""
         ops = ScriptedOperations()
         auth_result = _command_result(
             "git clone",
@@ -964,7 +918,6 @@ class TestScriptedOpsUrlVariants(_RepoBackedTestCase):
     """Tests for URL variant clone fallback generation."""
 
     def test_try_url_variants_rejects_unsafe_inputs(self) -> None:
-        """Reject unsafe repository names and non-HTTP URLs."""
         ops = self._ops()
         with self.assertRaises(ValueError):
             ops._try_url_variants("https://example.com/repo", "../repo")
@@ -972,7 +925,6 @@ class TestScriptedOpsUrlVariants(_RepoBackedTestCase):
             ops._try_url_variants("ssh://example.com/repo", "repo")
 
     def test_try_url_variants_appends_git_and_returns_success(self) -> None:
-        """Clone from an appended .git URL when the variant works."""
         calls = []
 
         def fake_execute(cmd, **kwargs):
@@ -1032,8 +984,6 @@ class TestScriptedOpsUrlVariants(_RepoBackedTestCase):
     def test_try_url_variants_returns_none_when_all_variants_fail(
         self,
     ) -> None:
-        """Return None after every generated clone variant fails."""
-
         def fake_execute(cmd, **kwargs):
             """Fail git clone calls and allow cleanup calls."""
             if isinstance(cmd, list) and cmd[:2] == ["git", "clone"]:
@@ -1053,7 +1003,7 @@ class TestScriptedOpsUrlVariants(_RepoBackedTestCase):
 
 
 class TestScriptedOpsContainerHealth(unittest.TestCase):
-    """Tests for container health checks that are fully mocked."""
+    """Tests for the container health precheck and submodule init, mocked."""
 
     def test_debian_precheck_cleans_broken_apt_sources(self) -> None:
         """Remove recent apt sources and retry when apt update is broken."""
@@ -1121,7 +1071,6 @@ class TestScriptedOpsContainerHealth(unittest.TestCase):
             ScriptedOperations()._ensure_container_healthy()
 
     def test_submodule_init_warning_is_non_fatal(self) -> None:
-        """Continue when submodule initialization fails."""
         calls = []
 
         def fake_execute(cmd, **kwargs):
@@ -1154,7 +1103,6 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
             ops._clone_or_update_inner("file:///repo", "repo")
 
     def test_existing_repo_reclones_when_reset_fails(self) -> None:
-        """Delete and re-clone an existing repo when fetch/reset fails."""
         ops = self._ops()
         git_dir = os.path.join(ops.repos_dir, "bar", ".git")
         os.makedirs(git_dir)
@@ -1203,7 +1151,6 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
         init_submodules.assert_called_once_with("/workspace/repos/bar")
 
     def test_new_clone_retries_without_token_after_auth_error(self) -> None:
-        """Retry a public clone without bearer auth after auth failure."""
         ops = self._ops()
         clone_envs = []
 
@@ -1247,7 +1194,6 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
         self.assertEqual(getattr(ops._auth_tls, "env", {}), {})
 
     def test_new_clone_uses_successful_url_variant(self) -> None:
-        """Use a clone result from URL variants after the raw URL fails."""
         ops = self._ops()
         variant = _command_result("variant clone")
 
@@ -1287,7 +1233,6 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
     def test_new_clone_returns_original_failure_when_variants_fail(
         self,
     ) -> None:
-        """Return the direct clone failure if no URL variant succeeds."""
         ops = self._ops()
 
         def fake_execute(cmd, **kwargs):
@@ -1317,10 +1262,9 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
 
 
 class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
-    """Tests for build-system detection branches not covered above."""
+    """Tests for detection branches, path translation, and repo info."""
 
     def test_to_container_path_translates_workspace_paths(self) -> None:
-        """Translate this workspace root to the in-container prefix."""
         ops = self._ops()
         host_path = os.path.join(self.workspace, "repos", "pkg")
 
@@ -1336,7 +1280,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
     def test_score_go_subdir_counts_cmd_dir_and_ignores_read_errors(
         self,
     ) -> None:
-        """Score cmd markers and tolerate unreadable Go files."""
         _write(self.repo, "source.go", "package main\n")
         os.makedirs(os.path.join(self.repo, "cmd"))
         ops = self._ops()
@@ -1347,8 +1290,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(score, 8)
 
     def test_repository_info_collects_successful_git_values(self) -> None:
-        """Collect commit, branch, and file count from mocked commands."""
-
         def fake_execute(cmd, **kwargs):
             """Return command-specific repository metadata."""
             if "rev-parse HEAD" in cmd:
@@ -1371,7 +1312,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         )
 
     def test_has_npm_build_script_handles_valid_and_invalid_json(self) -> None:
-        """Detect npm build scripts and tolerate malformed package JSON."""
         ops = self._ops()
         missing = ops._has_npm_build_script(self.repo)
         _write(
@@ -1391,7 +1331,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertFalse(wrong_shape)
 
     def test_npm_detection_requires_lockfile_or_build_script(self) -> None:
-        """Ignore package.json without npm build evidence."""
         plain_repo = os.path.join(self.workspace, "plain")
         locked_repo = os.path.join(self.workspace, "locked")
         scripted_repo = os.path.join(self.workspace, "scripted")
@@ -1413,7 +1352,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(ops.detect_build_system(scripted_repo).type, "npm")
 
     def test_detects_subdirectory_cargo_module(self) -> None:
-        """Detect Cargo.toml below the repository root."""
         _write(self.repo, "crates/tool/Cargo.toml", "[package]\nname='tool'\n")
 
         info = self._ops().detect_build_system(self.repo)
@@ -1423,7 +1361,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(info.module_dir, "crates/tool")
 
     def test_detects_nested_build_root_and_sets_module_dir(self) -> None:
-        """Use a nested CMakeLists.txt as the primary build root."""
         _write(self.repo, "tests/Makefile", "all:\n\ttrue\n")
         _write(self.repo, "src/CMakeLists.txt", "project(nested)\n")
 
@@ -1434,7 +1371,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(info.module_dir, "src")
 
     def test_detects_configure_with_lower_autotools_confidence(self) -> None:
-        """Treat an executable configure script as autotools evidence."""
         _write(self.repo, "configure", "#!/bin/sh\n")
 
         info = self._ops().detect_build_system(self.repo)
@@ -1443,7 +1379,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(info.confidence, 0.85)
 
     def test_detect_build_system_skips_git_directory_contents(self) -> None:
-        """Ignore build markers that live inside .git directories."""
         _write(self.repo, ".git/go.mod", "module hidden\n")
 
         info = self._ops().detect_build_system(self.repo)
@@ -1470,7 +1405,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(info.confidence, 0.5)
 
     def test_gopath_library_repo_uses_go_wildcard_primary_file(self) -> None:
-        """Detect Go files without package main as GOPATH-style Go."""
         _write(self.repo, "lib.go", "package lib\n")
 
         info = self._ops().detect_build_system(self.repo)
@@ -1480,7 +1414,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
         self.assertEqual(info.confidence, 0.65)
 
     def test_find_nested_build_root_handles_non_dirs_and_depth(self) -> None:
-        """Return None for non-directories and respect max_depth."""
         ops = self._ops()
         _write(self.repo, "too/deep/CMakeLists.txt", "project(deep)\n")
 
@@ -1490,7 +1423,6 @@ class TestScriptedOpsDetectionBranches(_RepoBackedTestCase):
     def test_find_nested_build_root_prefers_shallow_authoritative_file(
         self,
     ) -> None:
-        """Prefer the shallowest and strongest nested build marker."""
         _write(self.repo, "b/Makefile", "all:\n\ttrue\n")
         _write(self.repo, "a/CMakeLists.txt", "project(a)\n")
         _write(self.repo, "a/plugin/meson.build", "project('plugin')\n")
@@ -1506,7 +1438,6 @@ class TestScriptedOpsDependencyBranches(_RepoBackedTestCase):
     def test_extract_dependencies_dispatches_supported_build_systems(
         self,
     ) -> None:
-        """Dispatch public extraction to every supported private parser."""
         _write(self.repo, "CMakeLists.txt", "find_package(PNG)\n")
         _write(self.repo, "Cargo.toml", "[dependencies]\nserde = '1'\n")
         _write(self.repo, "requirements.txt", "requests==2\n")
@@ -1536,7 +1467,6 @@ class TestScriptedOpsDependencyBranches(_RepoBackedTestCase):
         self.assertEqual(unknown_deps.libraries, [])
 
     def test_extractors_handle_missing_and_malformed_files(self) -> None:
-        """Return defaults or warnings for missing and malformed manifests."""
         ops = self._ops()
         cargo_deps = ops._extract_cargo_dependencies(self.repo)
         npm_deps = ops._extract_npm_dependencies(self.repo)
@@ -1554,7 +1484,6 @@ class TestScriptedOpsDependencyBranches(_RepoBackedTestCase):
     def test_go_dependencies_parse_block_requirements_and_deduplicate(
         self,
     ) -> None:
-        """Parse go.mod block and single-line require forms."""
         _write(
             self.repo,
             "go.mod",
@@ -1576,7 +1505,6 @@ class TestScriptedOpsDependencyBranches(_RepoBackedTestCase):
         self.assertEqual(deps.libraries, ["example.com/a", "example.com/b"])
 
     def test_make_dependencies_map_common_library_flags(self) -> None:
-        """Extract -l flags and resolve common system packages."""
         _write(self.repo, "Makefile", "LDLIBS=-lssl -lcrypto -lz -lm -lfoo\n")
 
         deps = self._ops()._extract_make_dependencies(self.repo)
@@ -1592,7 +1520,6 @@ class TestScriptedOpsDependencyBranches(_RepoBackedTestCase):
         self.assertEqual(deps.build_tools, ["make", "gcc", "g++"])
 
     def test_make_dependencies_missing_makefile_returns_defaults(self) -> None:
-        """Return default make dependency info when Makefile is absent."""
         deps = self._ops()._extract_make_dependencies(self.repo)
 
         self.assertEqual(deps.libraries, [])
@@ -1603,7 +1530,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
     """Tests for Go main-package scoring and exclusion branches."""
 
     def test_find_go_main_ignores_git_and_vendor_without_mod(self) -> None:
-        """Skip .git and vendor while searching GOPATH-style main files."""
         _write(self.repo, ".git/hidden/main.go", "package main\n")
         _write(self.repo, "vendor/main.go", "package main\n")
         _write(self.repo, "lib.go", "package lib\n")
@@ -1615,7 +1541,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
         self.assertFalse(info["has_main"])
 
     def test_find_go_main_ignores_unreadable_gopath_files(self) -> None:
-        """Tolerate read errors while checking GOPATH-style Go files."""
         _write(self.repo, "bad.go", "package main\n")
 
         with mock.patch("builtins.open", side_effect=OSError("boom")):
@@ -1638,7 +1563,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
         self.assertEqual(info["build_command"], "go build .")
 
     def test_find_go_main_scores_generic_cmd_above_other_dirs(self) -> None:
-        """Prefer a non-test cmd directory over arbitrary subdirs."""
         _write(self.repo, "go.mod", "module app\n")
         _write(self.repo, "pkg/tool/main.go", "package main\n")
         _write(self.repo, "cmd/worker/main.go", "package main\n")
@@ -1649,7 +1573,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
         self.assertEqual(info["build_command"], "go build ./cmd/worker")
 
     def test_find_go_main_skips_vendor_with_go_mod(self) -> None:
-        """Skip vendored Go files while scanning a module for main files."""
         _write(self.repo, "go.mod", "module app\n")
         _write(self.repo, "vendor/tool/main.go", "package main\n")
         _write(self.repo, "lib.go", "package lib\n")
@@ -1660,7 +1583,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
         self.assertFalse(info["has_main"])
 
     def test_find_go_main_ignores_unreadable_module_files(self) -> None:
-        """Tolerate read errors while checking module Go files."""
         _write(self.repo, "go.mod", "module app\n")
         _write(self.repo, "bad.go", "package main\n")
 
@@ -1681,7 +1603,6 @@ class TestScriptedOpsGoMainBranches(_RepoBackedTestCase):
         self.assertEqual(info["all_main_paths"], ["tools/generator"])
 
     def test_find_go_main_scores_integration_subdir_low(self) -> None:
-        """Cover low-priority non-cmd integration directory scoring."""
         _write(self.repo, "go.mod", "module app\n")
         _write(self.repo, "foo-integration/main.go", "package main\n")
 
@@ -1697,8 +1618,8 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
     def test_find_architecture_specific_code_parses_grep_hits(self) -> None:
         """Report x86-only code with its line, and SIMD code as high.
 
-        The scan reads the repository files on the host; it no longer
-        runs grep in the sandbox, so the files are real here.
+        The scan reads the repository files on the host, so this
+        fixture writes real files instead of mocking grep.
         """
         with open(os.path.join(self.repo, "a.c"), "w") as fh:
             fh.write("int x;\n" * 11 + "#ifdef __x86_64__\nint y;\n#endif\n")
@@ -1717,7 +1638,6 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
         self.assertEqual(by_file["simd.c"].line, 1)
 
     def test_suggest_fix_for_each_arch_type_and_default(self) -> None:
-        """Return tailored suggestions for every known arch category."""
         ops = self._ops()
 
         self.assertIn("__riscv", ops._suggest_fix_for_arch_code("x86"))
@@ -1733,8 +1653,6 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
     def test_detect_arch_build_files_suggests_riscv_counterparts(
         self,
     ) -> None:
-        """Suggest RISC-V makefiles from x64 and arm64 build files."""
-
         def fake_execute(cmd, **kwargs):
             """Return mocked grep hits by architecture pattern."""
             if "x64|x86_64|amd64" in cmd:
@@ -1767,8 +1685,6 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
     def test_detect_arch_build_files_marks_existing_riscv_support(
         self,
     ) -> None:
-        """Set riscv_exists when a RISC-V-specific makefile is present."""
-
         def fake_execute(cmd, **kwargs):
             """Return a result only for the RISC-V pattern."""
             if "riscv|riscv64|rv64" in cmd:
@@ -1795,8 +1711,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
     """Tests for file tree, documentation, and system-info helpers."""
 
     def test_get_file_tree_uses_tree_output_when_available(self) -> None:
-        """Return tree output directly when the tree command succeeds."""
-
         def fake_execute(cmd, **kwargs):
             """Return a successful tree response."""
             if str(cmd).startswith("tree -L"):
@@ -1812,8 +1726,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("main.c", output)
 
     def test_get_file_tree_falls_back_to_find(self) -> None:
-        """Use find output when tree is unavailable."""
-
         def fake_execute(cmd, **kwargs):
             """Fail tree and return a fallback find listing."""
             if str(cmd).startswith("tree -L"):
@@ -1829,8 +1741,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("/workspace/repo/main.c", output)
 
     def test_get_optimized_tree_includes_sections_and_counts(self) -> None:
-        """Build the compact tree from mocked command output."""
-
         def fake_execute(cmd, **kwargs):
             """Return targeted output for each optimized-tree command."""
             cmd_text = str(cmd)
@@ -1886,7 +1796,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("Python files: 4", output)
 
     def test_read_file_handles_missing_truncated_and_read_errors(self) -> None:
-        """Read existing files, truncate long files, and report errors."""
         missing = self._ops().read_file(os.path.join(self.repo, "missing.c"))
         _write(self.repo, "long.txt", "one\ntwo\nthree\n")
         truncated = self._ops().read_file(
@@ -1909,8 +1818,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("Error reading file: boom", errored)
 
     def test_find_documentation_prioritizes_common_files(self) -> None:
-        """Return prioritized documentation files before other docs."""
-
         def fake_execute(cmd, **kwargs):
             """Return docs for selected find patterns."""
             cmd_text = str(cmd)
@@ -1952,8 +1859,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("/workspace/repo/notes.md", docs)
 
     def test_get_system_info_reports_available_missing_and_arch(self) -> None:
-        """Report tool availability and detected container architecture."""
-
         def fake_execute(cmd, **kwargs):
             """Return availability for gcc and absence for make."""
             if cmd == "which gcc":
@@ -1975,7 +1880,6 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
     def test_get_system_info_uses_default_tool_list_and_unknown_arch(
         self,
     ) -> None:
-        """Probe the default tool list and report unknown architecture."""
         calls = []
 
         def fake_execute(cmd, **kwargs):

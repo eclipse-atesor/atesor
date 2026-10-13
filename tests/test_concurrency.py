@@ -34,6 +34,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from src.state import CommandResult
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -54,9 +56,7 @@ def _load_batch_module():
     return module
 
 
-# ===========================================================================
 # Provisioning flock — one image build across N concurrent workers
-# ===========================================================================
 
 
 class _FakeContainer:
@@ -75,9 +75,9 @@ class _FakeContainer:
         }
 
     def reload(self) -> None:
-        """Reload."""
+        """No-op; the fake container never changes state."""
 
-    def exec_run(self, cmd: str):
+    def exec_run(self, cmd: str) -> SimpleNamespace:
         """Answer the provisioning self-checks."""
         if "os-release" in cmd:
             return SimpleNamespace(exit_code=0, output=b"ID=alpine\n")
@@ -110,7 +110,9 @@ class _FakeDockerClient:
     def _api_build(self, **_kwargs):
         with self._lock:
             self.build_calls += 1
-        _real_sleep(0.25)  # emulate a slow build inside the lock
+        # Emulate a slow build; the real one runs under the provisioning
+        # flock, so a concurrent worker must wait here and then skip.
+        _real_sleep(0.25)
         with self._lock:
             self.image_built = True
         return iter([{"stream": "Step 1/1 : FROM fake"}])
@@ -119,14 +121,14 @@ class _FakeDockerClient:
         return self._container
 
     def close(self) -> None:
-        """Close."""
+        """No-op."""
 
 
 class TestProvisionLockSerializesImageBuild:
     """Concurrent provisioning must build the sandbox image once."""
 
     def test_image_built_once_across_workers(
-        self, tmp_path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two concurrent _provision_sandbox calls -> one api.build."""
         import main as main_mod
@@ -162,9 +164,7 @@ class TestProvisionLockSerializesImageBuild:
         )
 
 
-# ===========================================================================
 # Batch container pool — lease/return invariants under N workers
-# ===========================================================================
 
 
 class _TrackingQueue(queue.Queue):
@@ -176,8 +176,7 @@ class _TrackingQueue(queue.Queue):
         self.double_leases: list = []
         self._tlock = threading.Lock()
 
-    def get(self, *args, **kwargs):
-        """Get."""
+    def get(self, *args, **kwargs) -> str:
         name = super().get(*args, **kwargs)
         with self._tlock:
             if name in self.leased:
@@ -185,15 +184,18 @@ class _TrackingQueue(queue.Queue):
             self.leased.add(name)
         return name
 
-    def put(self, item, *args, **kwargs):
-        """Put."""
+    def put(self, item: str, *args, **kwargs) -> None:
         with self._tlock:
             self.leased.discard(item)
         return super().put(item, *args, **kwargs)
 
 
 class TestBatchContainerPool:
-    """run_agent must lease exclusively and always restore the pool."""
+    """run_agent must lease exclusively and always restore the pool.
+
+    On an exception, it kills the live child before the container goes
+    back to the pool.
+    """
 
     def _drain(self, q: queue.Queue) -> list:
         names = []
@@ -204,7 +206,7 @@ class TestBatchContainerPool:
                 return names
 
     def test_concurrent_runs_never_double_lease(
-        self, tmp_path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """6 packages on 3 workers: unique leases, pool restored."""
         bt = _load_batch_module()
@@ -246,7 +248,7 @@ class TestBatchContainerPool:
         assert not bt._live_pids, "all child PIDs must be unregistered"
 
     def test_exception_path_kills_child_and_returns_container(
-        self, tmp_path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A failure after spawn must not leak a live child."""
         bt = _load_batch_module()
@@ -293,16 +295,14 @@ class TestBatchContainerPool:
         )
 
 
-# ===========================================================================
 # Thread-local auth overlay — concurrent clones on one instance
-# ===========================================================================
 
 
 class TestAuthThreadIsolation:
     """Concurrent clones must not observe each other's auth overlay."""
 
     def test_parallel_clones_keep_auth_separate(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The GitHub clone keeps its header while another clone runs."""
         from src.scripted_ops import ScriptedOperations
@@ -367,15 +367,13 @@ class TestAuthThreadIsolation:
         )
 
 
-# ===========================================================================
 # Recipe cache — real multi-process writers (like batch workers)
-# ===========================================================================
 
 
 class TestRecipeCacheMultiProcessWriters:
     """N processes writing the cache concurrently must not corrupt it."""
 
-    def test_six_process_writers_all_land(self, tmp_path) -> None:
+    def test_six_process_writers_all_land(self, tmp_path: Path) -> None:
         """All writers succeed and the cache stays valid JSON."""
         n = 6
         code_template = (

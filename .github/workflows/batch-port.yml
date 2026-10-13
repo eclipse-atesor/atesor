@@ -57,17 +57,16 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   # Force unbuffered stdout/stderr so batch_test.py logs stream live to
+  # the job log.
   PYTHONUNBUFFERED: "1"
   LLM_PROVIDER: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
 
 jobs:
-  # ------------------------------------------------------------------------- #
   # 0. preflight — is the selected LLM provider actually usable?
   #
   # Without this gate a batch run against a dead provider still burns the
   # full compute budget: every package exhausts its 5 attempts on failed
   # LLM calls and escalates with no diagnosis.
-  # ------------------------------------------------------------------------- #
   preflight:
     name: preflight (${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }})
     uses: ./.github/workflows/llm-health.yml
@@ -79,9 +78,7 @@ jobs:
       fail_on_unavailable: >-
         ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
 
-  # ------------------------------------------------------------------------- #
   # 1. atesor-debian-smoke
-  # ------------------------------------------------------------------------- #
   atesor-debian-smoke:
     name: atesor-debian-smoke
     needs: preflight
@@ -157,7 +154,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # ------------------------------------------------------------------------- #
   # 2. atesor-debian-full / atesor-alpine-full (sharded, skip-already-released)
   #
   # `plan-full` does two things:
@@ -174,7 +170,6 @@ jobs:
   # so each shard job — AND the retry workflow — can read the exact
   # same plan without re-querying the release at a slightly different
   # moment.
-  # ------------------------------------------------------------------------- #
   plan-full:
     name: plan-full
     needs: preflight
@@ -344,7 +339,7 @@ jobs:
           # AND (2) this shard's chunk of that remaining set. Pass
           # straight as positional args — no need for batch_test's
           # internal --shard-index.
-          # shellcheck disable=SC2086  -- intentional word-splitting
+          # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
             --workers "$WORKERS" \
@@ -372,9 +367,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  # ------------------------------------------------------------------------- #
   # 3. atesor-alpine-smoke
-  # ------------------------------------------------------------------------- #
   atesor-alpine-smoke:
     name: atesor-alpine-smoke
     needs: preflight
@@ -450,9 +443,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # ------------------------------------------------------------------------- #
   # 4. atesor-alpine-full (sharded, skip-already-released; see plan-full)
-  # ------------------------------------------------------------------------- #
   atesor-alpine-full:
     name: atesor-alpine-full (shard ${{ matrix.shard }}/${{ needs.plan-full.outputs.alpine_total }})
     needs: plan-full
@@ -530,7 +521,7 @@ jobs:
             echo "::notice::Empty shard slice (all packages already released for $ATESOR_PLATFORM); skipping."
             exit 0
           fi
-          # shellcheck disable=SC2086  -- intentional word-splitting
+          # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
             --workers "$WORKERS" \
@@ -558,13 +549,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  # ------------------------------------------------------------------------- #
   # 5. Collect full-run logs from all shards (both platforms)
   #
   # This runs at the end of full workflows even when shard jobs fail/cancel.
   # It aggregates all available shard artifacts, extracts only *.log files,
-  # and publishes one combined artifact retained for 30 days.
-  # ------------------------------------------------------------------------- #
+  # and publishes one artifact per platform (`full-logs-debian`,
+  # `full-logs-alpine`), retained for 90 days.
   collect-full-shard-logs:
     name: collect-full-shard-logs
     needs:
@@ -624,9 +614,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  # ------------------------------------------------------------------------- #
   # 6. Merge self-learning data updates and propose a draft PR
-  # ------------------------------------------------------------------------- #
   propose-data-updates-pr:
     name: propose-data-updates-pr
     needs:

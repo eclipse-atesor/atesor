@@ -133,8 +133,8 @@ PY
     [ -n "${pkg}" ] \
         || { echo "FAIL: no debian seed recipe in bundled cache"; exit 1; }
     echo "    seed package: ${pkg} (${url})"
-    # Exit 0: the entry holds a verified verdict. Exit 3: the entry was
-    # recorded before artifact verification existed.
+    # Exit 0: the entry holds a verified verdict. Exit 3: the entry holds
+    # another verdict, or none because it predates artifact verification.
     rc=0
     atesor-ai --repo "${url}" --platform debian </dev/null || rc=$?
     [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ] \

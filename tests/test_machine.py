@@ -146,7 +146,6 @@ class TestParsing(unittest.TestCase):
     """The raw sources parse into extension sets."""
 
     def test_isa_string_letters_and_extensions(self) -> None:
-        """Single letters and Z/S extensions are both kept."""
         extensions = parse_isa_string(MEGREZ_ISA)
         for name in ("i", "m", "a", "f", "d", "c", "h", "zba", "zbb"):
             self.assertIn(name, extensions)
@@ -167,7 +166,6 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(parse_isa_string(""), set())
 
     def test_cpuinfo_reads_the_first_cpu_only(self) -> None:
-        """Fields come from the first processor block."""
         fields = parse_cpuinfo(MEGREZ_CPUINFO)
         self.assertEqual(fields["isa"], MEGREZ_ISA)
         self.assertEqual(fields["mvendorid"], "0x489")
@@ -214,7 +212,8 @@ class TestParsing(unittest.TestCase):
         self.assertIsNone(
             match_core({"mvendorid": 0x489, "marchid": 0x8000000000000099})
         )
-        # T-Head cores report marchid 0; only the name tells them apart.
+        # T-Head cores report marchid 0; only `compatible` tells them
+        # apart.
         self.assertIsNone(match_core({"mvendorid": 0x5B7, "marchid": 0}))
         self.assertEqual(
             match_core({"compatible": ["thead,c910", "riscv"]})["name"],
@@ -430,7 +429,6 @@ class TestEvaluateProbe(unittest.TestCase):
         self.assertIsNone(march_for(profile, "gcc"))
 
     def test_profile_round_trips_through_a_dict(self) -> None:
-        """A profile keeps every field through to_dict and from_dict."""
         profile = _megrez()
         again = MachineProfile.from_dict(json.loads(json.dumps(
             profile.to_dict()
@@ -461,7 +459,6 @@ class TestRules(unittest.TestCase):
         )
 
     def test_march_needs_compiler_acceptance(self) -> None:
-        """An extension the compiler rejects is left out."""
         payload = _megrez_payload(
             compilers={"gcc": _gcc(accepts=("zba",))}
         )
@@ -485,7 +482,6 @@ class TestRules(unittest.TestCase):
         )
 
     def test_unknown_core_gets_no_tune(self) -> None:
-        """No core table match, no -mtune."""
         payload = _megrez_payload(
             cpuinfo=MEGREZ_CPUINFO.replace("0x489", "0x5b7"),
             hwprobe={"pairs": [[3, 1], [4, 0b11011], [0, 0x5B7]]},
@@ -495,7 +491,6 @@ class TestRules(unittest.TestCase):
         self.assertIsNone(tune_for(profile, "gcc"))
 
     def test_strict_align_unless_fast(self) -> None:
-        """Slow or unknown misalignment adds -mstrict-align."""
         profile = _megrez()
         self.assertEqual(align_flags(profile, "gcc"), ["-mstrict-align"])
         profile.misaligned = "fast"
@@ -535,7 +530,6 @@ class TestRules(unittest.TestCase):
         self.assertIsNone(rust_flags_for(profile))
 
     def test_rust_cpu_must_fit_the_machine(self) -> None:
-        """A CPU model with a feature the machine lacks is refused."""
         features = {
             "(default)": ["a", "c", "d", "f", "m"],
             "sifive-p550": ["a", "c", "d", "f", "m", "zba", "zbb", "zbs"],
@@ -662,7 +656,6 @@ class TestProbeMachine(unittest.TestCase):
         self.assertIn("sifive-p550", json.loads(argv[3])["tune_candidates"])
 
     def test_native_probe_ignores_the_qemu_cpu(self) -> None:
-        """A native run never sets QEMU_CPU."""
         output = machine._OUTPUT_MARKER + json.dumps(_megrez_payload())
         ok = CommandResult("python3", 0, output, "", 0.5)
         with mock.patch.object(

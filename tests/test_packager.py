@@ -1,4 +1,4 @@
-"""Tests for src.packager."""
+"""Tests for src/packager.py: zip layout, manifest schema, and safety skips."""
 
 import json
 import os
@@ -69,7 +69,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_manifest_v2_records_stems_verdict_and_hashes(self) -> None:
-        """The zip says what was verified and pins each output by hash."""
         import hashlib
 
         os.makedirs(os.path.join(self.repo_path, "build"))
@@ -147,7 +146,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertNotIn("output_tail", m["package_tests"])
 
     def test_failed_write_leaves_no_zip_and_no_part_file(self) -> None:
-        """A write killed half-way never looks like a finished zip."""
         with mock.patch(
             "src.packager._add_repo_tree", side_effect=OSError("disk full")
         ):
@@ -157,7 +155,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(os.listdir(self.packages_dir), [])
 
     def test_manifest_without_verification_says_not_run(self) -> None:
-        """A zip made without a verdict does not claim verification."""
         with zipfile.ZipFile(self._build()) as zf:
             m = json.loads(zf.read("manifest.json"))
 
@@ -166,7 +163,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(m["artifacts"], [])
 
     def test_layout_recipe_at_root_and_repo_subtree(self) -> None:
-        """Zip contains root recipe, manifest, and repo files."""
         zp = self._build()
         with zipfile.ZipFile(zp) as zf:
             names = set(zf.namelist())
@@ -188,7 +184,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(m["repo_url"], "https://github.com/owasp-amass/amass")
 
     def test_dot_git_excluded(self) -> None:
-        """Package excludes .git entries from the zip archive."""
         git_dir = os.path.join(self.repo_path, ".git")
         os.makedirs(git_dir)
         with open(os.path.join(git_dir, "HEAD"), "w") as f:
@@ -202,7 +197,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_symlinks_skipped_for_security(self) -> None:
-        """Package skips symlinks while keeping real repo files."""
         # A symlink pointing OUTSIDE the repo must not be packaged.
         outside = os.path.join(self.root, "secret.txt")
         with open(outside, "w") as f:
@@ -215,27 +209,23 @@ class TestPackageBuild(unittest.TestCase):
             names = zf.namelist()
         self.assertNotIn(f"{self.repo_name}/leak.txt", names)
         self.assertNotIn(f"{self.repo_name}/dangling", names)
-        # Real files still made it in.
         self.assertIn(f"{self.repo_name}/main.go", names)
 
     def test_missing_repo_dir_raises(self) -> None:
-        """Missing repository directory raises FileNotFoundError."""
         with self.assertRaises(FileNotFoundError):
             self._build(
                 repo_path=os.path.join(self.root, "does", "not", "exist")
             )
 
     def test_missing_recipe_raises(self) -> None:
-        """Missing recipe file raises FileNotFoundError."""
         os.remove(self.recipe_path)
         with self.assertRaises(FileNotFoundError):
             self._build()
 
     def test_collision_appends_suffix(self) -> None:
-        """Second package path gets a suffix instead of clobbering."""
         zp1 = self._build()
         # Same name, same second — packager must avoid clobbering.
-        # Create a sentinel at the would-be path.
+        # The first zip already occupies the path the second would pick.
         sentinel = zp1
         with open(sentinel, "ab"):
             pass
@@ -245,7 +235,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertTrue(os.path.isfile(zp2))
 
     def test_logs_included_at_zip_root(self) -> None:
-        """Existing agent and batch logs are added at the zip root."""
         agent_log = os.path.join(self.root, f"agent_{self.repo_name}.log")
         batch_log = os.path.join(self.root, f"{self.repo_name}.log")
         with open(agent_log, "w") as f:
@@ -273,9 +262,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_missing_logs_are_skipped_not_fatal(self) -> None:
-        """Missing log paths add no zip entries and do not fail."""
-        # Caller passes paths but neither file exists → no zip entries,
-        # no exception, manifest reflects absence.
         zp = self._build(
             agent_log_path=os.path.join(self.root, "nope-agent.log"),
             batch_log_path=os.path.join(self.root, "nope-batch.log"),
@@ -288,12 +274,10 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(manifest["logs_in_zip"], [])
 
     def test_no_log_args_means_no_log_entries(self) -> None:
-        """Omitted log paths produce no log entries in the archive."""
         zp = self._build()
         with zipfile.ZipFile(zp) as zf:
             names = set(zf.namelist())
             manifest = json.loads(zf.read("manifest.json").decode())
-        # No *.log entries at all when caller didn't pass paths.
         self.assertFalse(
             any(n.endswith(".log") for n in names),
             msg=f"unexpected .log entries: {names}",
@@ -416,7 +400,6 @@ class TestLegacyPackageStem(unittest.TestCase):
                 )
 
     def test_ambiguous_basenames_match_state(self) -> None:
-        """The copied ambiguous-name set equals the one in src.state."""
         from src import packager, state
 
         self.assertEqual(
@@ -438,7 +421,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_safe_zip_path_increments_past_collisions(self) -> None:
-        """Test safe zip path increments past collisions."""
         for name in ("pkg.zip", "pkg.1.zip"):
             with open(os.path.join(self.root, name), "w") as f:
                 f.write("x")
@@ -448,7 +430,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
         )
 
     def test_symlinked_directory_is_skipped(self) -> None:
-        """Test symlinked directory is skipped."""
         repo = os.path.join(self.root, "repo")
         outside = os.path.join(self.root, "outside")
         os.makedirs(repo)
@@ -467,7 +448,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
             self.assertNotIn("r/link/secret.txt", zf.namelist())
 
     def test_unreadable_file_is_skipped(self) -> None:
-        """Test unreadable file is skipped."""
         repo = os.path.join(self.root, "repo")
         os.makedirs(repo)
         with open(os.path.join(repo, "main.c"), "w") as f:

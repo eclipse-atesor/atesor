@@ -1,8 +1,10 @@
-"""Tests for the LLM-value paths in src/graph.py.
+"""Tests for the graph nodes in src/graph.py.
 
 Covers the analyst node (consumed PackageAnalysis + real cost logging),
-the fixer's read-only investigation helper, and expected-artifact
-verification.
+the fixer's read-only investigation helper, expected-artifact
+verification, the init, scout, fixer, builder, cached-recipe, optimize
+and terminal nodes, and the auto-learning step. The LLM and the
+sandbox are mocked.
 """
 
 import unittest
@@ -384,7 +386,6 @@ class TestScoutNode(unittest.TestCase):
         )
 
     def test_scout_validator_rejects_bad_shapes_and_builds_plan(self) -> None:
-        """Scout validates phase JSON and stores a BuildPlan."""
         from src import graph
 
         valid_plan = {
@@ -472,7 +473,6 @@ class TestScoutNode(unittest.TestCase):
         self.assertEqual(out.api_calls_made, 2)
 
     def test_scout_falls_back_when_llm_returns_no_plan(self) -> None:
-        """Scout falls back after invalid LLM data."""
         from src import graph
 
         outcome = LLMCallOutcome(
@@ -566,7 +566,6 @@ class TestFixerInvestigation(unittest.TestCase):
         self.assertLess(len(out), 2500)
 
     def test_empty_investigation_commands_return_placeholder(self) -> None:
-        """Empty investigation command lists produce a clear placeholder."""
         from src import graph
 
         s = _state()
@@ -884,7 +883,7 @@ class TestFixerNode(unittest.TestCase):
         self.assertIsNone(out.get_cached_command_result("go build ./..."))
 
     def test_build_failure_fix_resumes_at_the_failed_phase(self) -> None:
-        """After a build failure the builder resumes as before."""
+        """After a build failure the fixer does not rewind the progress."""
         out = self._run_fixer_with(
             self._two_phase_state(done_phase=1),
             [{"type": "command", "command": "make clean"}],
@@ -1034,7 +1033,6 @@ class TestFixerNode(unittest.TestCase):
         self.assertIn("schema invalid", out.error_history[-1].message)
 
     def test_create_file_patch_and_command_actions_are_applied(self) -> None:
-        """Fixer applies safe create_file, patch, and command actions."""
         from src import graph
 
         state = self._fixer_state()
@@ -1500,6 +1498,7 @@ class TestOptimizeNode(unittest.TestCase):
     """optimize_node never turns a finished port into a failure."""
 
     def _state(self):
+        """Return a verified SUCCESS state with --optimize and ctest passed."""
         state = _state(optimize_requested=True)
         state.build_status = BuildStatus.SUCCESS
         state.artifact_verification = {"status": "verified"}

@@ -32,8 +32,9 @@ on:
         type: string
         default: "true"
   schedule:
-    # 01:00 UTC — one hour ahead of the nightly batch sweep, so a dead
-    # provider is known before compute is spent on it.
+    # 01:00 UTC daily, before the scheduled batch-port sweeps (01:07 UTC
+    # on the 1st, 01:17 UTC on Saturdays), so a dead provider is known
+    # before compute is spent on it.
     - cron: "0 1 * * *"
   workflow_call:
     inputs:
@@ -214,9 +215,11 @@ jobs:
           fi
 
       # Standalone runs (schedule / manual) fail loudly. Callers that gate
-      # on the `provider_ok` output pass "false" so a dead provider skips
-      # the batch instead of painting the run red. On `schedule` there are
-      # no inputs at all, so this resolves to '' != 'false' -> fail.
+      # on the `provider_ok` output can pass "false" so a dead provider
+      # skips the batch instead of painting the run red. batch-port.yml
+      # and batch-port-retry.yml pass "false" for manual runs only. On
+      # `schedule` there are no inputs at all, so this resolves to
+      # '' != 'false' -> fail.
       - name: Fail when gated provider is unusable
         if: >-
           steps.agg.outputs.provider_ok != 'true' &&

@@ -43,10 +43,15 @@ from .tools import execute_command
 
 logger = logging.getLogger(__name__)
 
+# The verdict vocabulary. verified proves riscv64 build outputs and no
+# foreign ones. wrong_arch proves a foreign build output, so the port
+# failed. unverified is the absence of proof; it is the least trusted
+# outcome and is never cached or learned (see graph.py finish_node).
 VERIFIED = "verified"
 WRONG_ARCH = "wrong_arch"
 UNVERIFIED = "unverified"
 
+# e_machine value EM_RISCV of the ELF gABI.
 EM_RISCV = 243
 
 # Deliverable directories outside the repository where ``make install``,
@@ -60,6 +65,7 @@ OUTSIDE_DIRS = (
     "/root/.cargo/bin",
 )
 
+# e_machine labels (ELF gABI) for readable verdicts and error text.
 _MACHINE_NAMES = {
     3: "x86",
     8: "mips",
@@ -86,12 +92,18 @@ _FLOAT_ABI_SUFFIX = {0x0: "", 0x2: "f", 0x4: "d", 0x6: "q"}
 # The ABI of the Alpine, Debian and Ubuntu riscv64 ports.
 _SYSTEM_ABI = "lp64d"
 
+# The expected names come from the LLM analysis, so only plain
+# basenames go into the sandbox command, and the list is capped.
 _MAX_EXPECTED_NAMES = 10
 _SAFE_BASENAME = re.compile(r"^[A-Za-z0-9._+-]+$")
+# Prefix of the one output line that carries the JSON document, so the
+# host can find it among the build noise on stdout.
 _OUTPUT_MARKER = "ATESOR_SCAN_JSON "
 
 # Runs inside the sandbox. It must stay self-contained and compatible
 # with Python 3.8+ (Ubuntu jammy, Debian trixie and Alpine images).
+# The program text is %-formatted below, so every literal percent sign
+# in it is doubled.
 # Arguments: root, max_files, JSON list of expected basenames,
 # minimum mtime (epoch seconds) for files outside the repository.
 _SCAN_PROGRAM = r'''
@@ -105,6 +117,8 @@ import sys
 ELF_MAGIC = b"\x7fELF"
 AR_MAGIC = b"!<arch>\n"
 THIN_AR_MAGIC = b"!<thin>\n"
+# Special ar members: the symbol index and the string table. They hold
+# no machine code, so the scan skips them.
 AR_INDEX_NAMES = (b"/", b"/SYM64/", b"//", b"__.SYMDEF", b"__.SYMDEF SORTED")
 OUTSIDE_DIRS = %(outside_dirs)s
 # node_modules holds downloaded dependencies, not build outputs: npm
@@ -115,11 +129,16 @@ OUTSIDE_DEPTH = 3
 
 
 def elf_ident(head):
+    # Parse only the fixed-layout prefix: magic at byte 0, EI_CLASS at
+    # 4, EI_DATA at 5, e_type and e_machine at 16, e_flags at 48
+    # (ELF64) or 36 (ELF32). 52 bytes reach e_flags of both classes.
     if len(head) < 52 or head[:4] != ELF_MAGIC:
         return None
     ei_class, ei_data = head[4], head[5]
     if ei_class not in (1, 2) or ei_data not in (1, 2):
         return None
+    # EI_DATA sets the byte order of every header field: 1 is
+    # little-endian, 2 is big-endian.
     order = "<" if ei_data == 1 else ">"
     e_type, e_machine = struct.unpack(order + "HH", head[16:20])
     if ei_class == 2:
@@ -132,6 +151,9 @@ def elf_ident(head):
 
 
 def archive_members(handle, size):
+    # Each member header is 60 bytes and ends in the "`\n" trailer. The
+    # member size is a decimal field at bytes 48-57, and a member of
+    # odd size is padded by one byte.
     counts = {}
     other = 0
     pos = 8
@@ -150,6 +172,8 @@ def archive_members(handle, size):
         if name in AR_INDEX_NAMES:
             continue
         if name.startswith(b"#1/"):
+            # BSD long name: the name itself prefixes the member data,
+            # and the header size field counts it.
             try:
                 name_len = int(name[3:])
             except ValueError:
@@ -248,8 +272,8 @@ def scan_tree(root, max_files, tracked, result):
             rel = os.path.relpath(path, root)
             is_tracked = rel in tracked
             if len(result["files"]) >= MAX_ENTRIES and is_riscv64(info):
-                # The list is full. Keep reading, and list only what can
-                # fail the verdict, so no foreign output is missed.
+                # The list is full. Keep reading, and list only the files
+                # that are not riscv64, so no foreign output is missed.
                 if not is_tracked:
                     result["unlisted_riscv64"] += 1
                 continue
@@ -344,7 +368,8 @@ class Artifact:
         arch: Architecture label, e.g. ``riscv64``, ``riscv32``,
             ``x86-64``, ``aarch64``. An archive with members of more
             than one architecture is labelled ``mixed(<a>+<b>)``.
-        abi: The RISC-V psABI (``lp64d``, ...) or None.
+        abi: The RISC-V psABI (``lp64d``, ...), ``mixed`` for an
+            archive whose RISC-V members use more than one ABI, or None.
         size: File size in bytes.
         prebuilt: True when the file is committed to git and the build
             did not modify it. Prebuilt files never decide the verdict.
@@ -480,6 +505,11 @@ def describe_elf(
 
 
 def _parse_member_key(key: str) -> "tuple[str, Optional[str]]":
+    """Unpack one archive-member key into its architecture and ABI.
+
+    The in-sandbox program builds each key as
+    ``bits/data/machine/flags``; both sides must change together.
+    """
     bits, data, machine, flags = (int(part) for part in key.split("/"))
     return describe_elf(bits, data, machine, flags)
 
@@ -551,8 +581,9 @@ def evaluate_scan(
 
     Returns:
         The verdict. Foreign build outputs give ``wrong_arch``;
-        otherwise riscv64 build outputs give ``verified``; otherwise
-        the result is ``unverified``.
+        otherwise a truncated scan gives ``unverified``; otherwise
+        riscv64 build outputs give ``verified``; otherwise the result
+        is ``unverified``.
     """
     riscv64: List[Artifact] = []
     foreign: List[Artifact] = []
@@ -658,6 +689,11 @@ def evaluate_scan(
 
 
 def _parse_scan_output(stdout: str) -> Optional[Dict[str, Any]]:
+    """Return the JSON document of the last marker line, or None.
+
+    The scan prints its marker and JSON document last; searching from
+    the end skips any noise the sandbox printed before them.
+    """
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_OUTPUT_MARKER):
             try:
@@ -696,8 +732,9 @@ class ArtifactScanner:
 
         Args:
             expected_names: Artifact basenames the analysis expects.
-                They are also searched in :data:`OUTSIDE_DIRS` when the
-                repository holds no build output.
+                They are also searched in :data:`OUTSIDE_DIRS`. Those
+                matches count only when the repository holds no build
+                output.
             since: Epoch seconds. Files outside the repository older
                 than this are ignored, so an earlier package's
                 ``make install`` in a shared sandbox is not evidence.
@@ -707,10 +744,11 @@ class ArtifactScanner:
             gives ``unverified`` with ``scan_error`` set.
         """
         names = _safe_expected_names(expected_names)
+        # 600 s of slack for clock skew between host and machine.
         min_mtime = (since - 600) if since else 0
-        # validate=False: every argument is fixed or shlex-quoted, and
-        # the CommandValidator whitelist cannot match a multi-line
-        # ``python3 -c`` program.
+        # validate=False: every argument is fixed or shlex-quoted.
+        # execute_command quotes each list element, the program is a
+        # module constant, and each name matches _SAFE_BASENAME.
         command = [
             "python3",
             "-c",

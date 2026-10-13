@@ -38,14 +38,12 @@ class TestLoadTarget(unittest.TestCase):
     """Tests for load_target and its validation rules."""
 
     def test_default_target_is_qemu(self) -> None:
-        """No ATESOR_TARGET selects the qemu target."""
         cfg = target.load_target({})
         self.assertEqual(target.QEMU, cfg.name)
         self.assertTrue(cfg.is_valid)
         self.assertFalse(cfg.is_native)
 
     def test_qemu_ignores_native_keys(self) -> None:
-        """SSH keys in .env do not break the qemu target."""
         cfg = target.load_target({"ATESOR_SSH_PASSWORD": "x"})
         self.assertTrue(cfg.is_valid)
 
@@ -66,7 +64,6 @@ class TestLoadTarget(unittest.TestCase):
         self.assertEqual("~/atesor-ai", cfg.remote_workdir)
 
     def test_alias_accepts_ssh_destinations(self) -> None:
-        """An alias, a host name, an address and user@host are valid."""
         for value in (
             "board",
             "tester@board-1",
@@ -79,7 +76,6 @@ class TestLoadTarget(unittest.TestCase):
                 self.assertTrue(cfg.is_valid, cfg.errors)
 
     def test_alias_rejects_unsafe_values(self) -> None:
-        """Options, spaces and shell characters are rejected."""
         for value in (
             "-oProxyCommand=x",
             "a b",
@@ -109,7 +105,6 @@ class TestLoadTarget(unittest.TestCase):
         self.assertEqual("ubuntu", cfg.platform)
 
     def test_exactly_one_mode_is_required(self) -> None:
-        """Neither mode and both modes are errors."""
         env = _native()
         del env["ATESOR_SSH_HOST"]
         neither = " ".join(target.load_target(env).errors)
@@ -134,7 +129,6 @@ class TestLoadTarget(unittest.TestCase):
         self.assertTrue(cfg.is_valid, cfg.errors)
 
     def test_field_mode_is_valid(self) -> None:
-        """The field-mode keys give a field-mode configuration."""
         cfg = target.load_target(
             _field(
                 ATESOR_SSH_PORT="2222",
@@ -148,7 +142,6 @@ class TestLoadTarget(unittest.TestCase):
         self.assertEqual("tester", cfg.user)
 
     def test_field_mode_needs_hostname(self) -> None:
-        """A field key without ATESOR_SSH_HOSTNAME is an error."""
         cfg = target.load_target(
             {
                 "ATESOR_TARGET": "native",
@@ -173,7 +166,6 @@ class TestLoadTarget(unittest.TestCase):
                     self.assertFalse(cfg.is_valid)
 
     def test_workdir_characters_are_checked(self) -> None:
-        """The work directory allows only a safe set of characters."""
         cfg = target.load_target(
             _native(ATESOR_REMOTE_WORKDIR="/data/atesor-ai")
         )
@@ -196,25 +188,21 @@ class TestTargetFlag(unittest.TestCase):
     """Tests for the early --target read that main.py runs."""
 
     def test_space_form_sets_environment(self) -> None:
-        """--target native sets ATESOR_TARGET."""
         env: dict = {}
         target.apply_target_flag(["--repo", "u", "--target", "native"], env)
         self.assertEqual("native", env["ATESOR_TARGET"])
 
     def test_last_flag_wins(self) -> None:
-        """The last --target wins, in both flag forms."""
         env = {"ATESOR_TARGET": "native"}
         target.apply_target_flag(["--target=native", "--target", "qemu"], env)
         self.assertEqual("qemu", env["ATESOR_TARGET"])
 
     def test_no_flag_keeps_environment(self) -> None:
-        """Without the flag, the .env value stays."""
         env = {"ATESOR_TARGET": "native"}
         target.apply_target_flag(["--repo", "u"], env)
         self.assertEqual("native", env["ATESOR_TARGET"])
 
     def test_double_dash_ends_the_scan(self) -> None:
-        """Arguments after -- are not options."""
         env: dict = {}
         target.apply_target_flag(["--", "--target", "native"], env)
         self.assertNotIn("ATESOR_TARGET", env)
@@ -247,7 +235,6 @@ class TestSshArgv(unittest.TestCase):
         return env
 
     def test_alias_mode_argv(self) -> None:
-        """Alias mode passes the options and no config file."""
         with mock.patch.dict(os.environ, self._env(_native()), clear=True):
             argv = target.ssh_argv()
             alias = target.ssh_alias()
@@ -289,7 +276,6 @@ class TestSshArgv(unittest.TestCase):
             self.assertIn(line, text)
 
     def test_field_mode_keeps_the_address_out_of_argv(self) -> None:
-        """Neither the host nor the user appears in the argv."""
         env = self._env(_field(ATESOR_SSH_USER="tester"))
         with mock.patch.dict(os.environ, env, clear=True):
             joined = " ".join(target.ssh_argv() + [target.ssh_alias()])
@@ -372,7 +358,6 @@ class TestControlSocket(unittest.TestCase):
             target.close_connection()
 
     def test_close_connection_without_sockets_runs_nothing(self) -> None:
-        """A process that never used ssh starts no ssh process."""
         env = {"XDG_CACHE_HOME": self._tmp.name}
         with (
             mock.patch.dict(os.environ, env, clear=True),
@@ -382,7 +367,6 @@ class TestControlSocket(unittest.TestCase):
         run.assert_not_called()
 
     def test_missing_runtime_dir_falls_back_to_the_cache(self) -> None:
-        """A runtime dir that does not exist is not used."""
         env = {
             "XDG_RUNTIME_DIR": os.path.join(self._tmp.name, "gone"),
             "XDG_CACHE_HOME": self._tmp.name,
@@ -394,7 +378,6 @@ class TestControlSocket(unittest.TestCase):
             )
 
     def test_long_socket_path_does_not_fit(self) -> None:
-        """A path over the Unix socket limit is reported as too long."""
         with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "/c"}, clear=True):
             self.assertTrue(target.control_path_fits())
         with mock.patch.dict(
@@ -424,7 +407,6 @@ class TestRemoteHelpers(unittest.TestCase):
         self.assertIsNone(target.remote_workdir())
 
     def test_redact_hides_field_mode_details(self) -> None:
-        """Field-mode host, user and any IPv4 address are hidden."""
         env = _field(ATESOR_SSH_USER="tester")
         with mock.patch.dict(os.environ, env, clear=True):
             text = target.redact(

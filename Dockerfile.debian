@@ -10,8 +10,9 @@ LABEL description="RISC-V 64-bit Debian sandbox for automated software porting"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Core build essentials only. Project-specific libs (libpng-dev, golang, gfortran,
-# libprotobuf-dev, etc.) are installed on-demand by the agent. Keeping this layer
+# Core build essentials only. Project-specific libs (libpng-dev, gfortran,
+# libprotobuf-dev, etc.) are installed on-demand by the agent. This keeps
+# the layer stable and cacheable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -38,6 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 
+# Go toolchain from the official riscv64 tarball. Ubuntu jammy's golang-go
+# is Go 1.18, which cannot parse modern go.mod files.
 ARG GO_VERSION=1.26.5
 ARG GO_SHA256=d4a24dd4484d3f86b99c2d300af0dea5d184557e6d61eb7aba19ff61662750e3
 # SHA256 source: https://go.dev/dl/?mode=json&include=all
@@ -115,11 +118,12 @@ RUN mkdir -p /opt/atesor-downloads \
 ENV CC=gcc
 ENV CXX=g++
 ENV CCACHE_DIR=/workspace/.ccache
-# Go environment: use direct proxy to avoid network issues in isolated containers
 ENV GOPATH=/root/go
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="${CARGO_HOME}/bin:${GOPATH}/bin:/usr/local/go/bin:/usr/lib/ccache:${PATH}"
+# Fetch modules through the proxy to avoid network issues in isolated
+# containers.
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GONOSUMCHECK=*
 ENV GOFLAGS=-buildvcs=false

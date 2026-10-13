@@ -9,10 +9,13 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Deterministic, non-LLM repository analysis operations.
+"""Deterministic, zero-LLM-cost repository analysis operations.
 
-Handles repository cloning, build system detection, and dependency
-extraction without any LLM involvement.
+Owns cloning/reset, build-system detection, dependency extraction, and
+the architecture-specific code scan behind :func:`quick_analysis`.
+This module reads repositories and runs git inside the sandbox; it
+never builds them and never calls an LLM. Before a clone, it can
+repair a missing git or broken apt sources in the sandbox.
 """
 
 import json
@@ -39,10 +42,8 @@ from .target import is_native
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# SCRIPTED OPERATIONS CLASS
-# ============================================================================
-
+# Directory names a repository walk never descends into: vendored,
+# documentation and test trees do not hold the primary sources.
 VENDORED_SKIP_DIRS = frozenset(
     {
         ".git",
@@ -96,7 +97,7 @@ def normalize_repo_url(url: str) -> str:
 
 
 def _walk_root_is_excluded(root: str, *names: str) -> bool:
-    """True when any path COMPONENT of ``root`` equals one of ``names``.
+    """Return True when a path COMPONENT of ``root`` is in ``names``.
 
     Substring checks like ``".git" in root`` misfire for repos whose
     own name contains the token (``user.github.io`` contains ``.git``),
@@ -107,7 +108,10 @@ def _walk_root_is_excluded(root: str, *names: str) -> bool:
 
 
 def _prune_vendored_dirs(dirs: List[str]) -> None:
-    """Prune non-primary/vendor directories during ``os.walk``."""
+    """Remove vendored/test directory names from ``dirs`` in place.
+
+    Mutating ``dirs`` is how a top-down ``os.walk`` skips subtrees.
+    """
     dirs[:] = [d for d in dirs if d not in VENDORED_SKIP_DIRS]
 
 
@@ -281,10 +285,25 @@ def _go_file_builds_for(filename: str, content: str, arch: str) -> bool:
 
 
 class ScriptedOperations:
-    """Deterministic operations that don't require LLM intelligence."""
+    """Deterministic repository operations that never call an LLM.
 
-    def __init__(self, workspace_root: str = None) -> None:
-        """Initialize with environment-aware workspace."""
+    The graph shares one instance across threads; the only mutable
+    state, the GitHub auth overlay, is thread-local (see
+    ``_auth_tls``).
+
+    Args:
+        workspace_root: The workspace that holds ``repos/`` and
+            ``.cache/``. It overrides the configured paths from
+            :mod:`src.config` (used by tests); the directories are
+            created on demand. When None, the configured paths are
+            used as-is.
+
+    Raises:
+        PermissionError: If ``workspace_root`` is given and its
+            ``repos/`` or ``.cache/`` directory cannot be created.
+    """
+
+    def __init__(self, workspace_root: Optional[str] = None) -> None:
         if workspace_root is None:
             self.workspace_root = WORKSPACE_ROOT
             self.repos_dir = REPOS_DIR
@@ -322,8 +341,8 @@ class ScriptedOperations:
             only ever sent to github.com — a clone of an
             attacker-controlled homepage URL never receives the token.
           * Nothing is written to the container's git config, so there
-            is no state for a concurrent worker to race (the previous
-            set→clone→unset design could strip a sibling's header on a
+            is no state for a concurrent worker to race (a
+            set→clone→unset sequence could strip a sibling's header on a
             shared container) and nothing for later LLM-generated
             commands to read.
         """
@@ -339,7 +358,7 @@ class ScriptedOperations:
         }
 
     def _git_env(self) -> Dict[str, str]:
-        """Fail-fast git env merged with this thread's auth overlay."""
+        """Return the fail-fast git env and this thread's auth overlay."""
         return {
             **self._GIT_FAIL_FAST_ENV,
             **getattr(self._auth_tls, "env", {}),
@@ -350,6 +369,9 @@ class ScriptedOperations:
 
         Auth travels out-of-band via ``_git_env()`` (env-injected git
         config), never in the command string.
+
+        Raises:
+            ValueError: If ``url`` is not an http or https URL.
         """
         if not url.startswith(("https://", "http://")):
             raise ValueError(f"Refusing non-http URL: {url!r}")
@@ -360,6 +382,7 @@ class ScriptedOperations:
         )
 
     def _is_auth_error(self, result: CommandResult) -> bool:
+        """Return True when git's stderr reports an auth failure."""
         err = (result.stderr or "").lower()
         return any(
             pat in err
@@ -374,24 +397,21 @@ class ScriptedOperations:
             ]
         )
 
-    # ------------------------------------------------------------------
     # Fail-fast git environment: apply on every git subprocess so a
-    # missing credential / hanging SSH prompt exits immediately instead
-    # of stalling for 60+ seconds. Cheap & safe to always pass.
-    # ------------------------------------------------------------------
+    # missing credential or hanging SSH prompt exits immediately
+    # instead of stalling for 60+ seconds. Cheap and safe to always
+    # pass.
     _GIT_FAIL_FAST_ENV: Dict[str, str] = {
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/echo",
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
     }
 
-    # ------------------------------------------------------------------
-    # Homepage → git URL heuristics. Applied as an ordered chain when
+    # Homepage-to-git-URL heuristics. Applied as an ordered chain when
     # the raw URL cannot be cloned. Order matters: most specific first,
     # generic fallbacks last. Every substitution must yield a syntactic
     # git URL (ends with a repo name, optionally `.git`); the actual
     # existence is verified by trying to clone.
-    # ------------------------------------------------------------------
     _HOMEPAGE_TO_GIT_RULES = (
         # `https://www.gnu.org/software/<name>/` → savannah
         (
@@ -467,12 +487,17 @@ class ScriptedOperations:
         Returns:
             The successful ``CommandResult`` if any variant clones
             cleanly, otherwise ``None``.
+
+        Raises:
+            ValueError: If ``name`` holds a character outside
+                ``[A-Za-z0-9_.-]`` or ``url`` is not an http or https URL.
         """
-        # Validate name — only allow safe path components
+        # ``name`` becomes a container path component and ``url`` a
+        # clone argument; reject anything that could escape the repos
+        # directory or hand git a non-http transport.
         if not re.fullmatch(r"[A-Za-z0-9_.\-]+", name):
             raise ValueError(f"Unsafe repo name: {name!r}")
 
-        # Validate url scheme
         if not url.startswith(("https://", "http://")):
             raise ValueError(f"Refusing non-http URL: {url!r}")
 
@@ -513,7 +538,12 @@ class ScriptedOperations:
     def _fresh_clone(
         self, url: str, name: str, container_repo_path: str
     ) -> CommandResult:
-        """Remove any old clone and perform the normal clone fallback flow."""
+        """Clone from scratch: remove any old clone first.
+
+        An auth failure is retried once without the token (a bad token
+        blocks even public repos); a clone that still fails falls
+        through to the URL variants.
+        """
         execute_command(["rm", "-rf", container_repo_path], use_docker=True)
 
         logger.info(f"Cloning repository {url}...")
@@ -632,7 +662,6 @@ class ScriptedOperations:
             return "/workspace" + path[len(self.workspace_root) :]
         return path
 
-    # ------------------------------------------------------------------
     # Container-health precheck. Detects a "poisoned" sandbox — one
     # where a previous package's LLM fix broke git or apt — and repairs
     # it in place before we try to clone anything. Observed root cause
@@ -640,18 +669,18 @@ class ScriptedOperations:
     # one repo's fix added a broken deb source to sources.list.d, then
     # every subsequent repo failed with `git: command not found` or
     # `apt-get update` errors because git was missing / apt was wedged.
-    # ------------------------------------------------------------------
     def _ensure_container_healthy(self) -> None:
         """Verify sandbox tooling is intact; repair in place if not.
 
         Runs at most three cheap probes:
             1. ``git --version`` — installs ``git`` via the active
                platform profile if missing (exit 127).
-            2. ``apt-get update`` / ``apk update`` — if it fails, drops
-               any files under ``/etc/apt/sources.list.d/`` and
-               ``/etc/apk/repositories.d/`` that are not part of the
-               base image (heuristic: created within the last day).
-            3. Retries the failing probe once after repair.
+            2. ``apt-get update``, on Debian and Ubuntu only — if it
+               fails with a ``Release`` file error, drops any files
+               under ``/etc/apt/sources.list.d/`` that are not part of
+               the base image (heuristic: modified within the last
+               day, ``-mmin -1440``).
+            3. Retries ``apt-get update`` once after that repair.
 
         All failures are non-fatal (best effort); the subsequent clone
         will surface the real error via ``CommandResult``.
@@ -725,7 +754,7 @@ class ScriptedOperations:
                     )
 
     def _init_submodules_if_present(self, container_repo_path: str) -> None:
-        """Best-effort ``git submodule update --init --recursive``.
+        """Run ``git submodule update --init --recursive``, best effort.
 
         Runs only when the cloned repo contains a top-level
         ``.gitmodules``; downgrades any failure to a warning. Many Go
@@ -754,11 +783,19 @@ class ScriptedOperations:
             )
 
     def clone_or_update_repository(self, url: str, name: str) -> CommandResult:
-        """Clone a repository or update it if it already exists.
+        """Clone a repository, or reset it to upstream if it exists.
 
-        This is a zero-cost operation. Clones run inside the Docker
-        container to avoid ownership issues. If ``git pull`` fails (for
-        example a force-pushed branch), it falls back to a re-clone.
+        This is a zero-cost operation. Clones run inside the sandbox
+        container to avoid ownership issues. An existing clone is
+        fetched, hard-reset to ``FETCH_HEAD`` and cleaned with
+        ``git clean -fdx``; if that fails (for example a force-pushed
+        branch), it falls back to a re-clone. An existing clone whose
+        ``origin`` differs from ``url`` is also cloned again.
+
+        Before the clone, it checks the sandbox and repairs a missing
+        git or broken apt sources (see ``_ensure_container_healthy``).
+        After the clone, it adds the clone to the container's global
+        git ``safe.directory`` list and initializes any submodules.
 
         GitHub auth (when a token is configured) is injected
         per-invocation via ``GIT_CONFIG_*`` environment variables — it
@@ -772,6 +809,11 @@ class ScriptedOperations:
 
         Returns:
             The ``CommandResult`` of the clone or update operation.
+
+        Raises:
+            ValueError: If ``name`` starts with a dot or holds a
+                character outside ``[A-Za-z0-9_.-]``, or if ``url`` is
+                not an http or https URL.
         """
         self._auth_tls.env = self._github_auth_env(url)
         try:
@@ -788,14 +830,12 @@ class ScriptedOperations:
         if not url.startswith(("https://", "http://")):
             raise ValueError(f"Refusing non-http URL: {url!r}")
 
-        # Use container path
         container_repo_path = f"/workspace/repos/{name}"
         host_repo_path = os.path.join(self.repos_dir, name)
 
-        # ------------------------------------------------------------
-        # Container-health precheck: make sure the sandbox still has
-        # git / working apt sources before we attempt anything else.
-        # ------------------------------------------------------------
+        # A previous package's fixes may have poisoned the sandbox
+        # itself (broken git, wedged apt sources); repair it before
+        # cloning into it.
         self._ensure_container_healthy()
 
         # Check if already exists (on the host for qemu, for speed; in
@@ -811,19 +851,18 @@ class ScriptedOperations:
             ):
                 result = self._fresh_clone(url, name, container_repo_path)
             else:
-                # STRATEGIC HARDENING (dasel regression, 2026-07-01): a
-                # previous run's LLM may have authored broken files (e.g. a
-                # syntactically-invalid Makefile or half-applied patches).
-                # `git pull` alone preserves those files (they are untracked
-                # or committed-locally), so every subsequent run replays the
-                # same failure. Always reset to pristine upstream state
-                # before touching the working tree; this keeps every run
-                # idempotent and preserves the self-healing contract.
+                # Reset to pristine upstream state instead of `git
+                # pull`: a previous run's LLM may have left broken files
+                # (a syntactically invalid Makefile, half-applied
+                # patches) that pull preserves as untracked or locally
+                # committed, replaying the same failure on every run
+                # (dasel regression, 2026-07-01). The reset keeps every
+                # run idempotent.
                 # Reset to FETCH_HEAD rather than a command-substituted
                 # `origin/<branch>`: if `git remote show origin` fails
-                # (network / non-English locale) the substitution is empty
-                # and `git reset --hard` silently resets to the poisoned
-                # LOCAL head — exactly the state this hardening removes.
+                # (network, non-English locale) the substitution is
+                # empty and `git reset --hard` silently resets to the
+                # poisoned local head — the state this reset removes.
                 reset_cmd = (
                     f"cd {container_repo_path} && "
                     f"git fetch --depth 1 origin && "
@@ -848,8 +887,8 @@ class ScriptedOperations:
         else:
             result = self._fresh_clone(url, name, container_repo_path)
 
-        # Configure git safe.directory to prevent "dubious ownership" errors
-        # This is needed because the workspace is mounted from host
+        # The workspace is a host mount, so git would report "dubious
+        # ownership" for the clone unless it is marked safe.
         if result.success or self._exists_in_workspace(
             container_repo_path, host_repo_path
         ):
@@ -863,26 +902,30 @@ class ScriptedOperations:
                     f"Failed to add safe.directory: {safe_result.stderr}"
                 )
 
-        # Auto-init any git submodules the repo declares. Non-fatal.
         if result.success:
             self._init_submodules_if_present(container_repo_path)
 
         return result
 
     def get_repository_info(self, repo_path: str) -> Dict[str, str]:
-        """Get basic repository information."""
-        # Use container path for git operations
+        """Return commit, branch and file count of the cloned repo.
+
+        Args:
+            repo_path: Path to the repository root.
+
+        Returns:
+            A dict with any of the keys ``commit``, ``branch`` and
+            ``file_count``; a key is absent when its probe fails.
+        """
         container_path = self._to_container_path(repo_path)
         info = {}
 
-        # Get current commit
         result = execute_command(
             f"cd {container_path} && git rev-parse HEAD", use_docker=True
         )
         if result.success:
             info["commit"] = result.stdout.strip()
 
-        # Get branch
         result = execute_command(
             f"cd {container_path} && git branch --show-current",
             use_docker=True,
@@ -890,7 +933,6 @@ class ScriptedOperations:
         if result.success:
             info["branch"] = result.stdout.strip()
 
-        # Count files
         result = execute_command(
             f"find {container_path} -type f | wc -l", use_docker=True
         )
@@ -899,7 +941,7 @@ class ScriptedOperations:
 
         return info
 
-    # ========== Build System Detection ==========
+    # Build system detection
 
     def _has_npm_build_script(self, repo_path: str) -> bool:
         """Check if package.json has a 'build' script (true npm project)."""
@@ -971,7 +1013,9 @@ class ScriptedOperations:
 
         Args:
             repo_path: Host path to the repository root.
-            max_depth: Directory levels below the root to search.
+            max_depth: Depth limit. Only directories less than
+                ``max_depth`` levels below the root are searched, so the
+                default of 3 searches the first 2 levels.
 
         Returns:
             ``(build_system, relative_path_to_build_file)`` or None.
@@ -1038,8 +1082,8 @@ class ScriptedOperations:
             for file in files:
                 filepath = os.path.join(repo_path, file)
                 if os.path.exists(filepath):
-                    # npm requires stricter detection: need a
-                    # lockfile or a build script
+                    # A bare package.json is not enough for npm: require
+                    # package-lock.json or a "build" script.
                     if build_sys == "npm":
                         has_lock = os.path.exists(
                             os.path.join(repo_path, "package-lock.json")
@@ -1104,14 +1148,12 @@ class ScriptedOperations:
             logger.info("Only Makefile found; detected as make (fallback)")
 
         if not detected:
-            # Nested build root: a project whose CMakeLists/Makefile/
-            # meson.build/configure.ac lives in a subdirectory (src/,
-            # build/, <name>/) was previously reported as "unknown", so
-            # the workflow fell back to a generic `make` in the repo
-            # root and failed with "No targets specified and no makefile
-            # found". Search a bounded depth and record the module_dir
-            # so both the scout prompt and the builder know where the
-            # real root is.
+            # The build file may live in a subdirectory (src/, build/,
+            # <name>/). Without this search the repo is "unknown" and
+            # the workflow runs a generic `make` in the repo root,
+            # failing with "No targets specified and no makefile
+            # found". Record the module_dir so the scout prompt and
+            # the builder know where the real root is.
             nested = self._find_nested_build_root(repo_path)
             if nested:
                 sys_name, rel_file = nested
@@ -1153,10 +1195,9 @@ class ScriptedOperations:
                 additional_files=[],
             )
 
-        # Priority boost: prefer Go over npm when both detected
+        # Prefer Go over npm when both are detected.
         sys_types = {s for s, _ in detected}
         if "go" in sys_types and "npm" in sys_types:
-            # Demote npm below go
             if (
                 "npm" in confidence_scores
                 and "go" in confidence_scores
@@ -1173,11 +1214,9 @@ class ScriptedOperations:
             if sys == best_system[0] and f != primary_file
         ]
 
-        # Record the directory holding the primary build file whenever it
-        # is not the repo root. Previously only go/cargo populated this,
-        # so a nested CMakeLists/Makefile root was detected but never
-        # communicated — the scout prompt and builder both assumed the
-        # repo root and the build failed there.
+        # Record the directory holding the primary build file when it
+        # is not the repo root: the scout prompt and the builder read
+        # module_dir, and without it they build in the wrong directory.
         module_dir = ""
         if "/" in primary_file:
             module_dir = primary_file.rsplit("/", 1)[0]
@@ -1190,7 +1229,7 @@ class ScriptedOperations:
             module_dir=module_dir,
         )
 
-    # ========== Dependency Detection ==========
+    # Dependency detection
 
     def extract_dependencies(
         self, repo_path: str, build_system: str, module_dir: str = ""
@@ -1202,6 +1241,8 @@ class ScriptedOperations:
         Args:
             repo_path: Path to the repository root.
             build_system: The detected build system name.
+            module_dir: Subdirectory holding the primary build file,
+                or "" for the repository root.
 
         Returns:
             A ``DependencyInfo`` with the extracted dependencies.
@@ -1240,7 +1281,6 @@ class ScriptedOperations:
         with open(cmake_file, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
-        # Find find_package() calls
         package_pattern = r"find_package\s*\(\s*(\w+)"
         packages = re.findall(package_pattern, content, re.IGNORECASE)
         pkg_modules: List[str] = []
@@ -1260,11 +1300,13 @@ class ScriptedOperations:
                     pkg_modules.append(module)
 
         # Map common CMake packages to canonical names; PlatformProfile
-        # resolves to the distro package at install time.
+        # resolves each one to the active distro's package name.
         from .platforms import get_active_profile
 
         profile = get_active_profile()
         canonical_map = {
+            # Threads has no package of its own; the C library's dev
+            # package provides the pthread headers.
             "Threads": "musl-dev",
             "OpenSSL": "openssl",
             "ZLIB": "zlib",
@@ -1285,7 +1327,6 @@ class ScriptedOperations:
             if module not in deps.libraries:
                 deps.libraries.append(module)
 
-        # Common build tools for CMake
         deps.build_tools = ["cmake", "make", "gcc", "g++"]
 
         return deps
@@ -1304,7 +1345,6 @@ class ScriptedOperations:
             with open(cargo_file, "r") as f:
                 cargo_config = toml.load(f)
 
-            # Extract dependencies
             if "dependencies" in cargo_config:
                 deps.libraries = list(cargo_config["dependencies"].keys())
         except Exception as e:
@@ -1314,17 +1354,15 @@ class ScriptedOperations:
         return deps
 
     def _extract_python_dependencies(self, repo_path: str) -> DependencyInfo:
-        """Extract dependencies from requirements.txt or setup.py."""
+        """Extract dependencies from requirements.txt only."""
         deps = DependencyInfo(install_method="pip")
 
-        # Check requirements.txt
         req_file = os.path.join(repo_path, "requirements.txt")
         if os.path.exists(req_file):
             with open(req_file, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        # Extract package name (before ==, >=, etc.)
                         pkg = re.split(r"[=<>!]", line)[0].strip()
                         deps.libraries.append(pkg)
 
@@ -1369,8 +1407,6 @@ class ScriptedOperations:
         #   require (                                (block)
         #       example.com/pkg v1.2.3
         #   )
-        # The old single-line-only regex captured a literal "(" for
-        # block form — i.e. for most real go.mod files.
         libraries: List[str] = []
         for match in re.finditer(r"require\s+\(([^)]*)\)", content, re.DOTALL):
             for line in match.group(1).splitlines():
@@ -1397,7 +1433,13 @@ class ScriptedOperations:
             repo_path: Path to the repository root.
 
         Returns:
-            A dict describing where the main package is located.
+            A dict describing where the main package is located, with
+            the keys ``has_main``, ``main_path``, ``module_dir``,
+            ``build_command``, ``needs_go_init``, ``has_go_mod`` and
+            ``has_go_files``. ``has_go_files`` is True only for a repo
+            with ``.go`` files and no ``go.mod``. The key
+            ``all_main_paths`` is present only when the chosen module
+            holds a main package.
         """
         result = {
             "has_main": False,
@@ -1426,7 +1468,6 @@ class ScriptedOperations:
                 # GOPATH-style repo: has .go files but no go.mod
                 result["needs_go_init"] = True
                 result["has_go_files"] = True
-                # Try to find main package anyway
                 for root, dirs, files in os.walk(repo_path):
                     _prune_vendored_dirs(dirs)
                     for f in files:
@@ -1452,7 +1493,8 @@ class ScriptedOperations:
 
         result["has_go_mod"] = True
 
-        # Prefer go_mod entry whose root has main.go or cmd/, else first
+        # Prefer the go.mod whose root has main.go, cmd/ or a main
+        # package (see _score_go_subdir); on a tie, keep the first.
         best_mod = go_mod_files[0]
         if len(go_mod_files) > 1:
             scored = [
@@ -1562,7 +1604,6 @@ class ScriptedOperations:
         with open(makefile, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
-        # Look for common library flags
         lib_pattern = r"-l(\w+)"
         libs = re.findall(lib_pattern, content)
 
@@ -1574,6 +1615,8 @@ class ScriptedOperations:
             "ssl": "openssl",
             "crypto": "openssl",
             "z": "zlib",
+            # pthread, dl and m are part of the C library, not
+            # packages of their own.
             "pthread": "musl-dev",
             "dl": "musl-dev",
             "m": "musl-dev",
@@ -1589,7 +1632,7 @@ class ScriptedOperations:
         deps.build_tools = ["make", "gcc", "g++"]
         return deps
 
-    # ========== Architecture-Specific Code Detection ==========
+    # Architecture-specific code detection
 
     def find_architecture_specific_code(
         self, repo_path: str
@@ -1597,6 +1640,7 @@ class ScriptedOperations:
         """Search for architecture-specific code patterns.
 
         This is a zero-cost bounded scan over source and build files.
+        It returns at most 40 findings, and at most 8 per category.
 
         Args:
             repo_path: Path to the repository root.
@@ -1874,10 +1918,21 @@ class ScriptedOperations:
         }
         return suggestions.get(arch_type, "Review and port to RISC-V")
 
-    # ========== File Operations ==========
+    # File operations
 
     def get_file_tree(self, repo_path: str, max_depth: int = 3) -> str:
-        """Get a tree view of the repository."""
+        """Return a directory listing of the repository.
+
+        Uses ``tree`` in the sandbox and falls back to a ``find``
+        listing of up to 100 files when ``tree`` is unavailable.
+
+        Args:
+            repo_path: Path to the repository root.
+            max_depth: Levels below the root to show.
+
+        Returns:
+            The listing text.
+        """
         target_path = self._to_container_path(repo_path)
 
         cmd = (
@@ -2034,7 +2089,19 @@ class ScriptedOperations:
         return "\n".join(sections)
 
     def read_file(self, filepath: str, max_lines: int = 1000) -> str:
-        """Read file content with line limit."""
+        """Read up to ``max_lines`` lines of a text file.
+
+        Args:
+            filepath: Path to the file; a ``/workspace`` container path
+                is mapped to the host path first.
+            max_lines: Maximum number of lines to return.
+
+        Returns:
+            The file content, followed by a truncation marker when the
+            file is longer. On failure returns a ``"File not found:
+            ..."`` or ``"Error reading file: ..."`` string instead of
+            raising.
+        """
         filepath = self._to_host_path(filepath)
         if not os.path.exists(filepath):
             return f"File not found: {filepath}"
@@ -2053,10 +2120,18 @@ class ScriptedOperations:
         except Exception as e:
             return f"Error reading file: {e}"
 
-    # ========== Documentation Search ==========
+    # Documentation search
 
     def find_documentation(self, repo_path: str) -> List[str]:
-        """Find common documentation files."""
+        """Return the repository's documentation files, most useful first.
+
+        Args:
+            repo_path: Path to the repository root.
+
+        Returns:
+            Up to 10 container paths of documentation files; paths
+            containing README, INSTALL, BUILDING or BUILD come first.
+        """
         target_path = self._to_container_path(repo_path)
         doc_patterns = [
             "README*",
@@ -2077,25 +2152,32 @@ class ScriptedOperations:
             if result.success and result.stdout.strip():
                 found_docs.extend(result.stdout.strip().split("\n"))
 
-        # Remove duplicates and sort by likely importance
         unique_docs = list(set(found_docs))
 
-        # Prioritize certain files
         priority = ["README", "INSTALL", "BUILDING", "BUILD"]
         sorted_docs = []
 
         for p in priority:
             sorted_docs.extend([d for d in unique_docs if p in d.upper()])
 
-        # Add remaining docs
         sorted_docs.extend([d for d in unique_docs if d not in sorted_docs])
 
-        return sorted_docs[:10]  # Limit to top 10
+        return sorted_docs[:10]
 
     def get_system_info(
         self, tools: Optional[List[str]] = None
     ) -> Dict[str, str]:
-        """Get system environment information inside the container."""
+        """Probe tool availability and architecture inside the sandbox.
+
+        Args:
+            tools: Tools to look up in the sandbox PATH; defaults to
+                the common build toolchain.
+
+        Returns:
+            A dict mapping each tool to "Available in PATH" or "Not
+            installed", plus an ``architecture`` entry from
+            ``uname -m``.
+        """
         info = {}
         if tools is None:
             tools = [
@@ -2114,14 +2196,14 @@ class ScriptedOperations:
             ]
 
         for tool in tools:
-            # Check availability INSIDE the container
+            # Probe inside the sandbox; the host's toolchain says
+            # nothing about the build environment.
             res = execute_command(f"which {tool}", use_docker=True)
             if res.success:
                 info[tool] = "Available in PATH"
             else:
                 info[tool] = "Not installed"
 
-        # Architecture check
         arch_res = execute_command("uname -m", use_docker=True)
         info["architecture"] = (
             arch_res.stdout.strip() if arch_res.success else "unknown"
@@ -2129,7 +2211,7 @@ class ScriptedOperations:
 
         return info
 
-    # ========== Helper Methods ==========
+    # Architecture-specific build files
 
     def detect_arch_specific_build_files(
         self, repo_path: str
@@ -2208,21 +2290,21 @@ class ScriptedOperations:
         return result
 
 
-# ============================================================================
-# CONVENIENCE FUNCTIONS
-# ============================================================================
+# One-call analysis
 
 
 def quick_analysis(repo_path: str) -> Dict[str, Any]:
-    """Perform quick repository analysis using only scripted operations.
-
-    This provides initial context without any LLM calls.
+    """Run the full zero-LLM-cost analysis of a repository.
 
     Args:
         repo_path: Path to the repository root.
 
     Returns:
-        A dict of analysis results.
+        A dict with ``repo_info``, ``build_system``, ``file_tree``,
+        ``optimized_tree``, ``documentation``, ``arch_build_files`` and
+        ``arch_specific_code``; plus ``go_main_info`` for Go
+        repositories and ``dependencies`` when the build system is
+        known.
     """
     ops = ScriptedOperations()
 

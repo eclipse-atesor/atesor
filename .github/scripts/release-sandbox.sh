@@ -7,11 +7,10 @@
 #
 # Default action per variant (alpine | debian):
 #   1) Discover highest existing `<variant>-v<M>.<n>` on the registry.
-#   2) Archive current `<variant>-latest` -> `<variant>-v<M>.<next>` via a
-#      registry-side copy (no local pull/push of the old image).
-#   3) Build a fresh linux/riscv64 image from the matching Dockerfile.
-#   4) Push the new build as `<variant>-v<M>.<next>` (immutable) and then
-#      `<variant>-latest` (pointer flip).
+#   2) Build a fresh linux/riscv64 image from the matching Dockerfile.
+#   3) Push the new build as `<variant>-v<M>.<next>` (immutable) and then
+#      `<variant>-latest` (pointer flip). The run stops if the pinned tag
+#      already exists.
 #
 # Version bumping:
 #   default      bump MINOR within highest MAJOR  (v1.5 -> v1.6)
@@ -37,12 +36,14 @@
 #   .github/scripts/release-sandbox.sh --no-cache      # docker build --no-cache
 #
 # Requirements: bash 4+, docker (with buildx), curl, python3.
+# A push needs a Docker Hub login. ATESOR_DOCKERHUB_REPO sets the default
+# repo. Destructive: the run replaces `<variant>-latest` on the registry.
+# It asks first unless --yes or --dry-run is set. It can also register
+# riscv64 binfmt_misc on the host with a privileged container.
 
 set -euo pipefail
 
-# ----------------------------------------------------------------------------
 # Defaults
-# ----------------------------------------------------------------------------
 REPO="${ATESOR_DOCKERHUB_REPO:-cloudv10x/atesor-sandbox}"
 PLATFORM="linux/riscv64"
 DOCKERFILE_ALPINE="Dockerfile"
@@ -56,9 +57,7 @@ NO_CACHE=0
 BUMP_MAJOR=0
 EXPLICIT_VERSION=""   # set via --version X.Y
 
-# ----------------------------------------------------------------------------
 # Pretty logging
-# ----------------------------------------------------------------------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
     C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
@@ -74,9 +73,7 @@ warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die()  { printf '%s[FAIL]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; exit 1; }
 hr()   { printf '%s%s%s\n' "$C_DIM" "------------------------------------------------------------" "$C_RESET"; }
 
-# ----------------------------------------------------------------------------
 # CLI parsing
-# ----------------------------------------------------------------------------
 usage() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [[ $# -gt 0 ]]; do
@@ -114,9 +111,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# ----------------------------------------------------------------------------
 # Preflight
-# ----------------------------------------------------------------------------
 preflight() {
     log "Preflight checks (repo=$REPO, platform=$PLATFORM)"
 
@@ -165,9 +160,7 @@ sys.exit(0 if any('docker.io' in k or 'index.docker.io' in k for k in keys) else
     ok "Preflight passed"
 }
 
-# ----------------------------------------------------------------------------
 # Registry helpers
-# ----------------------------------------------------------------------------
 
 # Echo all tags from Docker Hub for $REPO, one per line. Paginated.
 fetch_tags() {
@@ -253,9 +246,7 @@ registry_copy() {
     ok "Archived ${REPO}:${src} as ${REPO}:${dst}"
 }
 
-# ----------------------------------------------------------------------------
 # Per-variant release
-# ----------------------------------------------------------------------------
 release_variant() {
     local variant="$1" dockerfile="$2"
     hr
@@ -278,20 +269,11 @@ release_variant() {
 Use --bump-major or --version X.Y to choose a different version."
     fi
 
-    # Step A — archive current `<variant>-latest` to the new pinned tag
-    # BEFORE we overwrite it. Skip on first ever release of this variant.
-    #
-    # NOTE: this means the "archive" and the "new build" share the same
-    # version number on first encounter — i.e. the existing moving tag IS
-    # this version's snapshot. After the build+push below the pinned tag
-    # gets overwritten with the new digest, which is intentional: the new
-    # build IS the new version. If you want to preserve the pre-existing
-    # `<variant>-latest` under its OWN version, pass --bump-major (so the
-    # archive lands at vN.0 and the new build at vN+1.0) — or archive it
-    # manually first.
-    #
-    # Because we refuse to clobber pinned tags above, this only fires for
-    # truly fresh `<variant>-latest` with no matching pinned version yet.
+    # Step A — log whether `<variant>-latest` exists. The new build
+    # replaces it, and nothing archives it first. An earlier run of this
+    # script pushed that image under its own pinned tag too. To keep a
+    # moving tag that has no pinned tag, copy it by hand first (see the
+    # header).
     if remote_tag_exists "$moving_tag"; then
         log "Found existing ${REPO}:${moving_tag} — will be replaced by new build."
     else
@@ -333,9 +315,7 @@ Use --bump-major or --version X.Y to choose a different version."
     log "${C_GREEN}${C_BOLD}Variant ${variant} released as v${next_ver}${C_RESET}"
 }
 
-# ----------------------------------------------------------------------------
 # Main
-# ----------------------------------------------------------------------------
 main() {
     preflight
 

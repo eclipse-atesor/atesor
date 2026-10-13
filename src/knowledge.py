@@ -11,10 +11,12 @@
 
 """Static knowledge base for RISC-V porting.
 
-Distro-specific bits (package names, install commands, libc-specific
-errors) live in `src.platforms.PlatformProfile`. This module covers the
+Distro-specific bits (package names, install commands, libc notes)
+live in `src.platforms.PlatformProfile`. This module covers the
 distro-agnostic RISC-V architecture knowledge plus a renderer that
 composes the full system_knowledge prompt block from a given profile.
+`src.graph` injects the rendered block into the scout and fixer
+prompts.
 """
 
 from typing import Optional
@@ -29,9 +31,7 @@ from .platforms import (
 ALPINE_TOOL_MAP = ALPINE_RISCV.package_map
 ALPINE_PACKAGE_CORRECTIONS = ALPINE_RISCV.name_corrections
 
-# ============================================================================
-# RISC-V ARCHITECTURE KNOWLEDGE
-# ============================================================================
+# RISC-V architecture knowledge
 
 RISCV_PREPROCESSOR_MACROS = {
     "__riscv": "Defined on any RISC-V target",
@@ -45,7 +45,8 @@ RISCV_PREPROCESSOR_MACROS = {
     "__riscv_compressed": "Defined when C (compressed) extension is present",
 }
 
-# Common error patterns when porting to RISC-V on Alpine/musl
+# Failure patterns seen when porting to RISC-V. Only ``musl_libc`` is
+# distro-specific; the renderer drops it for glibc profiles.
 COMMON_PORTING_ISSUES = {
     "x86_intrinsics": {
         "symptoms": [

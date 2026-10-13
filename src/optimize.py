@@ -66,14 +66,15 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import bench, workload as workloads
+from . import bench
+from . import workload as workloads
 from .machine import (
     MachineProfile,
     align_flags,
     check_integrity,
     forbidden_classes,
-    integrity_failures,
     goriscv64_for,
+    integrity_failures,
     march_for,
     probe_machine,
     rust_flags_for,
@@ -86,6 +87,7 @@ from .workload import rewrite_for_tree
 logger = logging.getLogger(__name__)
 
 BUDGET_SECONDS = 3600
+# Six ladder tunes at most (c_ladder yields up to six), plus one PGO.
 MAX_VARIANTS = 7
 BUILD_TIMEOUT = 1800
 MIN_STEP_SECONDS = 300
@@ -94,7 +96,11 @@ PGO_COST_FACTOR = 2.0
 OPT_SUFFIX = ".opt"
 MEASURE_SEED = "atesor-measure"
 TRAIN_SEED = "atesor-train"
+# Another function alignment changes the code layout without changing
+# the code; the second check applies it to both builds, so a gain from
+# a lucky layout cannot pass.
 SECOND_LAYOUT_FLAG = "-falign-functions=64"
+# LLVM takes the alignment as log2 bytes: 6 is 64, the same change.
 RUST_SECOND_LAYOUT = "-C llvm-args=-align-all-functions=6"
 BASE_ID = "base"
 # Stands for the variant tree in stored flags; variant_env() fills it.
@@ -230,6 +236,11 @@ def language_of(build_system: Optional[str]) -> str:
 
 
 def _cxx_for(compiler: str) -> str:
+    """Return the C++ driver of a C compiler command.
+
+    A versioned clang maps to its versioned C++ name (``clang-19`` to
+    ``clang++-19``); an unknown compiler name comes back unchanged.
+    """
     if compiler == "gcc":
         return "g++"
     if compiler.startswith("clang"):
@@ -238,6 +249,7 @@ def _cxx_for(compiler: str) -> str:
 
 
 def _best_clang(profile: MachineProfile) -> Optional[str]:
+    """Return the newest probed clang that emits bitmanip code, or None."""
     compilers = profile.toolchains.get("compilers", {})
     usable = [
         name
@@ -255,7 +267,8 @@ def c_ladder(profile: MachineProfile) -> List[Variant]:
 
     Each GCC tune keeps the flags of the tunes before it. A tune whose
     precondition fails (no known core, no ISA extras, no vector unit,
-    no LTO support, no usable clang) is left out.
+    no LTO support, no usable clang) is left out. Without GCC in the
+    probe, the list is empty.
     """
     compilers = profile.toolchains.get("compilers", {})
     if "gcc" not in compilers:
@@ -334,7 +347,11 @@ def c_ladder(profile: MachineProfile) -> List[Variant]:
 
 
 def go_ladder(profile: MachineProfile) -> List[Variant]:
-    """Return the Go tunes: the GORISCV64 level from the probe."""
+    """Return the Go tunes: the GORISCV64 level from the probe.
+
+    The list is empty when the probe gives ``rva20u64``, Go's default
+    level.
+    """
     level, note = goriscv64_for(profile)
     if level == "rva20u64":
         return []
@@ -480,8 +497,8 @@ def redundant_tunes(
 ) -> Dict[str, str]:
     """Return ``vid -> reason`` for the tunes that the build has already.
 
-    ``-O3`` is redundant when every source compile uses ``-O3``; LTO is
-    redundant when the build already links with ``-flto``.
+    ``-O3`` is redundant when every source compile uses ``-O3``; C/C++
+    LTO is redundant when a source compile already uses ``-flto``.
     """
     reasons: Dict[str, str] = {}
     for variant in ladder:
@@ -500,6 +517,7 @@ def redundant_tunes(
 
 
 def _words(segment: str) -> List[str]:
+    """Split a shell segment into words, tolerating unbalanced quotes."""
     try:
         return shlex.split(segment)
     except ValueError:
@@ -507,6 +525,7 @@ def _words(segment: str) -> List[str]:
 
 
 def _command_words(words: List[str]) -> List[str]:
+    """Return the command words past any leading sudo, env or VAR=value."""
     index = 0
     while index < len(words) and (
         words[index] in ("sudo", "env") or _ASSIGNMENT.match(words[index])
@@ -516,6 +535,7 @@ def _command_words(words: List[str]) -> List[str]:
 
 
 def _until_operator(words: List[str]) -> List[str]:
+    """Return the words before the first shell operator or redirection."""
     for index, word in enumerate(words):
         if word in _SHELL_OPERATORS or re.match(r"^\d*>", word):
             return words[:index]
@@ -523,6 +543,10 @@ def _until_operator(words: List[str]) -> List[str]:
 
 
 def _outside(path: str, repo_path: str) -> bool:
+    """Return True for an absolute path outside the tree.
+
+    ``/dev`` counts as inside: a command may redirect to /dev/null.
+    """
     if not path.startswith("/") or path.startswith("/dev/"):
         return False
     repo = repo_path.rstrip("/")
@@ -711,6 +735,7 @@ removed = {"dirs": [], "files": 0}
 
 
 def is_build_dir(path, rel, name, top):
+    # True for a directory of build output that git does not track.
     if tracked is None or rel in tracked_dirs:
         return False
     return (
@@ -759,7 +784,9 @@ os.makedirs(wrapper_dir, exist_ok=True)
 for name, real in (("cc", "ATESOR_REAL_CC"), ("cxx", "ATESOR_REAL_CXX")):
     lines = [
         "#!/bin/sh",
-        "# Atesor: the real compiler, then the variant flags.",
+        "# Atesor wrapper: the call's own arguments first, the tune",
+        "# flags last, so they win over the project's own (of repeated",
+        "# options like -O and -march, the compiler uses the last one).",
         'printf "%s\\n" "$*" >> "${ATESOR_CC_LOG:-/dev/null}"',
         "exec $" + real + ' "$@" $ATESOR_CC_FLAGS',
     ]
@@ -771,9 +798,10 @@ sys.stdout.write("@@MARKER@@" + json.dumps(removed) + "\n")
 '''
 
 # Runs in the sandbox. Argument: JSON {"tree", "artifacts" (relative
-# paths), "log", "go", "max_scans", "max_bytes"}. Reports the compiler
-# calls and, per artifact: existence, size, SHA-256, e_machine, the
-# RISC-V attribute tags and a count of instructions per extension class.
+# paths), "log", "read_log", "go", "max_scans", "max_bytes"}. Reports
+# the compiler calls and, per artifact: existence, size, SHA-256,
+# e_machine, the RISC-V attribute tags and a count of instructions per
+# extension class.
 _INSPECT_PROGRAM = r'''
 import glob
 import hashlib
@@ -788,6 +816,7 @@ SPEC = json.loads(sys.argv[1])
 
 
 def uleb(data, pos):
+    # Decode the ULEB128 value at pos; return (value, next position).
     value, shift = 0, 0
     while pos < len(data):
         byte = data[pos]
@@ -800,6 +829,7 @@ def uleb(data, pos):
 
 
 def attributes(data):
+    # Parse a .riscv.attributes section body into {tag: value}.
     tags = {}
     if not data or data[:1] != b"A":
         return tags
@@ -830,6 +860,7 @@ def attributes(data):
 
 
 def classify32(w):
+    # The extension class of a 32-bit instruction word, or None.
     op, f3 = w & 0x7F, (w >> 12) & 7
     f7, rs2, top6 = w >> 25, (w >> 20) & 0x1F, w >> 26
     imm = w >> 20
@@ -909,6 +940,7 @@ def classify32(w):
 
 
 def classify16(h):
+    # The extension class of a 16-bit instruction word, or None.
     quadrant, f3 = h & 3, (h >> 13) & 7
     if quadrant == 0 and f3 == 4:
         return "zcb"
@@ -992,6 +1024,8 @@ def members(data):
 
 
 def scan(path, budget):
+    # One artifact: identity and hashes, ELF/archive facts, instruction
+    # counts (only while the byte budget lasts).
     info = {"exists": os.path.isfile(path)}
     if not info["exists"]:
         return info
@@ -1041,6 +1075,7 @@ def scan(path, budget):
 
 
 def go_settings(path):
+    # The GORISCV64 and -pgo build settings embedded in a Go binary.
     settings = {}
     proc = subprocess.run(
         ["go", "version", "-m", path],
@@ -1101,6 +1136,8 @@ def main():
         if not os.path.isfile(os.path.join(tree, rel)):
             actual = relocate(tree, rel) or rel
         path = os.path.join(tree, actual)
+        # Only the first max_scans artifacts get their instructions
+        # read; the rest report counts=None (see SCAN_LIMITS).
         budget = SPEC["max_bytes"] if index < SPEC["max_scans"] else 0
         try:
             info = scan(path, budget)
@@ -1198,6 +1235,8 @@ def _run_program(
 
 def prepare_tree(src: str, dest: str, root: str) -> Optional[str]:
     """Copy the patched tree to ``dest`` and remove compiled outputs.
+
+    It also writes the compiler wrappers to ``<dest>/.atesor``.
 
     Returns:
         None on success, or the error.
@@ -1305,14 +1344,20 @@ def gate_build_facts(
     variant: Variant,
     profile: MachineProfile,
     baseline: Optional[Dict[str, Any]] = None,
+    required: Optional[Sequence[str]] = None,
 ) -> Tuple[str, str, List[str]]:
-    """Gate 1: the artifacts, and proof that the variant reached them.
+    """Run gate 1: check the artifacts and prove the variant reached them.
 
     Args:
         facts: The inspection of the variant tree.
         variant: The variant.
         profile: The machine profile.
         baseline: The inspection of the baseline tree, or None.
+        required: The artifacts that the measurement needs: the
+            package's libraries and the timed program. A missing
+            artifact outside this list is a warning, because it cannot
+            change a timing. None requires every artifact, which is
+            what the rebuild of the verified build gets.
 
     Returns:
         ``(outcome, reason, warnings)``; the outcome is ``passed``,
@@ -1326,6 +1371,16 @@ def gate_build_facts(
         return "failed", "the build has no artifact to check", warnings
     for rel, info in artifacts.items():
         if not info.get("exists"):
+            if required is not None and rel not in required:
+                # A tune's configure step can drop a build-time helper
+                # (a coverage or instruction-set test program) while
+                # the library and the timed program build. The timing
+                # never runs that helper, so the tune stays valid.
+                warnings.append(
+                    f"{rel} was not built; the measurement does not use "
+                    "it, so it does not fail the tune"
+                )
+                continue
             return "failed", f"{rel} was not built", warnings
         machine = info.get("machine")
         if (info.get("elf") or info.get("archive")) and machine not in (
@@ -1394,7 +1449,12 @@ def gate_tests(
     baseline: Optional[Dict[str, Any]],
     result: Optional[Dict[str, Any]],
 ) -> Tuple[bool, str]:
-    """Gate 2: the variant passes the tests that the baseline passes."""
+    """Run gate 2: the variant must pass the tests the baseline passes.
+
+    Returns:
+        ``(passed, reason)``. The gate passes as not decisive when the
+        baseline tests did not pass.
+    """
     if not baseline or baseline.get("status") != "passed":
         status = (baseline or {}).get("status", "not run")
         return True, f"not decisive: the baseline tests were {status}"
@@ -1406,6 +1466,11 @@ def gate_tests(
 
 
 def _baseline_artifacts(state: Any) -> List[str]:
+    """Return the tree-relative paths of the verified artifacts.
+
+    Primary artifacts come first. A path outside the repo tree does
+    not count: a variant build only rebuilds what the tree holds.
+    """
     repo = state.repo_path.rstrip("/") + "/"
     ordered = sorted(
         state.curated_artifacts or state.build_artifacts or [],
@@ -1440,6 +1505,11 @@ def _job(
     repo_path: Optional[str] = None,
     paths: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    """Return the runner job of the workload for one tree.
+
+    ``env`` (the variant's GORISCV64, RUSTFLAGS, ...) merges into the
+    job's own environment.
+    """
     job = workloads.baseline_job(
         workload, tree, input_path, output_path, repo_path, paths
     )
@@ -1500,6 +1570,11 @@ def _other_containers() -> List[str]:
 
 
 class _Budget:
+    """Track the session's remaining seconds against a deadline.
+
+    ``left()`` may go negative; callers compare it with a floor.
+    """
+
     def __init__(self, seconds: float, clock: Callable[[], float]):
         self.clock = clock
         self.deadline = clock() + seconds
@@ -1528,6 +1603,7 @@ class _Reporter:
 
 
 def _step_timeout(context: Dict[str, Any], limit: int) -> int:
+    """Cap a step's timeout at the remaining budget, with a 60 s floor."""
     return int(min(limit, max(60, context["budget"].left())))
 
 
@@ -1688,7 +1764,8 @@ _KEEP_SCRIPT = (
     'for f in "$@"; do mkdir -p "{keep}/$(dirname "$f")" '
     '&& cp -pL "$f" "{keep}/$f" || exit 1; done'
 ).format(keep=KEEP_DIR)
-# Prints each artifact that it puts back.
+# Prints each artifact that it puts back; _restore_artifacts collects
+# those lines to report them.
 _RESTORE_SCRIPT = (
     'for f in "$@"; do cmp -s "{keep}/$f" "$f" && continue; '
     'rm -f "$f" && mkdir -p "$(dirname "$f")" && cp -p "{keep}/$f" "$f" '
@@ -1781,7 +1858,8 @@ def _build_and_check(
         return record, env
     record["facts"] = facts
     outcome, reason, warnings = gate_build_facts(
-        facts, variant, context["profile"], context.get("baseline_facts")
+        facts, variant, context["profile"], context.get("baseline_facts"),
+        context.get("required_artifacts"),
     )
     record["gate1"] = {
         "outcome": outcome,
@@ -1789,6 +1867,14 @@ def _build_and_check(
         "warnings": warnings,
         "cc_calls": facts.get("cc_calls"),
     }
+    # A gate that passes a tune in spite of something it noticed must
+    # say so: a reader who sees only the percent cannot know that an
+    # artifact went missing or that the code holds an instruction the
+    # machine lacks.
+    for warning in warnings:
+        context["report"].more(f"note: {warning}")
+        if warning not in context["result"]["warnings"]:
+            context["result"]["warnings"].append(warning)
     record["elf_artifacts"] = _elf_artifacts(facts)
     # Every artifact the tune built, static archives too: the accepted
     # tune ships all of them, not only its ELF files.
@@ -1871,6 +1957,7 @@ def _build_and_check(
 
 
 def _p_text(p_value: Optional[float]) -> str:
+    """Return a p-value as short console text, for example ``p=0.03``."""
     if p_value is None:
         return "p=?"
     if p_value < 1e-6:
@@ -2227,6 +2314,11 @@ def _layout_baseline(
 
 
 def _pgo_flags(family: str, profile_dir: str, mode: str) -> List[str]:
+    """Return a compiler family's PGO flags for ``generate`` or ``use``.
+
+    ``profile_dir`` must live outside the variant trees: the training
+    tree is removed before the final build reads the profile.
+    """
     if family == "clang":
         if mode == "generate":
             return [f"-fprofile-generate={profile_dir}"]
@@ -2279,6 +2371,8 @@ def _pgo_variant(
     """Train a profile on top of ``base``, then build and measure.
 
     With ``skip``, the tune is announced and skipped for that reason.
+    It returns None when PGO does not apply: no workload, a Rust tune,
+    or a Go workload that is not a Go benchmark.
     """
     root = context["root"]
     workload = context.get("workload")
@@ -2295,8 +2389,8 @@ def _pgo_variant(
         vid=vid,
         label=label,
         technique=PGO,
-        # C/C++ trains on a second input; Go trains on its benchmarks
-        # with the timing input.
+        # C/C++ trains on a second input when the workload reads one; Go
+        # trains on its benchmarks with the timing input.
         value="PGO, trained on a second input"
         if workload.input_kind and variant.language != "go"
         else "PGO, trained on the workload",
@@ -2530,9 +2624,10 @@ def run_optimization(
 
     Returns:
         The optimization record for ``state.optimization``. Its status
-        is ``accepted``, ``no gain``, ``not measured``, ``checked``
-        (QEMU), ``skipped`` or ``error``. A failed tune is recorded and
-        dropped; nothing here raises for it.
+        is ``accepted``, ``no gain``, ``not confirmed``,
+        ``not measured``, ``checked`` (QEMU), ``skipped`` or ``error``.
+        A failed tune is recorded and dropped; nothing here raises for
+        it.
     """
     started = clock()
     report = _Reporter(progress or (lambda message: None))
@@ -2698,6 +2793,7 @@ def run_optimization(
         "pin": max(profile.allowed_cpus) if profile.allowed_cpus else None,
         "trees": [],
         "report": report,
+        "result": result,
     }
     if context["budget"].left() < MIN_STEP_SECONDS:
         return stop(
@@ -2769,6 +2865,17 @@ def run_optimization(
     result["notes"] += notes
     result["workload"] = workload.to_dict() if workload else None
     context["workload"] = workload
+    # Gate 1 fails a tune that misses one of these: the package's
+    # libraries and the program that the workload times. With neither,
+    # every artifact stays required. Every other artifact of the
+    # verified build becomes a warning when a tune does not build it
+    # (see :func:`gate_build_facts`). The rebuild of the verified build
+    # ran before this point and needed every artifact; the
+    # second-layout baseline, built later, gets this list.
+    needed = set(package.libraries)
+    if workload is not None and workload.binary:
+        needed.add(workload.binary)
+    context["required_artifacts"] = sorted(needed) or None
     # The baseline build carries no tune flags, so a crash there is a
     # fault of the port. It needs its own line: a reader must not read
     # it as a workload that Atesor could not write.

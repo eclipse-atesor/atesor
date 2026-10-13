@@ -2,24 +2,33 @@
 
 Goals:
   * Isolate every test from shared global state (MEMORY_INSTANCES,
-    active platform profile, llm_logger file handle).
+    the active platform profile, the cached execution target, and the
+    native mirror state).
   * Never touch the network, never launch a real Docker exec, never
     call an LLM.
   * Make file-system side effects opt-in via the `tmp_path` builtin.
+    The session fails if a test changes a git-tracked file under data/.
 """
 
 from __future__ import annotations
 
 import hashlib
 import subprocess
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pytest
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _guard_tracked_data_files() -> Iterator[None]:
-    """Fail if tests mutate tracked files under data/."""
+    """Fail if tests mutate tracked files under data/.
+
+    The recipe cache and the few-shot examples under data/ are committed
+    files, so a test must write to a tmp_path copy. The guard compares
+    the SHA-256 digest of each ``git ls-files data`` path before and
+    after the whole session. The paths are relative to the working
+    directory, so run pytest from the repository root.
+    """
     result = subprocess.run(
         ["git", "ls-files", "data"],
         check=True,
@@ -55,11 +64,6 @@ def _no_package_test_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATESOR_PACKAGE_TEST_TIMEOUT", "0")
 
 
-# ---------------------------------------------------------------------------
-# Isolate the global agent-memory singleton between tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _clear_memory_instances() -> Iterator[None]:
     """Wipe the MEMORY_INSTANCES singleton so tests don't bleed."""
@@ -74,11 +78,6 @@ def _clear_memory_instances() -> Iterator[None]:
         memory.MEMORY_INSTANCES.update(saved)
 
 
-# ---------------------------------------------------------------------------
-# Isolate the cached active PlatformProfile so tests can swap it freely
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _restore_active_profile() -> Iterator[None]:
     """Reset the platforms cache before/after each test.
@@ -86,7 +85,8 @@ def _restore_active_profile() -> Iterator[None]:
     We pre-seed the cache with ALPINE_RISCV so that any code path that calls
     get_active_profile() during a test does NOT trigger a real `docker exec`
     against a (likely non-running) container — which would block for ~10s
-    per call and balloon the suite runtime.
+    per call and balloon the suite runtime. A test can swap the profile
+    freely: the fixture restores the saved profile after the test.
     """
     from src import platforms
 
@@ -98,14 +98,14 @@ def _restore_active_profile() -> Iterator[None]:
         platforms._cached_profile = saved
 
 
-# ---------------------------------------------------------------------------
-# Isolate the cached execution target (qemu / native) between tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _reset_target_cache() -> Iterator[None]:
-    """Forget the cached target before and after each test."""
+    """Forget the cached target before and after each test.
+
+    ``get_target()`` caches the qemu or native config from the
+    environment. Without the reset, a test that selects the native
+    target leaks it, and the preflight results, into later tests.
+    """
     from src import target
 
     target.reset_target_cache()
@@ -115,14 +115,14 @@ def _reset_target_cache() -> Iterator[None]:
         target.reset_target_cache()
 
 
-# ---------------------------------------------------------------------------
-# Isolate the native mirror state (which repositories are fresh)
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _reset_mirror_state() -> Iterator[None]:
-    """Forget which repositories the mirror copied, between tests."""
+    """Forget which repositories the mirror copied, between tests.
+
+    The mirror module keeps the pull state (which repositories are
+    fresh) in module globals, so one test must not see another test's
+    pulls.
+    """
     from src import mirror
 
     mirror.reset()
@@ -132,18 +132,16 @@ def _reset_mirror_state() -> Iterator[None]:
         mirror.reset()
 
 
-# ---------------------------------------------------------------------------
-# Safe helper: stub execute_command in a single module so tests
-# don't fork docker
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
-def stub_execute_command(monkeypatch):
+def stub_execute_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
     """Return a helper that stubs execute_command in any module.
 
     The returned helper replaces execute_command with a deterministic
-    callable. Example::
+    callable in one module, so the test does not run docker. The
+    monkeypatch undo restores the real function after the test.
+    Example::
 
         def fake(cmd, **kwargs):
             return CommandResult(cmd, 0, "ok", "", 0.0)
@@ -151,7 +149,7 @@ def stub_execute_command(monkeypatch):
     """
 
     def _install(module_path: str, fake):
-        """Install."""
+        """Install fake as execute_command in the named module."""
         import importlib
 
         mod = importlib.import_module(module_path)

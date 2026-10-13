@@ -4,7 +4,8 @@
 With --merge-caches, the script merges recipe cache files by meaning:
 the newest recipe of each package and sandbox wins. Use that mode to
 resolve a git conflict in data/recipe_cache.json, which .gitattributes
-keeps git from merging line by line.
+keeps git from merging line by line. With --merge-driver, the script is
+the git merge driver that setup_git_merge_driver.sh installs.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 class _Pairs(list):
@@ -71,7 +72,7 @@ def _save_json(path: Path, data: dict[str, Any]) -> None:
         json.dump(data, fh, indent=2, ensure_ascii=False)
 
 
-def _parse_time(value: str | None) -> datetime | None:
+def _parse_time(value: Optional[str]) -> Optional[datetime]:
     # Accept "2026-06-18T12:45:04.618860" and "...Z" variants. Naive
     # timestamps come back as UTC-aware so a later _prefer_recipe()
     # comparison never mixes offset-naive and offset-aware datetimes.
@@ -90,6 +91,7 @@ def _parse_time(value: str | None) -> datetime | None:
 def _prefer_recipe(
     current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
+    """Return the recipe with the newer ``last_built``; ties go to incoming."""
     c_dt = _parse_time(current.get("last_built"))
     i_dt = _parse_time(incoming.get("last_built"))
     if c_dt and i_dt:
@@ -98,7 +100,7 @@ def _prefer_recipe(
         return incoming
     if not i_dt and c_dt:
         return current
-    # Fall back to incoming on tie/unknown; this lets later shards win.
+    # Fall back to incoming when neither time parses; later shards win.
     return incoming
 
 
@@ -130,6 +132,7 @@ def _merge_recipe_cache(
 def _prefer_example(
     current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
+    """Prefer a manual example, else the newer one; ties go to incoming."""
     c_source = (current.get("source") or "").lower()
     i_source = (incoming.get("source") or "").lower()
     # Preserve curated/manual entries over auto-learned entries.
@@ -303,7 +306,20 @@ def merge_cache_files(paths: list[Path]) -> dict[str, Any]:
 
 
 def main() -> int:
-    """Run the CLI entry point."""
+    """Run the CLI entry point.
+
+    Three modes, selected by flags: ``--merge-driver`` (git merge
+    driver for one conflicting recipe cache), ``--merge-caches``
+    (fold several cache files into ``--output``), or the default
+    (merge ``--artifacts-root`` shard artifacts into
+    ``--repo-data-dir``).
+
+    Returns:
+        Process exit code: 0 on success or when there is nothing to
+        merge; 1 when the merge driver cannot read or parse its inputs,
+        which makes git report a normal merge conflict. argparse exits
+        with 2 when a required flag is missing.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--artifacts-root",

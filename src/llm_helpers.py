@@ -12,17 +12,16 @@
 """Shared LLM-invocation helpers.
 
 Provides timeout-guarded LLM calls plus JSON-schema validation with
-retry-on-critique and a deterministic fallback.
-
-This module removes the duplicated boilerplate of
+retry-on-critique and a deterministic fallback. Most LLM-calling nodes
+share one pipeline here:
 ``build_prompt -> invoke_llm -> extract_content -> log_llm_call ->
-extract_json_block -> json.loads -> validate -> (retry | fallback)``
-that previously lived in every agent node.
+extract_json_block -> json.loads -> validate -> (retry | fallback)``.
 
 Design goals:
-    * Keep prompts small (we run on free-tier models; tokens matter).
+    * Keep prompts small: the providers are free-tier models, so
+      tokens matter.
     * Never let a malformed LLM response stall the workflow.
-    * Always log every attempt to the audit trail.
+    * Log every attempt to the audit trail.
 """
 
 from __future__ import annotations
@@ -41,15 +40,15 @@ from .models import LLM_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Wall timeout for a validated LLM call. Kept strictly above the
-# provider's own HTTP timeout so the socket is released before we give
-# up waiting, instead of orphaning the worker thread (MEM-01).
+# Default wall timeout of each LLM attempt in llm_call_with_validation,
+# in seconds. It must stay strictly above models.LLM_REQUEST_TIMEOUT,
+# the provider HTTP timeout, so the provider releases the socket before
+# this wall clock gives up; otherwise the call orphans the worker
+# thread while the socket is still open (MEM-01).
 LLM_WALL_TIMEOUT = LLM_REQUEST_TIMEOUT + 15
 
 
-# ----------------------------------------------------------------------------
 # Public types
-# ----------------------------------------------------------------------------
 
 
 @dataclass
@@ -74,7 +73,7 @@ class ValidationResult:
 class LLMCallOutcome:
     """Outcome of an LLM call after validation+retry."""
 
-    data: Optional[dict]  # parsed JSON if validation succeeded, else None
+    data: Optional[dict]  # validated JSON, the fallback's dict, or None
     used_fallback: bool  # True when the deterministic fallback was used
     attempts: int  # how many LLM invocations we actually made
     last_error: str = ""  # human-readable reason of the final failure
@@ -83,9 +82,9 @@ class LLMCallOutcome:
     cost_usd: float = 0.0  # real cost across ALL attempts (free tier = 0)
 
 
-# ----------------------------------------------------------------------------
-# Helpers re-exported from graph.py (kept here to avoid circular imports)
-# ----------------------------------------------------------------------------
+# Response helpers. extract_content and extract_json_block duplicate
+# the graph.py copies: graph.py imports this module, so importing
+# graph.py here would create a cycle.
 
 
 def extract_content(content: Any) -> str:
@@ -121,7 +120,7 @@ def extract_json_block(text: str) -> str:
 
     Returns:
         The substring spanning the outermost braces, or ``text`` if no
-        balanced pair is found.
+        ``}`` follows the first ``{``.
     """
     start = text.find("{")
     end = text.rfind("}")
@@ -134,9 +133,10 @@ def response_usage(response: Any) -> tuple:
     """Extract ``(input_tokens, output_tokens)`` from an LLM response.
 
     Reads the LangChain-standard ``usage_metadata`` first, then the
-    OpenAI-style ``response_metadata['token_usage']``. Returns
-    ``(0, 0)`` when the provider reported no usage — callers must treat
-    that as "unknown", not "free".
+    OpenAI-style ``response_metadata['token_usage']`` (or
+    ``response_metadata['usage']``). Returns ``(0, 0)`` when the
+    provider reported no usage — callers must treat that as "unknown",
+    not "free".
 
     Args:
         response: The message object returned by ``llm.invoke``.
@@ -178,11 +178,9 @@ def response_cost(llm: Any, response: Any) -> float:
     return cost_for_usage(_model_id(llm), tokens_in, tokens_out)
 
 
-# ----------------------------------------------------------------------------
-# Core helper: validated LLM call with retry + fallback
-# ----------------------------------------------------------------------------
+# Validated LLM call with retry and fallback
 
-# Default critique appended to the *next* attempt when validation fails.
+# Default critique appended to the *next* attempt when the last one fails.
 # Kept short on purpose — the previous prompt is already in the LLM's context
 # on the retry turn, we don't need to repeat it.
 _DEFAULT_CRITIQUE = (
@@ -194,41 +192,59 @@ _DEFAULT_CRITIQUE = (
 
 def llm_call_with_validation(
     *,
-    invoke_fn: Callable[[Any, list], Any],  # graph.invoke_llm
-    llm: Any,  # BaseChatModel instance
-    prompt: str,  # fully-rendered prompt
+    invoke_fn: Callable[[Any, list], Any],
+    llm: Any,
+    prompt: str,
     validator: Callable[[dict], ValidationResult],
     fallback_factory: Optional[Callable[[], Optional[dict]]] = None,
     role: str = "agent",
     audit_metadata: Optional[dict] = None,
-    max_retries: int = 2,  # total LLM calls = max_retries + 1
+    max_retries: int = 2,
     critique_template: str = _DEFAULT_CRITIQUE,
     timeout: int = LLM_WALL_TIMEOUT,
     fallback_llms: Optional[
         list
-    ] = None,  # rotate to next model on provider errors
-    rotate_on_timeout: bool = False,  # a timeout rotates too
+    ] = None,
+    rotate_on_timeout: bool = False,
 ) -> LLMCallOutcome:
     """Call ``llm`` with ``prompt``, parse, validate, retry, fall back.
 
     Parses the response as JSON, validates it, retries with a critique
     on failure, then falls back to ``fallback_factory()`` once retries
-    are exhausted. Every attempt is logged via ``log_llm_call``. Always
-    returns; never raises.
+    are exhausted. Every attempt that returns a response is logged via
+    ``log_llm_call``. Invocation and ``fallback_factory`` errors do not
+    propagate; an exception from ``validator`` does.
 
-    ``validator`` receives the parsed dict and returns a
-    ``ValidationResult``. If ``fallback_factory`` is ``None``, returns
-    ``(data=None, used_fallback=False)`` on exhaustion so the caller can
-    decide.
-
-    ``fallback_llms`` (optional): when the primary ``llm`` raises a
-    provider error (404 / 500 / "Provider returned error" / "Model not
-    found"), the helper rotates to the next LLM in the list and
-    continues the retry loop with a fresh attempt budget. This handles
-    transient OpenRouter free-tier outages without escalating the whole
-    agent state. With ``rotate_on_timeout``, a call that times out also
-    rotates to the next LLM, and a timeout on the last LLM ends the call
-    instead of asking the same model again.
+    Args:
+        invoke_fn: The invoking function (``graph.invoke_llm``).
+            ``timeout`` is passed only when the function accepts it.
+        llm: The primary LangChain chat model.
+        prompt: The fully-rendered prompt.
+        validator: Receives the parsed dict and returns a
+            ``ValidationResult``.
+        fallback_factory: Produces the deterministic fallback once
+            retries are exhausted. When ``None``, exhaustion returns
+            ``data=None, used_fallback=False`` for the caller to
+            decide.
+        role: Agent role label for the audit log.
+        audit_metadata: Extra fields copied into every audit record.
+        max_retries: The critique-retry budget. The attempt count is
+            bounded by ``max_retries + 1`` plus one per pool member,
+            because rotations do not consume the budget.
+        critique_template: The message appended after a failed
+            attempt; ``{reason}`` names the failure.
+        timeout: Wall timeout of one attempt in seconds; see
+            ``LLM_WALL_TIMEOUT``.
+        fallback_llms: Optional backup LLMs. When the active LLM
+            raises a provider error (404 / 500 / "Provider returned
+            error" / "Model not found"), the helper rotates to the
+            next pool member; rotation is free and does not consume
+            the critique-retry budget. This rides out transient
+            OpenRouter free-tier outages without escalating the whole
+            agent state.
+        rotate_on_timeout: When True, a timeout rotates too, and a
+            timeout on the last pool member ends the call instead of
+            asking the same model again.
 
     Returns:
         An ``LLMCallOutcome`` describing the parsed data and how it was
@@ -304,9 +320,9 @@ def llm_call_with_validation(
                 continue
             # OpenRouter free-tier self-heal: HTTP 402 responses embed
             # the exact affordable token count ("can only afford N").
-            # Shrinking every LLM in the pool to that cap lets the same
-            # request succeed on the next attempt without a config
-            # change or human intervention.
+            # Shrinking every LLM in the pool to 90% of that count lets
+            # the same request succeed on the next attempt without a
+            # config change or human intervention.
             affordable = _extract_affordable_tokens(exc)
             if affordable is not None:
                 shrunk = False
@@ -354,8 +370,8 @@ def llm_call_with_validation(
                 )
                 continue
             if timed_out:
-                # Every model of the pool timed out: asking one again
-                # costs another full timeout.
+                # The last model of the pool timed out: asking one
+                # again costs another full timeout.
                 break
             # Non-provider error (or pool exhausted): treat as retryable
             # against the same model, using the critique-retry budget.
@@ -468,7 +484,6 @@ def llm_call_with_validation(
             continue
         break
 
-    # Exhausted retries — use fallback if provided.
     if fallback_factory is not None:
         try:
             fb = fallback_factory()
@@ -499,9 +514,7 @@ def llm_call_with_validation(
     )
 
 
-# ----------------------------------------------------------------------------
 # Internal utilities
-# ----------------------------------------------------------------------------
 
 
 def _accepts_timeout(fn: Callable) -> bool:
@@ -620,13 +633,13 @@ def _extract_affordable_tokens(exc: Exception) -> Optional[int]:
 
 
 def _shrink_max_tokens(llm: Any, cap: int) -> bool:
-    """Attempt to lower ``llm``'s output-token cap to at most ``cap``.
+    """Attempt to lower ``llm``'s output-token cap to 90% of ``cap``.
 
     Different LangChain wrappers store this under different attribute
     names (``max_tokens``, ``max_output_tokens``, or nested inside
     ``model_kwargs``). We touch every plausible location that already
     exists on the instance; returns True if any of them was updated so
-    the caller can log the change.
+    the caller can log the change. The new cap is never below 256.
     """
     # Reserve a small headroom (~10 %) because providers sometimes bill
     # a slightly higher effective count than the requested figure.
@@ -659,7 +672,7 @@ def _model_id(llm: Any) -> str:
 
 
 def _model_ids(llms: list) -> list:
-    """Return the set of model ids currently in ``llms``."""
+    """Return the model ids of the LLMs in ``llms``, in order."""
     return [_model_id(x) for x in llms]
 
 
@@ -672,8 +685,8 @@ def _build_replacement_llm(reference: Any, model_id: str) -> Optional[Any]:
     """
     try:
         # LangChain ``ChatOpenAI`` and friends expose the fields we set
-        # up in :mod:`src.models`; grab whatever's present and mutate
-        # only ``model``. Falling back to a fresh keyword-arg
+        # up in :mod:`src.models`; copy the ones listed below when
+        # present and swap in ``model``. A fresh keyword-arg
         # instantiation keeps this provider-agnostic.
         cls = type(reference)
         init_kwargs = {"model": model_id}

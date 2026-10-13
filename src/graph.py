@@ -9,10 +9,16 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Multi-agent state machine orchestration and workflow nodes.
+"""LangGraph workflow for the RISC-V porting agent.
 
-Uses LangGraph to manage agent transitions and shared state for the
-RISC-V porting pipeline.
+Owns every graph node (init, analyst, heuristic plan, scout,
+supervisor, builder, verify, fixer, finish, escalate, cached recipe,
+optimize), the prompt constants, the per-node routing functions, the
+build-fix subgraph, and ``create_workflow``. Two contracts hold across
+the whole file: nodes mutate the shared ``AgentState`` in place and
+never return a fresh one, and every LLM call goes through
+``invoke_llm`` or ``llm_call_with_validation`` plus ``log_llm_call``
+— never ``llm.invoke()`` directly.
 """
 
 import base64
@@ -20,9 +26,9 @@ import json
 import logging
 import os
 import re
-import time
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -72,7 +78,6 @@ from .tools import (
     masks_failure,
 )
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
 # Caller-side wall timeout for a single LLM invocation, in seconds.
@@ -82,17 +87,17 @@ logger = logging.getLogger(__name__)
 # for the remainder of the provider request (MEM-01).
 LLM_WALL_TIMEOUT = LLM_REQUEST_TIMEOUT + 15
 
-# Initialize scripted operations
 scripted_ops = ScriptedOperations()
 
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+# Helper functions shared by the nodes.
 
 
 def get_model_for_role(role: AgentRole) -> BaseChatModel:
-    """Return the right model for an agent role."""
+    """Return the chat model configured for ``role``.
+
+    See ``src/models.py`` for the per-provider model table.
+    """
     return create_llm(role)
 
 
@@ -168,11 +173,27 @@ def invoke_llm(
     messages: List[BaseMessage],
     timeout: int = LLM_WALL_TIMEOUT,
 ) -> BaseMessage:
-    """Invoke an LLM with a hard timeout to prevent indefinite hangs.
+    """Invoke an LLM under a hard wall-clock timeout.
 
-    Uses a daemon thread so blocking HTTP connections don't prevent
-    process exit. Raises TimeoutError if the call exceeds ``timeout``
-    seconds.
+    This is the only place ``llm.invoke`` may be called; every node's
+    LLM traffic funnels through here (usually via
+    ``llm_call_with_validation``) so the timeout and the audit log
+    apply uniformly. The call runs on a daemon thread so a blocking
+    HTTP connection cannot prevent process exit.
+
+    Args:
+        llm: The chat model to call.
+        messages: The prompt messages.
+        timeout: Wall-clock limit in seconds; must stay above the
+            provider's own HTTP timeout (see ``LLM_WALL_TIMEOUT``).
+
+    Returns:
+        The model's response message.
+
+    Raises:
+        TimeoutError: If the call exceeds ``timeout`` seconds.
+        Exception: Any error that ``llm.invoke`` raises, re-raised in
+            the caller's thread.
     """
     import threading
 
@@ -201,7 +222,11 @@ def invoke_llm(
 
 
 def extract_content(content: Any) -> str:
-    """Safely extract string content from LLM response."""
+    """Return the text of an LLM response content payload.
+
+    Providers return either a plain string or a list of content parts
+    (dicts with a ``text`` key); both shapes flatten to one string.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -219,7 +244,12 @@ def extract_content(content: Any) -> str:
 
 
 def extract_json_block(text: str) -> str:
-    """Safely extract the first JSON block from a string."""
+    """Return the span from the first ``{`` to the last ``}``.
+
+    Free-tier models often wrap JSON in prose despite the prompt; this
+    trims the prose. Returns ``text`` unchanged when there is no brace
+    pair.
+    """
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end >= start:
@@ -230,7 +260,7 @@ def extract_json_block(text: str) -> str:
 def _build_platform_banner() -> str:
     """Build a banner describing the active sandbox/package manager.
 
-    Injected at the TOP of scout & fixer prompts so the LLM cannot
+    Injected at the TOP of analyst, scout & fixer prompts so the LLM cannot
     ignore it (knowledge appendices buried at the bottom tend to lose
     to early-context few-shot examples in free-tier models).
     """
@@ -299,7 +329,11 @@ def _to_host_path(path: str) -> str:
 
 
 def _build_command_error_message(result, fallback: str) -> str:
-    """Build a robust, human-readable error message from command output."""
+    """Combine the exit code and captured output into one error line.
+
+    Falls back to stdout when stderr is empty, and to a placeholder
+    when neither stream captured anything.
+    """
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
     detail = stderr or stdout or "No stderr/stdout output captured."
@@ -360,7 +394,11 @@ def _try_clone_recovery(
 
 
 def _classify_clone_failure(message: str) -> ErrorCategory:
-    """Classify a clone failure into a specific error category."""
+    """Map a clone failure message to an error category.
+
+    Authentication and DNS resolution failures are NETWORK; a missing
+    repository and anything unrecognized are CONFIGURATION.
+    """
     msg = message.lower()
     if any(
         pat in msg
@@ -383,7 +421,13 @@ def _classify_clone_failure(message: str) -> ErrorCategory:
 
 
 def is_toolchain_version_mismatch(error_message: str) -> bool:
-    """Return True if an error indicates an outdated compiler toolchain."""
+    """Return True when the error says the Go/Rust toolchain is too old.
+
+    Matches the Go ("go.mod requires go >= ...") and Rust
+    ("edition2024", "requires rust version", ...) markers. The
+    builder's recovery only upgrades Go; a Rust match still ends in a
+    recorded failure.
+    """
     err = (error_message or "").lower()
     patterns = [
         "go.mod requires go >=",
@@ -414,7 +458,11 @@ def _replan_signature(error_message: str) -> str:
 
 
 def _should_force_replan(state: AgentState) -> bool:
-    """Bounded replan guard to avoid fixer/scout thrash on bad plans."""
+    """Return True once per replan signature to force a scout replan.
+
+    The bound stops fixer/scout thrash on bad plans. A True result
+    increments the per-signature counter in ``state.context_cache``.
+    """
     signature = _replan_signature(state.last_error or "")
     if not signature:
         return False
@@ -430,15 +478,19 @@ def _should_force_replan(state: AgentState) -> bool:
     return True
 
 
-# ============================================================================
-# NODE WRAPPER
-# ============================================================================
+# The agent_node decorator — every graph node's error/retry envelope.
 
 
 def agent_node(role: AgentRole) -> Callable:
-    """Wrap agent nodes with error handling and retries.
+    """Wrap a graph node with the error-handling contract.
 
-    Provides state tracking and automatic rate-limit retry.
+    Sets ``state.current_agent`` and logs start/completion for the
+    audit trail. A rate-limit or credit error (429, 402, quota, ...)
+    gets up to 3 attempts in total, with exponential backoff between
+    them. Any other exception, or a rate-limit error on the last
+    attempt, is caught, recorded via ``state.add_error``, and marks
+    the run ESCALATED — the wrapper never raises, so a crashing node
+    cannot take the graph down with it.
     """
 
     def decorator(func: Callable) -> Callable:
@@ -503,17 +555,18 @@ def agent_node(role: AgentRole) -> Callable:
     return decorator
 
 
-# ============================================================================
-# NODE: INITIALIZATION
-# ============================================================================
+# init_node — clone the repository and run scripted quick analysis.
 
 
 @agent_node(AgentRole.SUPERVISOR)
 def init_node(state: AgentState) -> AgentState:
-    """Initialize the workflow by cloning the repository.
+    """Clone or update the repository and run the scripted analysis.
 
-    Uses scripted operations; this is a zero-cost operation (no LLM
-    calls).
+    Zero LLM cost: clone, ``quick_analysis`` (build system, deps, arch
+    scan, doc caching) and a sandbox tool check all run through
+    ``scripted_ops``. A failed clone tries URL variants once and then
+    escalates; a failed analysis is logged and the run continues with
+    whatever was detected.
     """
     logger.info(f"Initializing workflow for {state.repo_url}")
 
@@ -570,7 +623,6 @@ def init_node(state: AgentState) -> AgentState:
 
         state.build_system_info = analysis.get("build_system")
 
-        # Warn if build system could not be detected
         if (
             state.build_system_info
             and state.build_system_info.type == "unknown"
@@ -648,10 +700,10 @@ def init_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# NODE: PLANNER (Strategic Planning)
-# ============================================================================
+# analyst_node — one evidence-grounded LLM call about the package.
 
+# The JSON schema braces are doubled because the prompt is rendered
+# with str.format(); single braces would parse as format fields.
 ANALYST_PROMPT = (
     "You are the package analyst for a RISC-V (riscv64) porting agent."
     "\n"
@@ -717,8 +769,8 @@ def _fallback_analysis(state: AgentState) -> PackageAnalysis:
 
     Used when every analyst LLM attempt fails. Marks itself as not
     LLM-grounded and defers to the LLM scout whenever detection
-    confidence is weak, so a starved LLM layer degrades to the old
-    deterministic behavior instead of a worse one.
+    confidence is weak, so a starved LLM layer degrades to plain
+    scripted detection instead of a worse result.
     """
     bsi = state.build_system_info
     deps = state.dependencies
@@ -800,9 +852,8 @@ def analyst_node(state: AgentState) -> AgentState:
     (strategy/risks grounding), the fixer (package context), and
     verification (expected artifacts).
 
-    Replaces the old planner, whose LLM-generated TaskPlan nothing
-    read. ``task_plan`` is now set deterministically as a structural
-    record only.
+    ``task_plan`` is set deterministically as a structural record
+    only; no LLM call generates it.
     """
     logger.info("Analyst reading repository evidence...")
 
@@ -928,17 +979,15 @@ def analyst_node(state: AgentState) -> AgentState:
             f"complexity={state.package_analysis.complexity}/10"
         )
 
-    # Structural record of the fixed pipeline — no LLM tokens are ever
-    # spent on this again (the old planner burned a call on a TaskPlan
-    # nothing read).
+    # Structural record of the fixed pipeline; no LLM call generates
+    # it, and no routing decision reads it.
     state.task_plan = create_default_plan()
     state.current_phase = "analyzed"
     return state
 
 
-# ============================================================================
-# NODE: SUMMARIZER (New - Professional Documentation)
-# ============================================================================
+# Summarizer prompt (the finish_node recipe writer) and the default
+# structural task plan.
 
 SUMMARIZER_PROMPT = (
     "You are writing the RISC-V porting report for **{repo_name}**.\n"
@@ -982,7 +1031,12 @@ SUMMARIZER_PROMPT = (
 
 
 def create_default_plan() -> TaskPlan:
-    """Create a default task plan if planning fails."""
+    """Return the fixed two-phase TaskPlan recorded on every run.
+
+    The record is structural only: no routing or planning decision
+    reads it, and no LLM call generates it. It exists so reports and
+    state dumps keep a stable shape.
+    """
     return TaskPlan(
         phases=[
             TaskPhase(
@@ -1002,14 +1056,12 @@ def create_default_plan() -> TaskPlan:
     )
 
 
-# ============================================================================
-# NODE: SUPERVISOR (Orchestration)
-# ============================================================================
+# supervisor_node — zero-LLM audit pass between routing decisions.
 
 
 @agent_node(AgentRole.SUPERVISOR)
 def supervisor_node(state: AgentState) -> AgentState:
-    """Supervisor evaluation node.
+    """Log a summary of the state between routing decisions.
 
     Routing is handled by ``route_supervisor_to_next`` at the graph-edge
     level. This node exists as a lightweight audit/logging pass-through
@@ -1022,12 +1074,6 @@ def supervisor_node(state: AgentState) -> AgentState:
         f"attempts={state.attempt_count}/{state.max_attempts})"
     )
 
-    # The LLM-based supervisor routing has been removed.
-    # All routing decisions are now made by the ``route_supervisor_to_next``
-    # conditional edge function, which is purely heuristic and requires
-    # no LLM call. This eliminates the redundant LLM call that always
-    # agreed with the heuristic anyway.
-
     summary = (
         f"build_status={state.build_status.value}, "
         f"errors={len(state.error_history)}, "
@@ -1039,10 +1085,10 @@ def supervisor_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# NODE: SCOUT (Architecture Analysis)
-# ============================================================================
+# scout_node — LLM BuildPlan grounded in evidence and the analysis.
 
+# Doubled braces in the JSON schema are literal braces after
+# str.format().
 SCOUT_PROMPT = (
     "You are the build scout for a RISC-V porting agent. Produce a\n"
     "minimal, executable BuildPlan for **{repo_name}** built natively at"
@@ -1142,7 +1188,7 @@ SCOUT_PROMPT = (
 )
 
 
-# BUILD_STEP_RE (src/tools.py) names the build and test steps.
+# BUILD_STEP_RE (src/tools.py) matches the build and test commands.
 
 
 def _rewind_after_verify_failure(state: AgentState) -> None:
@@ -1152,9 +1198,9 @@ def _rewind_after_verify_failure(state: AgentState) -> None:
     the failed command has no cached success, so the fix is built. After
     a verify failure every phase is done and every command has a cached
     success, so nothing would run. Rewind to the first phase with a
-    build step and forget the cached results from there on. Earlier
-    phases, such as ``go mod init``, do not run again: they are not
-    safe to repeat.
+    build step (the last phase when no phase has one) and forget the
+    cached results from there on. Earlier phases, such as
+    ``go mod init``, do not run again: they are not safe to repeat.
 
     Args:
         state: The agent state after the fixer applied a change.
@@ -1181,15 +1227,29 @@ def _rewind_after_verify_failure(state: AgentState) -> None:
 
 
 def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
-    """Validate BuildPlan for hallucinations and common issues."""
+    """Reject a BuildPlan that is hallucinated or cannot fail loudly.
+
+    Checks every command for placeholder paths, a cross-compiler
+    prefix (builds are native-only), Go subcommands mistaken for
+    package names, nested cmake build dirs, and shell constructs that
+    mask a failing build step.
+
+    Args:
+        plan: The plan to check, from the scout or the heuristic
+            planner.
+
+    Returns:
+        A ``(is_valid, reason)`` tuple; ``reason`` names the offending
+        command when ``is_valid`` is False.
+    """
     hallucination_patterns = [
         "/path/to/",
         "your_username",
         "example.com",
-        "riscv64-unknown-linux-gnu-gcc",  # Unless we confirmed it's there
+        "riscv64-unknown-linux-gnu-gcc",  # cross-compile prefix
     ]
 
-    # Go subcommands that must not appear as apk package names
+    # Go subcommands that must not appear as package names
     go_subcommands = {
         "mod",
         "build",
@@ -1222,7 +1282,8 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
                         f"(contains '{pattern}')",
                     )
 
-            # Check for absolute paths that look guessed
+            # A /home path outside the mounted /workspace tree does not
+            # exist in the sandbox; the model invented a host path.
             if "/home/" in cmd and "/workspace/" not in cmd:
                 return False, f"Suspicious absolute path in command: '{cmd}'"
 
@@ -1247,7 +1308,6 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
                             f"Use 'go {pkg}' as a separate command."
                         )
 
-            # Check for bad cmake patterns
             if "cmake" in cmd:
                 if "cd build &&" in cmd and "-B build" in cmd:
                     return (
@@ -1255,8 +1315,8 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
                         f"Bad cmake command (would create nested "
                         f"build dir): '{cmd}'",
                     )
-                # Ensure we're doing `cmake ..` from inside build dir,
-                # not `cmake -S . -B build`.
+                # `cd build && cmake -S . -B build` nests a build/build
+                # directory that later `cd build` steps never find.
                 if (
                     "cd build &&" in cmd
                     and "cmake -S" in cmd
@@ -1272,7 +1332,17 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
 
 @agent_node(AgentRole.SCOUT)
 def scout_node(state: AgentState) -> AgentState:
-    """Analyze the repository, leveraging scripted pre-analysis."""
+    """Produce a validated LLM BuildPlan for the repository.
+
+    The prompt grounds the plan in the analyst's ``PackageAnalysis``,
+    the real build-file evidence, and few-shot examples; on a re-scout
+    after a failed build, the previous failure is included so the new
+    plan does not repeat it. The reply must parse as JSON, pass
+    ``validate_build_plan``, and survive critique retries across the
+    role's model pool. When every LLM attempt fails, the node falls
+    back to ``create_fallback_build_plan`` so the build still runs
+    with the LLM layer down.
+    """
     logger.info("Scout analyzing repository...")
 
     state.build_status = BuildStatus.SCOUTING
@@ -1368,7 +1438,6 @@ def scout_node(state: AgentState) -> AgentState:
             "different build path)."
         )
 
-    # Build architecture patterns info
     arch_patterns_str = "No architecture-specific patterns detected"
     if state.arch_specific_code:
         arch_patterns_by_type = {}
@@ -1544,7 +1613,13 @@ def scout_node(state: AgentState) -> AgentState:
 
 
 def create_fallback_build_plan(state: AgentState) -> BuildPlan:
-    """Create a basic fallback build plan based on detected build system."""
+    """Return a deterministic BuildPlan for the detected build system.
+
+    Used when the scout LLM produces nothing usable. Covers go, cmake,
+    make, cargo, meson and autotools with canned recipes; for anything
+    else the plan probes the repo for build files before trying a bare
+    ``make``.
+    """
     from .platforms import get_active_profile
 
     profile = get_active_profile()
@@ -1739,13 +1814,11 @@ def create_fallback_build_plan(state: AgentState) -> BuildPlan:
         )
 
 
-# ============================================================================
-# NODE: BUILDER (Build Execution)
-# ============================================================================
+# builder_node — plan execution with deterministic, LLM-free recovery.
 
 
 def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
-    """Post-configure fixup for old gettext/autotools projects.
+    """Apply a post-configure fixup for old gettext/autotools projects.
 
     Old po/Makefile.in.in templates reference $(top_builddir) as a
     make variable but never define it (they expected @top_builddir@
@@ -1754,12 +1827,17 @@ def _fixup_top_builddir_in_submakefiles(docker_repo_path: str) -> None:
     $(top_builddir)/config.status expands to /config.status which
     doesn't exist -> "No rule to make target '/config.status'".
 
-    Fix: run a shell script INSIDE Docker (to avoid host permission
-    issues with root-owned files) that scans all subdirectory
-    Makefiles and injects the correct relative top_builddir assignment.
+    Fix: run a shell script INSIDE the sandbox container (to avoid host
+    permission issues with root-owned files) that scans all
+    subdirectory Makefiles and injects the correct relative
+    top_builddir assignment. Any other error is logged, not raised.
 
     Args:
         docker_repo_path: Path to the repository inside the container.
+
+    Raises:
+        SandboxUnavailableError: If the native sandbox connection
+            drops or never opens.
     """
     from src import sandbox
     from src.platforms import get_container_name
@@ -1896,8 +1974,9 @@ def _autotools_bootstrap_prefix(repo_host_path: str) -> str:
     wget, strace, ffmpeg, ...).
 
     Bootstrap choice, most-specific first:
-      1. ``./autogen.sh`` / ``./buildconf`` — upstream's own script,
-         which usually wraps autoreconf with project-specific steps.
+      1. ``sh autogen.sh`` (or ``buildconf``, ``buildconf.sh``,
+         ``bootstrap``) — upstream's own script, which usually wraps
+         autoreconf with project-specific steps.
       2. ``autoreconf -fi`` when ``configure.ac``/``configure.in``
          exists.
 
@@ -1960,14 +2039,13 @@ def _inject_go_flag(command: str, flag: str) -> str:
 
 # Word-boundary matcher for genuine Go build/install invocations. Required
 # because substring checks like `"go build" in cmd` wrongly match
-# `cargo build`, `apk add ... cargo build-base`, `dotnet go build-server`,
-# etc. — and the downstream optimizations (e.g. `command.replace("go build",
-# "go build -buildvcs=false")`) then mangle those unrelated commands.
+# `cargo build` and `apk add ... cargo build-base`, and the Go-specific
+# retries and flag injection would then edit those unrelated commands.
 _GO_BUILD_RE = re.compile(r"\bgo\s+(?:build|install)\b")
 
 
 def _is_go_build_command(command: str) -> bool:
-    """True iff ``command`` actually invokes ``go build`` or ``go install``."""
+    """Return True if ``command`` invokes ``go build`` or ``go install``."""
     return bool(_GO_BUILD_RE.search(command))
 
 
@@ -2071,8 +2149,8 @@ def _is_suspected_oom(result, command: str) -> bool:
         ``True`` if the failure looks like an OOM kill worth retrying
         serially, otherwise ``False``.
     """
-    # Universal signal — always trust exit 137 as OOM. Broadened from
-    # build-only in run 28020958388 because cargo fetch / pip install /
+    # Universal signal — always trust exit 137 as OOM, for every
+    # command: in run 28020958388, cargo fetch / pip install /
     # dependency downloads also OOM'd for 58 packages.
     if result.exit_code == 137:
         return True
@@ -2193,7 +2271,7 @@ def _resolve_missing_python_modules(stderr: str) -> List[str]:
 def _download_go_toolchain_cmd(version: str) -> str:
     """Return a shell command that installs a Go toolchain from go.dev.
 
-    The previous ``go install golang.org/dl/goX.Y.Z@latest`` path does
+    The ``go install golang.org/dl/goX.Y.Z@latest`` path does
     not work on Alpine musl (the ``dl`` helper links against glibc) and
     also OOM-kills under QEMU during the ``goX.Y.Z download`` step
     (observed root cause for 25+ Go packages in run 28020958388).
@@ -2277,7 +2355,19 @@ def _npm_scripts(repo_path: str) -> List[str]:
 
 @agent_node(AgentRole.BUILDER)
 def builder_node(state: AgentState) -> AgentState:
-    """Execute the build plan with smart error detection."""
+    """Execute the build plan phase by phase inside the sandbox.
+
+    Skips phases at or below ``state.last_successful_phase`` and
+    commands with a cached success. Before running a command, applies
+    scripted corrections (Go ``-buildvcs=false``, gettext/autotools
+    bootstrap, make-root redirect, npm script guard). On failure, tries
+    the deterministic recoveries (VCS flag, output-dir collision,
+    vendoring, missing headers or Python modules, OOM serialization,
+    toolchain upgrade, ``-mcmodel=medany``, per-package install skip)
+    before recording a classified error and returning FAILED. Whether
+    the outputs really are riscv64 is verify_node's job, not this
+    node's.
+    """
     logger.info("Builder executing build plan...")
 
     from .platforms import get_active_profile
@@ -2339,7 +2429,6 @@ def builder_node(state: AgentState) -> AgentState:
                 and not _is_go_build_command(optimized_cmd)
             ):
                 stripped = optimized_cmd.replace("-buildvcs=false", "").strip()
-                # Clean up double spaces from the removal
                 while "  " in stripped:
                     stripped = stripped.replace("  ", " ")
                 logger.info(
@@ -2410,7 +2499,7 @@ def builder_node(state: AgentState) -> AgentState:
                         f"'{make_dir}'"
                     )
 
-            # Before any make command, proactively fix po/Makefile
+            # Before a command that starts with make, fix po/Makefile
             # top_builddir if needed. This handles the case where
             # configure was run by the fixer (not the builder), so the
             # post-configure hook wouldn't have fired yet.
@@ -2419,11 +2508,10 @@ def builder_node(state: AgentState) -> AgentState:
 
             # ``npm run <script>`` guard: the fixer/scout frequently
             # invents an ``npm run build`` even when package.json does
-            # not declare a ``build`` script (root cause: the scout
-            # prompt encourages "run the standard build command"). If
-            # the requested script does not exist, downgrade to the
-            # only script present when there's one obvious choice, or
-            # skip the command otherwise so the phase can proceed.
+            # not declare a ``build`` script. If the requested script
+            # does not exist, substitute the first declared script of
+            # ``build``, ``prod``, ``compile``, ``dist``, or skip the
+            # command otherwise so the phase can proceed.
             _npm_run_match = re.match(
                 r"^\s*npm\s+run\s+([A-Za-z0-9_.:\-]+)\b(.*)$",
                 optimized_cmd,
@@ -2742,7 +2830,7 @@ def builder_node(state: AgentState) -> AgentState:
                     # Two paths for one directory: the host path to test
                     # that it exists, the container path for the rm that
                     # runs in the sandbox (the host path does not exist
-                    # there, so an rm of it removed nothing).
+                    # there, so an rm of it would remove nothing).
                     container_build_dir = None
                     for marker in (
                         "mkdir -p build && cd build",
@@ -2768,7 +2856,6 @@ def builder_node(state: AgentState) -> AgentState:
                         execute_command(
                             rm_cmd, cwd=state.repo_path, use_docker=True
                         )
-                        # Rebuild the command with explicit compiler paths
                         retry_cmd = optimized_cmd.replace(
                             "cmake ..",
                             "cmake .. -DCMAKE_C_COMPILER=/usr/bin/gcc"
@@ -2849,7 +2936,8 @@ def builder_node(state: AgentState) -> AgentState:
 
                 # Suspected QEMU OOM-kill (exit 137 / empty output) on a
                 # parallel build -> retry single-threaded. Generic fallback,
-                # checked last so specific signatures win first.
+                # checked after the recoveries above so their specific
+                # signatures win first.
                 if _is_suspected_oom(result, optimized_cmd):
                     serial_cmd = _serialize_build_command(optimized_cmd)
                     if serial_cmd != optimized_cmd and _builder_retry_allowed(
@@ -2949,8 +3037,8 @@ def builder_node(state: AgentState) -> AgentState:
                         )
                         # Built here from a checked version, not by an
                         # LLM, so the LLM command whitelist does not
-                        # apply; it rejected /usr/local/go/bin/go and
-                        # sha256sum, so this recovery never ran before.
+                        # apply; it rejects /usr/local/go/bin/go and
+                        # sha256sum, so validation would block this step.
                         _gv_cmd = _download_go_toolchain_cmd(_gv_needed)
                         _gv_inst = execute_command(
                             _gv_cmd, cwd=state.repo_path, validate=False
@@ -3002,8 +3090,9 @@ def builder_node(state: AgentState) -> AgentState:
                         continue
                     result = _medany_retry
 
-                # Package not found on riscv64 repo -> try
-                # one-by-one, skip missing
+                # One package missing from the riscv64 repos fails the
+                # whole install; retry package-by-package so the rest
+                # still land.
                 _pkg_fail_patterns = [
                     "unable to locate package",
                     "unable to select packages",
@@ -3081,8 +3170,7 @@ def builder_node(state: AgentState) -> AgentState:
 
     # Every command succeeded. Whether the build produced riscv64
     # machine code is decided in one place, verify_node, which the
-    # subgraph always runs next. The scan that used to sit here
-    # duplicated it and recorded any ELF file as riscv64.
+    # subgraph always runs next.
     state.build_status = BuildStatus.SUCCESS
     logger.info("All build phases completed; verifying artifacts next")
 
@@ -3098,13 +3186,18 @@ def builder_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# NODE: FIXER (Enhanced with Reflection)
-# ============================================================================
+# Fixer output validation — structure, containment, safe commands.
 
 
 def validate_fix_command(command: str) -> tuple[bool, str]:
-    """Validate fix commands to prevent dangerous operations.
+    """Check a fixer-proposed command for destructive or confused shapes.
+
+    Blocks empty-file creation via ``touch``/redirect, ``rm -rf`` of
+    roots, git push/hard-reset, Go subcommands used as package names,
+    and anything the ``CommandValidator`` whitelist rejects.
+
+    Args:
+        command: The shell command the fixer wants to run.
 
     Returns:
         A ``(is_safe, reason)`` tuple.
@@ -3167,7 +3260,15 @@ def validate_fix_command(command: str) -> tuple[bool, str]:
 
 
 def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
-    """Validate a FIXER response to ensure it makes logical sense.
+    """Check a fixer JSON response for structure, safety and containment.
+
+    The recommended strategy must exist and carry at least one action;
+    ``create_file``/``patch`` paths must stay inside the repo tree;
+    ``command`` actions must pass ``validate_fix_command``. A thin
+    ``reflection`` block only logs a warning — it never rejects a fix.
+
+    Args:
+        fix_data: The parsed JSON object from the fixer model.
 
     Returns:
         A ``(is_valid, error_message)`` tuple.
@@ -3186,27 +3287,23 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
         recommended_id = fix_data.get("recommended_strategy_id", 1)
         strategies = fix_data.get("strategies", [])
 
-        # Find recommended strategy
         recommended = next(
             (s for s in strategies if s["id"] == recommended_id), None
         )
         if not recommended:
             return False, f"Recommended strategy {recommended_id} not found"
 
-        # Check if strategy has actions
         actions = recommended.get("actions", [])
         if not actions:
-            # Strategy has no actions - this is incomplete/hallucinatory
+            # An action-less strategy is an incomplete/hallucinated reply.
             logger.warning(
                 "FIXER strategy has no actions (incomplete response)"
             )
             return False, "Recommended strategy has no actions"
 
-        # Validate actions in recommended strategy
         for action in actions:
             action_type = action.get("type", "").lower()
 
-            # Validate create_file actions
             if action_type == "create_file":
                 path = action.get("path", "").strip()
                 content = action.get("content", "").strip()
@@ -3214,7 +3311,6 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                 if not path:
                     return False, "create_file action missing path"
 
-                # Check for empty files
                 if not content:
                     return (
                         False,
@@ -3222,7 +3318,8 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                         f"{path} - this won't help",
                     )
 
-                # Check for obviously hallucinated placeholders
+                # Repo paths are short; >100 chars means the model
+                # invented the layout.
                 if len(path) > 100:
                     return (
                         False,
@@ -3241,7 +3338,7 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                         f"contains '..'): {path}",
                     )
 
-            # Validate patch actions (same containment as create_file)
+            # Same containment as create_file.
             elif action_type == "patch":
                 patch_file = (action.get("file") or "").strip()
                 if patch_file and (
@@ -3252,20 +3349,18 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                         f"Patch path escapes the repository: {patch_file}",
                     )
 
-            # Validate command actions
             elif action_type == "command":
                 cmd = action.get("command", "").strip()
 
                 if not cmd:
                     return False, "command action is empty"
 
-                # Check for nonsensical commands
+                # Reject a `cp -r` that copies a tree onto itself.
                 if "cp -r" in cmd and "/*" in cmd:
-                    # Check if it's copying to itself
                     parts = cmd.split()
                     if len(parts) >= 4:
-                        src = parts[2]  # source
-                        dst = parts[3]  # destination
+                        src = parts[2]
+                        dst = parts[3]
                         if (
                             src == dst
                             or src.split("/")[0] == dst.split("/")[0]
@@ -3280,7 +3375,8 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                 if not is_safe:
                     return False, f"Unsafe command: {reason}"
 
-        # Validate reflection data
+        # Reflection fields are advisory: a thin self-critique is
+        # logged, never rejected.
         reflection = fix_data.get("reflection", {})
         if not reflection.get("root_cause"):
             logger.warning("Fixer response has empty root_cause analysis")
@@ -3299,10 +3395,10 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
         return False, f"Validation error: {str(e)}"
 
 
-# ============================================================================
-# NODE: FIXER (Error Resolution)
-# ============================================================================
+# fixer_node — diagnose the failure, then apply one validated strategy.
 
+# Doubled braces in the JSON schema are literal braces after
+# str.format().
 FIXER_PROMPT = (
     "You are the build doctor for a RISC-V porting agent. Diagnose\n"
     "the failure for **{repo_name}** and emit a minimal fix.\n"
@@ -3420,9 +3516,9 @@ FIXER_PROMPT = (
 )
 
 
-# First-token whitelist for fixer investigation commands. Read-only
-# inspection ONLY — the fixer gathers evidence with these, it does not
-# mutate the repo through them.
+# First-token whitelist for fixer investigation commands, meant for
+# read-only inspection. The check looks at the command name only, so a
+# `find -delete` or `go mod tidy` can still change the repo.
 _INVESTIGATE_ALLOWED = {
     "cat",
     "head",
@@ -3515,7 +3611,18 @@ def _run_fixer_investigation(state: AgentState, commands: List[str]) -> str:
 
 @agent_node(AgentRole.FIXER)
 def fixer_node(state: AgentState) -> AgentState:
-    """Fix build errors using a reflection pattern."""
+    """Diagnose the last build error and apply one validated strategy.
+
+    The prompt carries the failing command, a truncated error, source
+    excerpts around the error's ``file:line`` references, the package
+    analysis, and the previous fix attempts. The fixer may first spend
+    ONE read-only investigation round (whitelisted inspection
+    commands); the follow-up round must emit strategies. Actions are
+    validated (``validate_fixer_response``) and contained to the repo
+    tree before they run. There is no deterministic fix to fall back
+    on: when every LLM attempt fails, the node records an error and
+    returns FAILED.
+    """
     logger.info("Fixer analyzing error...")
 
     state.build_status = BuildStatus.FIXING
@@ -3526,7 +3633,6 @@ def fixer_node(state: AgentState) -> AgentState:
         state.build_status = BuildStatus.PENDING
         return state
 
-    # Prepare context
     previous_fixes = (
         "\n".join(
             [
@@ -3569,7 +3675,6 @@ def fixer_node(state: AgentState) -> AgentState:
         "fixer", few_shot_context, max_examples=2, max_chars=2000
     )
 
-    # Get build plan details
     build_plan_str = "Unknown"
     if state.build_plan:
         build_plan_str = (
@@ -3656,7 +3761,8 @@ def fixer_node(state: AgentState) -> AgentState:
             fallback_llms=_fixer_pool[1:],
             prompt=_render_fixer_prompt(investigation),
             validator=_validate_fix,
-            # no deterministic fix — escalate via FAILED status
+            # No deterministic fix: FAILED ends the subgraph, and the
+            # supervisor routes the run.
             fallback_factory=lambda: None,
             role=AgentRole.FIXER.value,
             audit_metadata={
@@ -3718,7 +3824,6 @@ def fixer_node(state: AgentState) -> AgentState:
 
         fix_data = outcome.data
 
-        # Get recommended strategy
         recommended_id = fix_data.get("recommended_strategy_id", 1)
         strategies = fix_data.get("strategies", [])
 
@@ -3727,14 +3832,12 @@ def fixer_node(state: AgentState) -> AgentState:
             state.build_status = BuildStatus.FAILED
             return state
 
-        # Find recommended strategy
         strategy = next(
             (s for s in strategies if s["id"] == recommended_id), strategies[0]
         )
 
         logger.info(f"Applying fix strategy: {strategy['description']}")
 
-        # Apply fix actions
         changes_made = []
         for action in strategy.get("actions", []):
             if action["type"] == "create_file":
@@ -3827,8 +3930,8 @@ def fixer_node(state: AgentState) -> AgentState:
                     )
                     continue
 
-                # Rewrite autoreconf to copy-first sequence when
-                # gettext macros are missing. autoreconf internally
+                # Rewrite autoreconf to copy-first sequence when the
+                # repo has m4/gettext.m4. autoreconf internally
                 # calls autopoint which reverts any gettext.m4 fix.
                 # The copy-first approach replaces the old m4/gettext.m4
                 # with the system's modern one BEFORE running
@@ -3859,12 +3962,12 @@ def fixer_node(state: AgentState) -> AgentState:
                     else:
                         logger.error(f"Fix command failed: {result.stderr}")
 
-        # Record fix attempt
         fix_attempt = FixAttempt(
             error_category=state.last_error_category,
             strategy=strategy["description"],
             changes_made=changes_made,
-            success=False,  # Will be updated after rebuild
+            # builder_node flips this to True on the next good build.
+            success=False,
             error_message=state.last_error or "",
         )
         state.add_fix_attempt(fix_attempt)
@@ -3874,7 +3977,8 @@ def fixer_node(state: AgentState) -> AgentState:
         if any(not c.startswith("REJECTED") for c in changes_made):
             _rewind_after_verify_failure(state)
 
-        # Reset to pending so supervisor can try building again
+        # Back to PENDING so route_fix_result sends the run to
+        # build_node for a rebuild.
         state.build_status = BuildStatus.PENDING
 
     except Exception as e:
@@ -3884,20 +3988,23 @@ def fixer_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# NODE: ESCALATE
-# ============================================================================
+# escalate_node — terminal human-handoff report.
 
 
-@agent_node(AgentRole.SUPERVISOR)  # Escalation is a supervisor-level summary
+# Escalation is reported under the supervisor role.
+@agent_node(AgentRole.SUPERVISOR)
 def escalate_node(state: AgentState) -> AgentState:
-    """Escalate to a human with a comprehensive report."""
+    """Write the terminal report for a run that cannot proceed.
+
+    The report (last error, fixes tried, architecture issues,
+    recommendation) lands in ``context_cache["escalation_report"]``
+    with the status ESCALATED; ``main.py`` maps that to exit code 1.
+    """
     logger.warning("Escalating to human intervention")
 
     state.build_status = BuildStatus.ESCALATED
     state.current_phase = "escalated"
 
-    # Generate escalation report
     err_cat = state.last_error_category
     err_cat_val = err_cat.value if err_cat else "Unknown"
     err_sev = state.last_error_severity
@@ -3967,22 +4074,24 @@ Message: {err_msg}
     return state
 
 
-# ============================================================================
-# NODE: FINISH
-# ============================================================================
+# finish_node — package tests, the recipe, and auto-learning.
 
 
 def _save_learning_data(state: AgentState):
-    """Save successful build patterns to examples and recipe cache.
+    """Learn from a verified success; teach nothing from the rest.
 
-    Implements the auto-learning step after a successful build.
+    Feeds the scout, fixer and builder few-shot stores and the recipe
+    cache. Artifacts are curated first so only user-facing outputs are
+    recorded. An unverified or wrong-arch "success" is never learned:
+    it would be replayed by later runs as if it had worked. Never
+    raises — a learning failure must not sink a finished port.
     """
     try:
         repo = state.repo_name or "unknown"
         bs = state.build_plan.build_system if state.build_plan else "unknown"
 
-        # --- Curate artifacts so recipe + report show only
-        # user-facing deliverables ---
+        # Curate artifacts so recipe + report show only user-facing
+        # deliverables.
         if state.build_artifacts and not state.curated_artifacts:
             try:
                 from .artifact_curator import curate_artifacts
@@ -4015,7 +4124,7 @@ def _save_learning_data(state: AgentState):
             )
             return
 
-        # --- Scout learning ---
+        # Scout learning
         if state.build_plan and state.build_plan.phases:
             scout_data = {
                 "name": f"Auto: {repo} ({bs})",
@@ -4041,7 +4150,7 @@ def _save_learning_data(state: AgentState):
             }
             save_learned_example("scout", scout_data)
 
-        # --- Fixer learning ---
+        # Fixer learning
         for fix in state.fixes_attempted or []:
             if fix.success and fix.strategy:
                 fixer_data = {
@@ -4072,7 +4181,7 @@ def _save_learning_data(state: AgentState):
                 }
                 save_learned_example("fixer", fixer_data)
 
-        # --- Builder learning ---
+        # Builder learning
         if state.build_plan and state.build_plan.phases:
             builder_data = {
                 "name": f"Auto: {repo} build execution",
@@ -4090,7 +4199,7 @@ def _save_learning_data(state: AgentState):
             }
             save_learned_example("builder", builder_data)
 
-        # --- Recipe cache ---
+        # Recipe cache
         if state.build_plan:
             duration = (
                 state.get_execution_duration()
@@ -4280,7 +4389,13 @@ def _run_package_tests(
 
 @agent_node(AgentRole.SUMMARIZER)
 def finish_node(state: AgentState) -> AgentState:
-    """Finalize successful porting and generate the guide."""
+    """Close out a successful port: package tests, recipe, learning.
+
+    Runs the package's own test suite once (never gates the port),
+    asks the summarizer model for the Markdown recipe with a
+    deterministic fallback, then saves learning data. SUCCESS always
+    reaches this node, even at the attempt or cost ceiling.
+    """
     logger.info("Generating comprehensive porting guide...")
 
     state.build_status = BuildStatus.SUCCESS
@@ -4290,7 +4405,6 @@ def finish_node(state: AgentState) -> AgentState:
         state.package_tests = _run_package_tests(state)
         logger.info(f"Package tests: {state.package_tests['status']}")
 
-    # Prepare context for summarizer
     arch_issues = (
         "\n".join(
             [
@@ -4321,8 +4435,7 @@ def finish_node(state: AgentState) -> AgentState:
                 build_steps += f"{cmd}\n"
             build_steps += "```\n"
 
-    # Prepare artifacts information (prefer curated list — primary
-    # first, no noise)
+    # Prefer the curated artifact list: primary first, no noise.
     artifacts_info = ""
     artifacts_to_show = state.curated_artifacts or state.build_artifacts
     if artifacts_to_show:
@@ -4367,7 +4480,6 @@ def finish_node(state: AgentState) -> AgentState:
         tests_text += f": {tests['reason']}"
     build_steps += f"\n**Package tests (not gating):** {tests_text}\n"
 
-    # Create prompt
     prompt = SUMMARIZER_PROMPT.format(
         repo_name=state.repo_name,
         repo_url=state.repo_url,
@@ -4394,7 +4506,6 @@ def finish_node(state: AgentState) -> AgentState:
 
         recipe = extract_content(response.content)
 
-        # Log LLM call for debugging
         log_llm_call(
             agent_role=AgentRole.SUMMARIZER.value,
             prompt=prompt,
@@ -4411,22 +4522,18 @@ def finish_node(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"Summarizer failed: {e}")
-        # Fallback recipe
         state.porting_recipe = (
             f"# RISC-V Porting Recipe: {state.repo_name}\n\n"
             f"The build commands succeeded. Artifact verification: "
             f"{verdict_text}.\n\n{build_steps}"
         )
 
-    # Auto-learning: save successful patterns
     _save_learning_data(state)
 
     return state
 
 
-# ============================================================================
-# NODE: CACHED RECIPE (--optimize with a verified recipe-cache entry)
-# ============================================================================
+# cached_recipe_node — replay a verified cached recipe (--optimize).
 
 
 def _cached_purpose(recipe: Dict[str, Any], repo_name: str) -> str:
@@ -4534,9 +4641,7 @@ def cached_recipe_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# NODE: OPTIMIZE (performance mode, --optimize)
-# ============================================================================
+# optimize_node and the optimizer agent — performance mode (--optimize).
 
 
 # A harness is a whole source file: a free coder model can need more
@@ -4633,9 +4738,11 @@ def _optimize_progress(message: str) -> None:
 def optimize_node(state: AgentState) -> AgentState:
     """Build, check and measure optimized variants (``--optimize``).
 
-    The verified baseline stays the result of the port. Nothing here
-    raises: an error goes into ``state.optimization``, so the
-    agent_node wrapper never escalates a finished port.
+    The verified baseline stays the result of the port. The node
+    catches every exception itself: an error goes into
+    ``state.optimization`` instead of letting the ``agent_node``
+    wrapper escalate a finished port, and the wrapper's rate-limit
+    retry never gets the chance to repeat an hour of measurements.
     """
     from .optimize import run_optimization
 
@@ -4676,16 +4783,9 @@ def optimize_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# ROUTING FUNCTION
-# ============================================================================
-
-
-# ============================================================================
-# ROUTING FUNCTIONS — one per source node, named by what they decide
-# ============================================================================
-# Each function inspects state and returns a single destination node name
-# (or a list of Send() for fan-out). No string-phase indirection.
+# Routing functions — one per source node, named by what it decides.
+# Each inspects state fields and returns the destination node name;
+# there is no central route_next and no phase-string dispatch.
 
 
 def route_finish_to_next(state: AgentState) -> str:
@@ -4698,7 +4798,11 @@ def route_finish_to_next(state: AgentState) -> str:
 
 
 def route_init_to_next(state: AgentState) -> str:
-    """After init: go to the analyst, or escalate if init failed."""
+    """After init: replay a cached recipe, go to the analyst, or escalate.
+
+    Init failure escalates. ``state.cached_recipe`` (set only with
+    ``--optimize``) sends the run to ``cached_recipe_node``.
+    """
     # ESCALATED means init_node crashed (agent_node wrapper). The clone
     # may be missing, so the analyst must not run.
     if state.build_status in (BuildStatus.FAILED, BuildStatus.ESCALATED):
@@ -4733,8 +4837,9 @@ def route_heuristic_plan_to_next(state: AgentState) -> str:
     """After the heuristic planner: plan → supervisor, else LLM scout.
 
     The heuristic planner only materializes a default BuildPlan for
-    build systems it recognizes with reasonable confidence AND the
-    analyst did not veto (``needs_custom_plan``). Anything else is
+    build systems it recognizes with reasonable confidence, when the
+    repo is not heavily arch-specific AND the analyst did not veto
+    (``needs_custom_plan``). Anything else is
     deferred to the LLM scout, which plans from the repo evidence, the
     analysis, and any previous failure.
     """
@@ -4748,7 +4853,7 @@ def route_supervisor_to_next(state: AgentState) -> str:
 
     Pure heuristic — no LLM call. Returns a single destination.
     """
-    # A verified success ALWAYS finishes — even at the attempt/cost
+    # A SUCCESS (verified or not) ALWAYS finishes — even at the attempt/cost
     # ceiling. Escalating a build that just succeeded (e.g. the final
     # fix landed on attempt max_attempts) would throw away the win and
     # skip the recipe. Escalation checks apply to non-success states.
@@ -4795,9 +4900,7 @@ def route_supervisor_to_next(state: AgentState) -> str:
     return "scout_node"
 
 
-# --------------------------------------------------------------------------
-# Build-fix subgraph internal routing
-# --------------------------------------------------------------------------
+# Build-fix subgraph routing: build → verify → fix → rebuild.
 
 
 def route_build_result(state: AgentState) -> str:
@@ -4816,7 +4919,14 @@ def route_build_result(state: AgentState) -> str:
 
 
 def route_verify_result(state: AgentState) -> str:
-    """Route a verify result: exit as success, or go to fix."""
+    """Route a verify result: exit on success, or loop to the fixer.
+
+    Also exits once fixes were tried and the error is not a
+    compilation, linking or architecture one — those are the only
+    categories the fixer's patches address. The supervisor re-routes
+    anything else after the subgraph ends (e.g. re-scout for a
+    DEPENDENCY error).
+    """
     if state.build_status in (BuildStatus.SUCCESS, BuildStatus.ESCALATED):
         return "__end__"
     if state.attempt_count >= state.max_attempts:
@@ -4850,9 +4960,7 @@ def route_fix_result(state: AgentState) -> str:
     return "build_node"
 
 
-# ============================================================================
-# HEURISTIC PLAN NODE — zero-LLM default recipes, gated by the analyst
-# ============================================================================
+# heuristic_plan_node — zero-LLM default recipes, gated by the analyst.
 
 
 def _probe_config_files(state: AgentState) -> List[str]:
@@ -4920,17 +5028,17 @@ def _setup_packages_for_plan(
 def heuristic_plan_node(state: AgentState) -> AgentState:
     """Materialize a zero-LLM default BuildPlan when it is safe to.
 
-    Replaces the former "parallel scout branches + aggregator" — three
-    graph nodes that only copied init-time detection into differently
-    named fields. The same facts are gathered here in one honest pass,
-    then combined with the analyst's verdict:
+    Gathers the init-time detection facts in one pass, then combines
+    them with the analyst's verdict:
 
     * ``analysis.needs_custom_plan`` (the analyst READ the build files
       and says a textbook recipe will fail) → defer to the LLM scout.
     * Significant arch-specific code or weak build-system confidence →
       defer to the LLM scout.
-    * Otherwise → emit the canned recipe for the detected build system,
-      with the analyst's dependency list merged into the setup phase.
+    * Otherwise → emit the canned recipe for the detected build system
+      (cmake, make, autotools or go), with the analyst's dependency
+      list merged into the setup phase. Any other build system defers
+      to the LLM scout.
     """
     logger.info("Heuristic planner evaluating default recipes...")
     if state.build_plan:
@@ -4969,8 +5077,8 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
     build_type = state.scout_build_system_result["type"]
     confidence = float(state.scout_build_system_result["confidence"])
 
-    # The analyst read the actual build files; when it is LLM-grounded
-    # and disagrees with (or is more confident than) file-name
+    # The analyst read the actual build files; when it is LLM-grounded,
+    # names a build system, and is at least as confident as file-name
     # detection, its verdict wins.
     if analysis and analysis.llm_grounded:
         if (
@@ -5130,14 +5238,13 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
     return state
 
 
-# ============================================================================
-# BUILD-FIX SUBGRAPH — encapsulates the build → verify → fix → retry loop
-# ============================================================================
+# Build-fix subgraph and artifact verification (verify_node lives here
+# because it runs inside that loop).
 
 
-# The state keeps at most this many riscv64 outputs. The curator sends
-# the list to an LLM, and the old scanner kept at most 60 (20 per kind).
-# The verification summary keeps the full counts.
+# The state keeps at most this many riscv64 outputs, because the curator
+# sends the list to an LLM. The verification summary keeps the full
+# counts.
 _MAX_RECORDED_ARTIFACTS = 60
 
 
@@ -5214,10 +5321,12 @@ def verify_node(state: AgentState) -> AgentState:
 
 
 def create_build_fix_subgraph() -> StateGraph:
-    """Subgraph: build → (verify → fix → retry) loop.
+    """Compile the build-fix subgraph: build → (verify → fix → retry) loop.
 
-    Entered from the parent graph. Exits when build succeeds or escalation
-    thresholds are reached. The parent graph reads ``build_status`` to
+    Entered from the parent graph. Exits when verify returns SUCCESS, a
+    node escalates, the attempt ceiling is reached, or the fixer cannot
+    help (see ``route_build_result``, ``route_verify_result`` and
+    ``route_fix_result``). The parent graph reads ``build_status`` to
     decide next steps.
     """
     sg = StateGraph(AgentState)
@@ -5250,7 +5359,16 @@ def create_build_fix_subgraph() -> StateGraph:
 
 
 def predict_build_issues(state: AgentState) -> List[Dict[str, str]]:
-    """Predict potential build issues before execution.
+    """Flag plan commands likely to fail, before the builder runs them.
+
+    Deterministic pattern match over the planned commands: a Go build
+    without ``-buildvcs=false`` (the builder injects the flag when it
+    sees the ``dubious ownership`` prediction), cmake over heavily
+    arch-specific code, and package installs while tools are missing.
+
+    Args:
+        state: The agent state; reads the build plan, the arch-specific
+            code, and ``context_cache["missing_tools"]``.
 
     Returns:
         A list of predicted issues with mitigation strategies.
@@ -5315,23 +5433,22 @@ def predict_build_issues(state: AgentState) -> List[Dict[str, str]]:
     return predictions
 
 
-# ============================================================================
-# WORKFLOW CREATION
-# ============================================================================
+# Workflow assembly.
 
 
 def create_workflow() -> StateGraph:
-    """Create the properly graph-shaped LangGraph workflow.
+    """Assemble and compile the porting StateGraph.
 
     Architecture:
         init ──→ analyst (LLM reads repo) ──→ heuristic_plan ─┬→ supervisor
-                                                              └→ scout_node
-                                                       (LLM plan) │
-        supervisor ──→ build_fix_subgraph (subgraph) ────→ supervisor
+              │                                               └→ scout_node
+              └→ cached_recipe_node ──→ supervisor   (LLM plan)──┘
+                 (--optimize with a verified cache entry)
+        supervisor ──→ build_fix_subgraph (build→verify→fix) ──→ supervisor
         supervisor ──→ finish_node ──→ END
                        finish_node ──→ optimize_node ──→ END (--optimize)
         supervisor ──→ escalate_node ──→ END
-        supervisor ──→ analyst_node (re-analyze)
+        supervisor ──→ analyst_node (only after a crashed analyst)
         supervisor ──→ scout_node (error-aware re-scout)
     """
     logger.info("Creating properly graph-shaped workflow...")
@@ -5339,7 +5456,7 @@ def create_workflow() -> StateGraph:
     workflow = StateGraph(AgentState)
     build_fix_subgraph = create_build_fix_subgraph()
 
-    # --- Nodes ---
+    # Nodes
     workflow.add_node("init_node", init_node)
     # --optimize with a verified cached recipe: that recipe is the plan.
     workflow.add_node("cached_recipe_node", cached_recipe_node)
@@ -5351,7 +5468,6 @@ def create_workflow() -> StateGraph:
     workflow.add_node("heuristic_plan_node", heuristic_plan_node)
     # LLM scout: custom BuildPlan from evidence + analysis
     workflow.add_node("scout_node", scout_node)
-    # Build-fix subgraph
     workflow.add_node("build_fix_subgraph", build_fix_subgraph)
     # Terminal nodes
     workflow.add_node("finish_node", finish_node)
@@ -5359,10 +5475,10 @@ def create_workflow() -> StateGraph:
     # Performance mode after a finished port (--optimize)
     workflow.add_node("optimize_node", optimize_node)
 
-    # --- Entry point ---
+    # Entry point
     workflow.set_entry_point("init_node")
 
-    # --- Edges ---
+    # Edges
 
     # init → analyst (or the cached recipe, or escalate)
     workflow.add_conditional_edges(
@@ -5439,5 +5555,5 @@ def create_workflow() -> StateGraph:
     return compiled
 
 
-# Create global app instance
+# Compiled at import time; main.py runs this instance.
 app = create_workflow()

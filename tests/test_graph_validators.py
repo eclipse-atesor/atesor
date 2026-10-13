@@ -1,6 +1,8 @@
-"""Tests for graph.py validators.
+"""Tests for graph.py validators and helpers.
 
-Covers build plan, fix command, fixer response, and predictions.
+Covers the build plan, fix command, and fixer response validators,
+build-issue predictions, fallback plans, command rewriters, and the
+package test phase.
 """
 
 import os
@@ -62,7 +64,7 @@ from src.state import (
 
 
 def _plan(*commands) -> BuildPlan:
-    """Plan."""
+    """Build a one-phase cmake BuildPlan from the given commands."""
     return BuildPlan(
         build_system="cmake",
         build_system_confidence=0.95,
@@ -92,7 +94,6 @@ class TestBasicGraphHelpers(unittest.TestCase):
     """Tests for small, pure graph helper functions."""
 
     def test_model_factories_delegate_to_models_layer(self) -> None:
-        """Role helpers delegate to the model factories."""
         model = mock.MagicMock(name="model")
         pool = [mock.MagicMock(name="primary")]
 
@@ -116,7 +117,7 @@ class TestBasicGraphHelpers(unittest.TestCase):
         self.assertEqual(extract_content(123), "123")
 
     def test_extract_json_block_slices_outer_object(self) -> None:
-        """JSON extraction returns the first outer object when present."""
+        """JSON extraction slices from the first ``{`` to the last ``}``."""
         text = "prefix {\"ok\": true, \"nested\": {\"x\": 1}} suffix"
         self.assertEqual(
             extract_json_block(text),
@@ -125,7 +126,6 @@ class TestBasicGraphHelpers(unittest.TestCase):
         self.assertEqual(extract_json_block("no json here"), "no json here")
 
     def test_command_error_message_prefers_stderr_then_stdout(self) -> None:
-        """Command errors use available output in priority order."""
         stderr_result = CommandResult("make", 2, "ignored", "boom", 0.1)
         stdout_result = CommandResult("make", 2, "hello", "", 0.1)
         empty_result = CommandResult("make", 2, "", "", 0.1)
@@ -484,7 +484,6 @@ class TestFallbackBuildPlan(_WorkspaceFixtureMixin, unittest.TestCase):
     def test_autotools_fallback_bootstraps_when_configure_missing(
         self,
     ) -> None:
-        """Autotools fallback regenerates configure when it is absent."""
         state = self._state_for("autotools")
 
         plan = create_fallback_build_plan(state)
@@ -552,73 +551,62 @@ class TestDockerShellHelpers(unittest.TestCase):
             _fixup_top_builddir_in_submakefiles("/workspace/repos/pkg")
 
 
-# ---------- validate_build_plan ----------
+# validate_build_plan
 
 
 class TestValidateBuildPlan(unittest.TestCase):
-    """Tests for ValidateBuildPlan."""
+    """Tests for validate_build_plan."""
 
     def test_clean_plan_passes(self) -> None:
-        """Test clean plan passes."""
         ok, msg = validate_build_plan(_plan("cmake -B build -S .", "make -j4"))
         self.assertTrue(ok, msg)
 
     def test_placeholder_path_rejected(self) -> None:
-        """Test placeholder path rejected."""
         ok, msg = validate_build_plan(_plan("cp /path/to/foo bar"))
         self.assertFalse(ok)
         self.assertIn("Hallucination", msg)
 
     def test_your_username_placeholder_rejected(self) -> None:
-        """Test your username placeholder rejected."""
         ok, msg = validate_build_plan(_plan("cd /home/your_username/foo"))
         self.assertFalse(ok)
 
     def test_example_com_placeholder_rejected(self) -> None:
-        """Test example com placeholder rejected."""
         ok, _ = validate_build_plan(
             _plan("wget https://example.com/foo.tar.gz")
         )
         self.assertFalse(ok)
 
     def test_riscv_unknown_linux_gnu_gcc_rejected(self) -> None:
-        """Test riscv unknown linux gnu gcc rejected."""
         ok, _ = validate_build_plan(
             _plan("riscv64-unknown-linux-gnu-gcc -O2 main.c")
         )
         self.assertFalse(ok)
 
     def test_home_path_outside_workspace_rejected(self) -> None:
-        """Test home path outside workspace rejected."""
         ok, _ = validate_build_plan(_plan("cp /home/akif/foo bar"))
         self.assertFalse(ok)
 
     def test_home_inside_workspace_path_passes(self) -> None:
-        # /home/.../workspace/... is fine
-        """Test home inside workspace path passes."""
+        """A /home path that stays under the workspace is allowed."""
         ok, _ = validate_build_plan(_plan("ls /home/akif/workspace/foo"))
         self.assertTrue(ok)
 
     def test_go_subcommand_as_apk_package_rejected(self) -> None:
-        """Test go subcommand as apk package rejected."""
         ok, msg = validate_build_plan(_plan("apk add go mod"))
         self.assertFalse(ok)
         self.assertIn("Go subcommand", msg)
 
     def test_go_subcommand_as_apt_package_rejected(self) -> None:
-        """Test go subcommand as apt package rejected."""
         ok, _ = validate_build_plan(_plan("apt-get install build"))
         self.assertFalse(ok)
 
     def test_apt_install_with_flags_handles_pkg_list(self) -> None:
-        """Test apt install with flags handles pkg list."""
         ok, _ = validate_build_plan(
             _plan("apt-get install -y libssl-dev curl")
         )
         self.assertTrue(ok)
 
     def test_nested_cmake_build_dir_rejected(self) -> None:
-        """Test nested cmake build dir rejected."""
         ok, msg = validate_build_plan(
             _plan("cd build && cmake -S . -B build ..")
         )
@@ -626,15 +614,14 @@ class TestValidateBuildPlan(unittest.TestCase):
         self.assertIn("nested build dir", msg)
 
 
-# ---------- validate_fix_command ----------
+# validate_fix_command
 
 
 class TestValidateFixCommand(unittest.TestCase):
-    """Tests for ValidateFixCommand."""
+    """Tests for validate_fix_command."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        """SetUpClass."""
         cls.dangerous = [
             ("touch src/foo.go", "Go source"),
             ("touch include/x.h", "header"),
@@ -658,25 +645,23 @@ class TestValidateFixCommand(unittest.TestCase):
         ]
 
     def test_dangerous_commands_rejected(self) -> None:
-        """Test dangerous commands rejected."""
         for cmd, label in self.dangerous:
             with self.subTest(cmd=cmd, label=label):
                 ok, _ = validate_fix_command(cmd)
                 self.assertFalse(ok, f"SHOULD REJECT [{label}]: {cmd}")
 
     def test_safe_commands_pass(self) -> None:
-        """Test safe commands pass."""
         for cmd in self.safe:
             with self.subTest(cmd=cmd):
                 ok, reason = validate_fix_command(cmd)
                 self.assertTrue(ok, f"SHOULD PASS: {cmd} -> {reason}")
 
 
-# ---------- validate_fixer_response ----------
+# validate_fixer_response
 
 
 class TestValidateFixerResponse(unittest.TestCase):
-    """Tests for ValidateFixerResponse."""
+    """Tests for validate_fixer_response."""
 
     def _base(self, actions):
         """Build a base strategy payload for tests."""
@@ -690,18 +675,15 @@ class TestValidateFixerResponse(unittest.TestCase):
         }
 
     def test_non_dict_rejected(self) -> None:
-        """Test non dict rejected."""
         ok, _ = validate_fixer_response([])  # type: ignore[arg-type]
         self.assertFalse(ok)
 
     def test_no_strategies_rejected(self) -> None:
-        """Test no strategies rejected."""
         ok, msg = validate_fixer_response({})
         self.assertFalse(ok)
         self.assertIn("strategies", msg.lower())
 
     def test_recommended_id_not_found_rejected(self) -> None:
-        """Test recommended id not found rejected."""
         data = self._base([{"type": "command", "command": "ls"}])
         data["recommended_strategy_id"] = 99
         ok, msg = validate_fixer_response(data)
@@ -709,13 +691,11 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("not found", msg)
 
     def test_empty_actions_rejected(self) -> None:
-        """Test empty actions rejected."""
         ok, msg = validate_fixer_response(self._base([]))
         self.assertFalse(ok)
         self.assertIn("no actions", msg.lower())
 
     def test_create_file_with_empty_content_rejected(self) -> None:
-        """Test create file with empty content rejected."""
         ok, msg = validate_fixer_response(
             self._base(
                 [{"type": "create_file", "path": "foo.c", "content": "   "}]
@@ -725,7 +705,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("empty content", msg)
 
     def test_create_file_with_absolute_home_path_rejected(self) -> None:
-        """Test create file with absolute home path rejected."""
         ok, _ = validate_fixer_response(
             self._base(
                 [
@@ -740,14 +719,12 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_create_file_missing_path_rejected(self) -> None:
-        """Test create file missing path rejected."""
         ok, _ = validate_fixer_response(
             self._base([{"type": "create_file", "path": "", "content": "x"}])
         )
         self.assertFalse(ok)
 
     def test_create_file_long_path_rejected(self) -> None:
-        """Suspiciously long create_file paths are rejected."""
         ok, msg = validate_fixer_response(
             self._base(
                 [
@@ -763,7 +740,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("Suspiciously long filepath", msg)
 
     def test_create_file_parent_traversal_rejected(self) -> None:
-        """create_file paths cannot escape with parent traversal."""
         ok, msg = validate_fixer_response(
             self._base(
                 [
@@ -779,7 +755,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("escapes the repository", msg)
 
     def test_patch_parent_traversal_rejected(self) -> None:
-        """Patch file paths cannot escape the repository."""
         ok, msg = validate_fixer_response(
             self._base(
                 [
@@ -795,7 +770,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("Patch path escapes", msg)
 
     def test_empty_command_rejected(self) -> None:
-        """Test empty command rejected."""
         ok, msg = validate_fixer_response(
             self._base([{"type": "command", "command": "   "}])
         )
@@ -803,7 +777,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("empty", msg.lower())
 
     def test_self_copy_command_rejected(self) -> None:
-        """Test self copy command rejected."""
         ok, msg = validate_fixer_response(
             self._base([{"type": "command", "command": "cp -r src/* src/"}])
         )
@@ -811,7 +784,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("copying to self", msg)
 
     def test_unsafe_embedded_command_rejected(self) -> None:
-        """Test unsafe embedded command rejected."""
         ok, msg = validate_fixer_response(
             self._base([{"type": "command", "command": "touch foo.go"}])
         )
@@ -819,7 +791,6 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("Unsafe", msg)
 
     def test_valid_response_accepted(self) -> None:
-        """Test valid response accepted."""
         ok, msg = validate_fixer_response(
             self._base(
                 [
@@ -853,19 +824,17 @@ class TestValidateFixerResponse(unittest.TestCase):
         self.assertIn("Validation error", msg)
 
 
-# ---------- predict_build_issues ----------
+# predict_build_issues
 
 
 class TestPredictBuildIssues(unittest.TestCase):
-    """Tests for PredictBuildIssues."""
+    """Tests for predict_build_issues."""
 
     def test_no_plan_returns_empty(self) -> None:
-        """Test no plan returns empty."""
         state = create_initial_state("https://x/y.git")
         self.assertEqual(predict_build_issues(state), [])
 
     def test_go_build_without_buildvcs_flagged(self) -> None:
-        """Test go build without buildvcs flagged."""
         state = create_initial_state("https://x/y.git")
         state.build_plan = _plan("go build ./cmd/foo")
         preds = predict_build_issues(state)
@@ -874,7 +843,6 @@ class TestPredictBuildIssues(unittest.TestCase):
         )
 
     def test_go_build_with_buildvcs_false_not_flagged(self) -> None:
-        """Test go build with buildvcs false not flagged."""
         state = create_initial_state("https://x/y.git")
         state.build_plan = _plan("go build -buildvcs=false ./cmd/foo")
         preds = predict_build_issues(state)
@@ -883,7 +851,6 @@ class TestPredictBuildIssues(unittest.TestCase):
         )
 
     def test_cmake_with_high_severity_arch_code_flagged(self) -> None:
-        """Test cmake with high severity arch code flagged."""
         state = create_initial_state("https://x/y.git")
         state.build_plan = _plan("cmake -B build -S .")
         state.arch_specific_code = [
@@ -900,7 +867,6 @@ class TestPredictBuildIssues(unittest.TestCase):
         self.assertTrue(any(p["pattern"] == "arch_specific" for p in preds))
 
     def test_apk_install_with_missing_tools_flagged(self) -> None:
-        """Test apk install with missing tools flagged."""
         state = create_initial_state("https://x/y.git")
         state.build_plan = _plan("apk add zlib-dev")
         state.context_cache["missing_tools"] = ["protoc"]
@@ -929,47 +895,39 @@ class TestPredictBuildIssues(unittest.TestCase):
 class TestIsGoBuildCommand(unittest.TestCase):
     """Regression tests pinning the word-boundary go-build detector.
 
-    The previous implementation used substring checks like
-    `"go build" in cmd`, which falsely matched `cargo build` (at index 3)
-    and the alpine package list `apk add ... cargo build-base`. Downstream
-    code then mangled those commands (e.g. injecting `-buildvcs=false`
-    into apk arguments), which is what caused the dalfox build failures.
+    A substring check like `"go build" in cmd` falsely matches
+    `cargo build` (at index 3) and the alpine package list
+    `apk add ... cargo build-base`. Downstream code then mangled those
+    commands (e.g. injecting `-buildvcs=false` into apk arguments),
+    which is what caused the dalfox build failures.
     """
 
     def test_matches_plain_go_build(self) -> None:
-        """Test matches plain go build."""
         self.assertTrue(_is_go_build_command("go build ."))
 
     def test_matches_go_build_with_flags(self) -> None:
-        """Test matches go build with flags."""
         self.assertTrue(_is_go_build_command("go build -v ./cmd/foo"))
 
     def test_matches_go_install(self) -> None:
-        """Test matches go install."""
         self.assertTrue(_is_go_build_command("go install ./..."))
 
     def test_matches_go_build_after_env(self) -> None:
-        """Test env-prefixed go build is still detected."""
         self.assertTrue(
             _is_go_build_command("env GOMAXPROCS=1 go build -p 1 ./...")
         )
 
     def test_does_not_match_cargo_build(self) -> None:
-        """Test does not match cargo build."""
         self.assertFalse(_is_go_build_command("cargo build --release"))
 
     def test_does_not_match_apk_cargo_build_base(self) -> None:
-        """Test does not match 'apk add ... cargo build-base'."""
         self.assertFalse(
             _is_go_build_command("apk add --no-cache rust cargo build-base")
         )
 
     def test_does_not_match_hyphenated_token(self) -> None:
-        """Test does not match 'do go-build' (hyphenated, not a go command)."""
         self.assertFalse(_is_go_build_command("do go-build"))
 
     def test_does_not_match_empty(self) -> None:
-        """Test empty / non-string inputs return False."""
         self.assertFalse(_is_go_build_command(""))
 
 
@@ -1009,7 +967,6 @@ class TestGoCommandRewriters(unittest.TestCase):
         self.assertEqual(_inject_go_flag(cmd, "-buildvcs=false"), cmd)
 
     def test_inject_go_output(self) -> None:
-        """Inject -o path into go build command."""
         cmd = "go build ./cmd"
         out = _inject_go_output(cmd, "./.atesor-bin/cmd")
         self.assertIn("-o ./.atesor-bin/cmd", out)
@@ -1025,12 +982,10 @@ class TestReplanSignature(unittest.TestCase):
     """Tests for plan-level error signature detection."""
 
     def test_go_output_collision_signature(self) -> None:
-        """Output-dir collision should map to replan signature."""
         msg = 'go: build output "cmd" already exists and is a directory'
         self.assertEqual(_replan_signature(msg), "go_output_dir_collision")
 
     def test_unknown_signature(self) -> None:
-        """Unrelated errors should return empty signature."""
         self.assertEqual(_replan_signature("some random error"), "")
 
 
@@ -1054,7 +1009,6 @@ class TestSerializeBuildCommand(unittest.TestCase):
         self.assertIn("-p 1", out)
 
     def test_go_build_preserves_cd_prefix(self) -> None:
-        """Serialized go builds keep the leading cd command."""
         out = _serialize_build_command("cd sub && go build ./cmd/x")
         self.assertTrue(out.startswith("cd sub && env GOMAXPROCS=1 go build"))
 
@@ -1066,22 +1020,18 @@ class TestSerializeBuildCommand(unittest.TestCase):
         self.assertTrue(out.startswith("cd build &&"))
 
     def test_plain_make_gets_j1(self) -> None:
-        """Plain make commands gain a -j1 serialization flag."""
         out = _serialize_build_command("make")
         self.assertIn("make -j1", out)
 
     def test_cmake_not_mistaken_for_make(self) -> None:
-        """Build commands using cmake are not rewritten as make."""
         out = _serialize_build_command("cmake --build build")
         self.assertEqual(out, "cmake --build build")
 
     def test_ninja_gets_j1(self) -> None:
-        """Ninja commands gain a single-threaded jobs flag."""
         out = _serialize_build_command("cd build && ninja")
         self.assertEqual(out, "cd build && ninja -j1")
 
     def test_ninja_with_jobs_is_unchanged(self) -> None:
-        """Ninja commands with an explicit jobs flag are unchanged."""
         cmd = "ninja -j2 -C build"
         self.assertEqual(_serialize_build_command(cmd), cmd)
 
@@ -1093,18 +1043,15 @@ class TestSerializeBuildCommand(unittest.TestCase):
         self.assertNotIn(" -j ", out)
 
     def test_cargo_build_gets_j_and_env(self) -> None:
-        """Verify cargo build gets both -j 1 and CARGO_BUILD_JOBS."""
         out = _serialize_build_command("cargo build --release")
         self.assertIn("cargo build -j 1", out)
         self.assertIn("CARGO_BUILD_JOBS=1", out)
 
     def test_pip_install_gets_makeflags(self) -> None:
-        """Verify pip install serializes via MAKEFLAGS."""
         out = _serialize_build_command("pip install .")
         self.assertIn("MAKEFLAGS=-j1", out)
 
     def test_npm_install_gets_jobs_flag(self) -> None:
-        """Verify npm install gains --jobs 1."""
         out = _serialize_build_command("npm install")
         self.assertIn("npm install --jobs 1", out)
 
@@ -1113,7 +1060,6 @@ class TestBuilderRetryAllowed(unittest.TestCase):
     """Tests for single-use deterministic builder retry keys."""
 
     def test_retry_key_is_allowed_once(self) -> None:
-        """The same retry signature is only admitted once."""
         state = create_initial_state("https://x/y.git")
 
         self.assertTrue(_builder_retry_allowed(state, "oom:make"))
@@ -1146,7 +1092,6 @@ class TestSuspectedOOM(unittest.TestCase):
         )
 
     def test_non_parallel_command_with_empty_output_not_oom(self) -> None:
-        """Silent failures from unrelated commands are not treated as OOM."""
         self.assertFalse(_is_suspected_oom(_Res(1, "", "", False), "ls"))
 
     def test_exit_137_any_command(self) -> None:
@@ -1192,7 +1137,6 @@ class TestHeaderResolution(unittest.TestCase):
         self.assertEqual(pkgs, ["libogg-dev"])
 
     def test_unknown_header_not_guessed(self) -> None:
-        """Unknown headers do not produce guessed package names."""
         from src.platforms import ALPINE_RISCV
 
         pkgs = _resolve_header_to_packages(
@@ -1201,7 +1145,6 @@ class TestHeaderResolution(unittest.TestCase):
         self.assertEqual(pkgs, [])
 
     def test_empty_header_error_returns_empty(self) -> None:
-        """Empty compiler output produces no package guesses."""
         from src.platforms import ALPINE_RISCV
 
         self.assertEqual(_resolve_header_to_packages("", ALPINE_RISCV), [])
@@ -1228,14 +1171,13 @@ class TestPythonModuleResolution(unittest.TestCase):
         self.assertEqual(pkgs, ["jinja2"])
 
     def test_yaml_maps_to_pyyaml(self) -> None:
-        """Missing yaml modules resolve to the pyyaml package."""
         pkgs = _resolve_missing_python_modules(
             "ModuleNotFoundError: No module named 'yaml'"
         )
         self.assertEqual(pkgs, ["pyyaml"])
 
     def test_dotted_module_uses_top_level(self) -> None:
-        """Dotted module errors resolve by top-level module name."""
+        """``google.protobuf`` resolves to ``protobuf`` via the name map."""
         pkgs = _resolve_missing_python_modules(
             "No module named 'google.protobuf'"
         )
@@ -1246,7 +1188,6 @@ class TestPythonModuleResolution(unittest.TestCase):
         self.assertEqual(_resolve_missing_python_modules("some error"), [])
 
     def test_empty_python_error(self) -> None:
-        """Empty stderr produces no Python packages."""
         self.assertEqual(_resolve_missing_python_modules(""), [])
 
 
@@ -1254,13 +1195,12 @@ class TestGoToolchainDownloadCommand(unittest.TestCase):
     """Tests for the go.dev tarball installer shell command."""
 
     def test_version_appears_in_url(self) -> None:
-        """The command references the requested Go version in the URL."""
         cmd = _download_go_toolchain_cmd("1.25.0")
         self.assertIn("go1.25.0.linux-riscv64.tar.gz", cmd)
         self.assertIn("https://go.dev/dl/", cmd)
 
     def test_command_replaces_usr_local_go(self) -> None:
-        """The command wipes /usr/local/go before untar to avoid mixing."""
+        """The command swaps in a whole new tree, so versions never mix."""
         cmd = _download_go_toolchain_cmd("1.26.3")
         self.assertIn("rm -rf /usr/local/go", cmd)
         self.assertIn("tar -xzf", cmd)
@@ -1293,7 +1233,6 @@ class TestGoToolchainDownloadCommand(unittest.TestCase):
         self.assertNotIn("rm -rf /usr/local/go &&", cmd)
 
     def test_command_is_valid_shell(self) -> None:
-        """The generated command parses as bash."""
         import subprocess
 
         cmd = _download_go_toolchain_cmd("1.26.5")
@@ -1307,7 +1246,6 @@ class TestRepoGitmodules(unittest.TestCase):
     """Tests for ``.gitmodules`` presence detection."""
 
     def test_present(self) -> None:
-        """Returns True when the file exists."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
@@ -1316,14 +1254,12 @@ class TestRepoGitmodules(unittest.TestCase):
             self.assertTrue(_repo_has_gitmodules(d))
 
     def test_absent(self) -> None:
-        """Returns False when the file does not exist."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as d:
             self.assertFalse(_repo_has_gitmodules(d))
 
     def test_none_path_is_safe(self) -> None:
-        """Passing ``None`` does not raise."""
         self.assertFalse(_repo_has_gitmodules(None))
 
 
@@ -1375,7 +1311,7 @@ if __name__ == "__main__":
 
 
 class TestContainedWriteCommand(unittest.TestCase):
-    """The fixer write resolves symlinks where it writes, and refuses."""
+    """The fixer write resolves symlinks and refuses escapes from the repo."""
 
     def _run(self, repo: str, target: str, content: str = "data"):
         """Execute the generated command for real with bash."""
@@ -1449,7 +1385,7 @@ class TestBuildPlanMaskedFailures(unittest.TestCase):
     """A plan must not hide a failing build or test step."""
 
     def test_masked_build_steps_are_rejected(self) -> None:
-        """A masked make or cargo step reports a broken build as done."""
+        """A masked build step reports a broken build as done."""
         for cmd in (
             "make || true",
             "cmake --build build || :",
@@ -1480,7 +1416,11 @@ class TestPackageTestPhase(unittest.TestCase):
     """The package's own tests run once and never gate the port."""
 
     def setUp(self) -> None:
-        """Create a repository tree the detector reads on the host."""
+        """Create a repository tree the detector reads on the host.
+
+        Also clear ``ATESOR_PACKAGE_TEST_TIMEOUT`` and
+        ``ATESOR_RUN_DEADLINE``, so the default limit applies.
+        """
         import tempfile
 
         self._tmp = tempfile.TemporaryDirectory()
@@ -1568,6 +1508,7 @@ class TestPackageTestPhase(unittest.TestCase):
         )
 
     def _run(self, exit_code: int, duration: float = 1.0):
+        """Run ``make check`` with a mocked exit code and elapsed time."""
         from src import graph
 
         self._put("Makefile", "check:\n\ttrue\n")

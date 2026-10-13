@@ -1,4 +1,8 @@
-"""Tests for graph routing: init, analyst, supervisor, build-fix subgraph."""
+"""Tests for graph routing and the heuristic plan node.
+
+The tests cover the routers for init, cached recipe, analyst,
+heuristic plan, supervisor, finish, and the build-fix subgraph.
+"""
 
 import unittest
 
@@ -45,13 +49,11 @@ def _analysis(**overrides) -> PackageAnalysis:
 class TestRouteInit(unittest.TestCase):
     """Tests for route_init_to_next."""
 
-    def test_successful_init_routes_to_analyst(self):
-        """Successful init routes to the analyst."""
+    def test_successful_init_routes_to_analyst(self) -> None:
         s = _base_state(build_status=BuildStatus.PENDING)
         self.assertEqual(route_init_to_next(s), "analyst_node")
 
-    def test_failed_init_routes_to_escalate(self):
-        """Failed init routes to escalate."""
+    def test_failed_init_routes_to_escalate(self) -> None:
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_init_to_next(s), "escalate_node")
 
@@ -59,12 +61,11 @@ class TestRouteInit(unittest.TestCase):
 class TestRouteAnalyst(unittest.TestCase):
     """Tests for route_analyst_to_next."""
 
-    def test_analysis_routes_to_heuristic_plan(self):
-        """A produced analysis enters the heuristic plan node."""
+    def test_analysis_routes_to_heuristic_plan(self) -> None:
         s = _base_state(package_analysis=_analysis())
         self.assertEqual(route_analyst_to_next(s), "heuristic_plan_node")
 
-    def test_missing_analysis_escalates(self):
+    def test_missing_analysis_escalates(self) -> None:
         """The analyst always leaves an analysis; None means it crashed."""
         s = _base_state(package_analysis=None)
         self.assertEqual(route_analyst_to_next(s), "escalate_node")
@@ -73,8 +74,7 @@ class TestRouteAnalyst(unittest.TestCase):
 class TestRouteHeuristicPlan(unittest.TestCase):
     """Tests for route_heuristic_plan_to_next."""
 
-    def test_materialized_plan_routes_to_supervisor(self):
-        """A materialized default plan routes to the supervisor."""
+    def test_materialized_plan_routes_to_supervisor(self) -> None:
         bp = BuildPlan(
             build_system="cmake",
             build_system_confidence=0.9,
@@ -84,16 +84,15 @@ class TestRouteHeuristicPlan(unittest.TestCase):
         s = _base_state(build_plan=bp)
         self.assertEqual(route_heuristic_plan_to_next(s), "supervisor_node")
 
-    def test_no_plan_defers_to_llm_scout(self):
-        """No plan defers to the LLM scout."""
+    def test_no_plan_defers_to_llm_scout(self) -> None:
         s = _base_state(build_plan=None)
         self.assertEqual(route_heuristic_plan_to_next(s), "scout_node")
 
 
 class TestHeuristicPlanNode(unittest.TestCase):
-    """Tests for heuristic_plan_node's analyst consumption."""
+    """Tests for heuristic_plan_node's Go recipe and analyst consumption."""
 
-    def test_go_plan_initializes_module_when_missing(self):
+    def test_go_plan_initializes_module_when_missing(self) -> None:
         """Go default plan adds go mod init for GOPATH-style repos."""
         from src.graph import heuristic_plan_node
         from src.state import BuildSystemInfo
@@ -113,7 +112,7 @@ class TestHeuristicPlanNode(unittest.TestCase):
         self.assertIn("go mod tidy", cmds)
         self.assertTrue(any(cmd.startswith("go build ") for cmd in cmds))
 
-    def test_analyst_custom_plan_veto_defers_to_scout(self):
+    def test_analyst_custom_plan_veto_defers_to_scout(self) -> None:
         """needs_custom_plan from an LLM-grounded analysis defers.
 
         This is the load-bearing consumption path: the analyst READ the
@@ -136,7 +135,7 @@ class TestHeuristicPlanNode(unittest.TestCase):
         out = heuristic_plan_node(s)
         self.assertIsNone(out.build_plan)
 
-    def test_fallback_analysis_does_not_veto(self):
+    def test_fallback_analysis_does_not_veto(self) -> None:
         """A non-grounded fallback analysis must not veto the recipe.
 
         Otherwise every package would defer to the LLM scout exactly
@@ -156,7 +155,7 @@ class TestHeuristicPlanNode(unittest.TestCase):
         self.assertIsNotNone(out.build_plan)
         self.assertEqual(out.build_plan.build_system, "make")
 
-    def test_analyst_build_system_overrides_weak_detection(self):
+    def test_analyst_build_system_overrides_weak_detection(self) -> None:
         """An LLM-grounded, more-confident build-system verdict wins."""
         from src.graph import heuristic_plan_node
         from src.state import BuildSystemInfo
@@ -178,12 +177,11 @@ class TestHeuristicPlanNode(unittest.TestCase):
 class TestRouteSupervisor(unittest.TestCase):
     """Tests for route_supervisor_to_next."""
 
-    def test_success_routes_to_finish(self):
-        """Success routes to finish."""
+    def test_success_routes_to_finish(self) -> None:
         s = _base_state(build_status=BuildStatus.SUCCESS)
         self.assertEqual(route_supervisor_to_next(s), "finish_node")
 
-    def test_success_at_max_attempts_still_finishes(self):
+    def test_success_at_max_attempts_still_finishes(self) -> None:
         """A build that succeeded on its final attempt must FINISH.
 
         Regression: should_escalate() was consulted before the SUCCESS
@@ -197,20 +195,17 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "finish_node")
 
-    def test_success_over_cost_cap_still_finishes(self):
-        """Success over cost cap still finishes."""
+    def test_success_over_cost_cap_still_finishes(self) -> None:
         s = _base_state(build_status=BuildStatus.SUCCESS, api_cost_usd=1.5)
         self.assertEqual(route_supervisor_to_next(s), "finish_node")
 
-    def test_max_attempts_escalates(self):
-        """Max attempts escalates."""
+    def test_max_attempts_escalates(self) -> None:
         s = _base_state(
             attempt_count=5, max_attempts=5, build_status=BuildStatus.FAILED
         )
         self.assertEqual(route_supervisor_to_next(s), "escalate_node")
 
-    def test_error_loop_escalates(self):
-        """Error loop escalates."""
+    def test_error_loop_escalates(self) -> None:
         from src.state import ErrorRecord
 
         err = ErrorRecord(message="fail", category=ErrorCategory.COMPILATION)
@@ -222,8 +217,7 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "escalate_node")
 
-    def test_missing_deps_routes_to_scout(self):
-        """Missing deps routes to scout."""
+    def test_missing_deps_routes_to_scout(self) -> None:
         from src.state import ErrorRecord
 
         err = ErrorRecord(
@@ -238,15 +232,13 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "scout_node")
 
-    def test_no_analysis_routes_to_analyst(self):
-        """No package analysis routes back to the analyst."""
+    def test_no_analysis_routes_to_analyst(self) -> None:
         s = _base_state(
             package_analysis=None, build_status=BuildStatus.PENDING
         )
         self.assertEqual(route_supervisor_to_next(s), "analyst_node")
 
-    def test_pending_build_routes_to_subgraph(self):
-        """Pending build routes to subgraph."""
+    def test_pending_build_routes_to_subgraph(self) -> None:
         bp = BuildPlan(
             build_system="make",
             build_system_confidence=0.8,
@@ -260,7 +252,7 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
 
-    def test_failed_compilation_routes_to_subgraph(self):
+    def test_failed_compilation_routes_to_subgraph(self) -> None:
         """Failed non-replan errors route into the build-fix subgraph."""
         s = _base_state(
             package_analysis=_analysis(),
@@ -270,7 +262,7 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
 
-    def test_failed_disk_space_routes_to_escalate(self):
+    def test_failed_disk_space_routes_to_escalate(self) -> None:
         """Infrastructure capacity failures route to human handoff."""
         s = _base_state(
             package_analysis=_analysis(),
@@ -280,7 +272,7 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "escalate_node")
 
-    def test_failed_permission_routes_to_escalate(self):
+    def test_failed_permission_routes_to_escalate(self) -> None:
         """Permission failures route to human handoff, not the fixer."""
         s = _base_state(
             package_analysis=_analysis(),
@@ -290,7 +282,7 @@ class TestRouteSupervisor(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "escalate_node")
 
-    def test_pending_without_plan_routes_to_scout(self):
+    def test_pending_without_plan_routes_to_scout(self) -> None:
         """Pending analyzed state without a plan asks the scout to plan."""
         s = _base_state(
             package_analysis=_analysis(),
@@ -303,17 +295,15 @@ class TestRouteSupervisor(unittest.TestCase):
 class TestBuildFixSubgraphRouting(unittest.TestCase):
     """Tests for the build-fix subgraph routing."""
 
-    def test_build_success_routes_to_verify(self):
-        """Build success routes to verify."""
+    def test_build_success_routes_to_verify(self) -> None:
         s = _base_state(build_status=BuildStatus.SUCCESS)
         self.assertEqual(route_build_result(s), "verify_node")
 
-    def test_build_fail_routes_to_fix(self):
-        """Build fail routes to fix."""
+    def test_build_fail_routes_to_fix(self) -> None:
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_build_result(s), "fix_node")
 
-    def test_build_fail_at_max_attempts_exits_subgraph(self):
+    def test_build_fail_at_max_attempts_exits_subgraph(self) -> None:
         """A failed build at the retry ceiling exits to the parent graph."""
         s = _base_state(
             build_status=BuildStatus.FAILED,
@@ -322,17 +312,15 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
         )
         self.assertEqual(route_build_result(s), "__end__")
 
-    def test_verify_success_exits_subgraph(self):
-        """Verify success exits subgraph."""
+    def test_verify_success_exits_subgraph(self) -> None:
         s = _base_state(build_status=BuildStatus.SUCCESS)
         self.assertEqual(route_verify_result(s), "__end__")
 
-    def test_verify_fail_routes_to_fix(self):
-        """Verify fail routes to fix."""
+    def test_verify_fail_routes_to_fix(self) -> None:
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_verify_result(s), "fix_node")
 
-    def test_verify_fail_at_max_attempts_exits_subgraph(self):
+    def test_verify_fail_at_max_attempts_exits_subgraph(self) -> None:
         """A verify failure at max attempts exits instead of fixing."""
         s = _base_state(
             build_status=BuildStatus.FAILED,
@@ -341,7 +329,7 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
         )
         self.assertEqual(route_verify_result(s), "__end__")
 
-    def test_verify_fail_after_non_build_fix_exits_subgraph(self):
+    def test_verify_fail_after_non_build_fix_exits_subgraph(self) -> None:
         """Post-fix non-build verification failures do not loop forever."""
         s = _base_state(
             build_status=BuildStatus.FAILED,
@@ -357,17 +345,15 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
         )
         self.assertEqual(route_verify_result(s), "__end__")
 
-    def test_fix_success_retries_build(self):
-        """Fix success retries build."""
+    def test_fix_success_retries_build(self) -> None:
         s = _base_state(build_status=BuildStatus.PENDING)
         self.assertEqual(route_fix_result(s), "build_node")
 
-    def test_fix_still_failed_exits_subgraph(self):
-        """Fix still failed exits subgraph."""
+    def test_fix_still_failed_exits_subgraph(self) -> None:
         s = _base_state(build_status=BuildStatus.FAILED)
         self.assertEqual(route_fix_result(s), "__end__")
 
-    def test_fix_at_max_attempts_exits_subgraph(self):
+    def test_fix_at_max_attempts_exits_subgraph(self) -> None:
         """A nominally successful fix still exits at the retry ceiling."""
         s = _base_state(
             build_status=BuildStatus.PENDING,
@@ -384,7 +370,7 @@ if __name__ == "__main__":
 class TestEscalatedRouting(unittest.TestCase):
     """ESCALATED (a crashed node) must end the run, not loop back."""
 
-    def test_supervisor_sends_escalated_to_escalate(self):
+    def test_supervisor_sends_escalated_to_escalate(self) -> None:
         """The supervisor has a terminal branch for ESCALATED."""
         s = _base_state(
             build_status=BuildStatus.ESCALATED,
@@ -392,7 +378,7 @@ class TestEscalatedRouting(unittest.TestCase):
         )
         self.assertEqual(route_supervisor_to_next(s), "escalate_node")
 
-    def test_subgraph_routers_exit_on_escalated(self):
+    def test_subgraph_routers_exit_on_escalated(self) -> None:
         """Build, verify and fix routers leave the subgraph."""
         for router in (
             route_build_result,
@@ -403,7 +389,7 @@ class TestEscalatedRouting(unittest.TestCase):
                 s = _base_state(build_status=BuildStatus.ESCALATED)
                 self.assertEqual(router(s), "__end__")
 
-    def test_crashed_init_escalates(self):
+    def test_crashed_init_escalates(self) -> None:
         """A crashed init_node must not hand a missing clone on."""
         s = _base_state(build_status=BuildStatus.ESCALATED)
         self.assertEqual(route_init_to_next(s), "escalate_node")
@@ -412,14 +398,14 @@ class TestEscalatedRouting(unittest.TestCase):
 class TestRouteCachedRecipe(unittest.TestCase):
     """--optimize with a verified cached recipe skips the planning."""
 
-    def test_init_goes_to_the_cached_recipe(self):
+    def test_init_goes_to_the_cached_recipe(self) -> None:
         """A cached recipe replaces the analyst; a failed init escalates."""
         s = _base_state(cached_recipe={"build_plan": {"phases": []}})
         self.assertEqual(route_init_to_next(s), "cached_recipe_node")
         s.build_status = BuildStatus.FAILED
         self.assertEqual(route_init_to_next(s), "escalate_node")
 
-    def test_cached_recipe_builds_or_falls_back(self):
+    def test_cached_recipe_builds_or_falls_back(self) -> None:
         """A plan goes to the supervisor; no plan plans as usual."""
         plan = BuildPlan("cmake", 1.0, [BuildPhase(1, "b", ["make"])], "1m")
         self.assertEqual(
@@ -429,7 +415,7 @@ class TestRouteCachedRecipe(unittest.TestCase):
         self.assertEqual(route_cached_recipe_to_next(_base_state()),
                          "analyst_node")
 
-    def test_the_node_is_wired(self):
+    def test_the_node_is_wired(self) -> None:
         """The compiled graph has the node between init and supervisor."""
         graph = create_workflow().get_graph()
         self.assertIn("cached_recipe_node", graph.nodes)
@@ -442,7 +428,7 @@ class TestRouteCachedRecipe(unittest.TestCase):
 class TestRouteFinish(unittest.TestCase):
     """--optimize adds one step after finish_node."""
 
-    def test_finish_ends_unless_optimize_was_requested(self):
+    def test_finish_ends_unless_optimize_was_requested(self) -> None:
         """Only a run with --optimize goes on to optimize_node."""
         self.assertEqual(route_finish_to_next(_base_state()), "__end__")
         s = _base_state(optimize_requested=True)

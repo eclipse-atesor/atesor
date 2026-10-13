@@ -1,4 +1,8 @@
-"""Tests for src/optimize.py: the tunes, replay, gates and flow."""
+"""Tests for src/optimize.py: the tunes, replay, gates and flow.
+
+The last classes run the in-sandbox programs for real on this host and
+feed a real result to the report and the zip.
+"""
 
 import contextlib
 import hashlib
@@ -311,6 +315,7 @@ def _ar(members) -> bytes:
 
 
 def _inspect_namespace():
+    """Load the inspect program without running its trailing main()."""
     namespace = {}
     source = optimize._INSPECT_PROGRAM.replace("\nmain()\n", "\n")
     with mock.patch.object(sys, "argv", ["inspect", "{}"]):
@@ -319,7 +324,11 @@ def _inspect_namespace():
 
 
 class TestLadder(unittest.TestCase):
-    """The probe decides which tunes exist and what they set."""
+    """The probe decides which tunes exist and what they set.
+
+    The class also covers the build-flag scan, the redundant tunes and
+    the result text of a tune.
+    """
 
     def test_megrez_c_ladder_is_cumulative(self) -> None:
         """Core, ISA, -O3 and LTO stack up; clang gets its own flags."""
@@ -687,7 +696,6 @@ class TestPrograms(unittest.TestCase):
     """The in-sandbox programs run for real on this host."""
 
     def setUp(self) -> None:
-        """Create a scratch directory."""
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = self._tmp.name
@@ -724,7 +732,6 @@ class TestPrograms(unittest.TestCase):
         )
 
     def test_programs_parse(self) -> None:
-        """The three programs are valid Python."""
         import ast
 
         for program in (optimize._PREPARE_PROGRAM,
@@ -1003,7 +1010,6 @@ class TestGates(unittest.TestCase):
     """Gates 1 and 2 decide what reaches a measurement."""
 
     def setUp(self) -> None:
-        """Prepare a C variant and the Megrez profile."""
         self.variant = Variant("v2-isa", "isa", "c", "gcc", ["-O2"])
         self.profile = _profile()
 
@@ -1025,6 +1031,34 @@ class TestGates(unittest.TestCase):
                              self.profile)[0],
             "failed",
         )
+
+    def test_a_helper_the_measurement_never_runs_only_warns(self) -> None:
+        """A missing artifact outside ``required`` does not fail a tune."""
+        facts = _facts()
+        rel = next(iter(facts["artifacts"]))
+        facts["artifacts"]["build/simd/simdcoverage"] = {"exists": False}
+        # Without a required list every artifact must exist: that is
+        # what the rebuild of the verified build gets.
+        outcome, reason, _ = gate_build_facts(
+            facts, self.variant, self.profile
+        )
+        self.assertEqual(outcome, "failed")
+        self.assertIn("simdcoverage was not built", reason)
+        # The measurement links `rel` and never runs simdcoverage.
+        outcome, reason, warnings = gate_build_facts(
+            facts, self.variant, self.profile, None, [rel]
+        )
+        self.assertEqual(outcome, "passed")
+        self.assertTrue(any("simdcoverage was not built" in text
+                            and "does not fail the tune" in text
+                            for text in warnings))
+        # A library the measurement does link still fails the gate.
+        facts["artifacts"][rel] = {"exists": False}
+        outcome, reason, _ = gate_build_facts(
+            facts, self.variant, self.profile, None, [rel]
+        )
+        self.assertEqual(outcome, "failed")
+        self.assertIn(f"{rel} was not built", reason)
 
     def test_archives_count_in_gate_1(self) -> None:
         """A static archive is checked for riscv64 and compared by code."""
@@ -1352,7 +1386,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(qemu.health_calls, [], "QEMU has no machine check")
 
     def test_unverified_port_is_skipped(self) -> None:
-        """No verified baseline, no optimization."""
         lines = []
         result = run_optimization(_state(verified=False),
                                   progress=lines.append)
@@ -1538,7 +1571,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertTrue(any("same code as Tune-2" in line for line in lines))
 
     def test_failed_layout_baseline_confirms_nothing(self) -> None:
-        """No baseline in the second layout means no confirmation."""
         sandbox = _Sandbox(_profile(), ratios={"tune3": (0.9, "faster")},
                            failing=("base-layout2",))
         with sandbox:
@@ -1556,7 +1588,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(optimize._p_text(None), "p=?")
 
     def test_failed_second_check_accepts_nothing(self) -> None:
-        """A gain that does not hold in the second layout is dropped."""
         sandbox = _Sandbox(_profile(), ratios={
             "tune3": (0.90, "faster"),
             "tune3-layout2": (1.0, "no change"),
@@ -1623,6 +1654,48 @@ class TestRunOptimization(unittest.TestCase):
                             for line in lines))
         self.assertFalse(any(line.startswith("Tune-") for line in lines))
 
+    def test_a_gate_1_warning_reaches_the_console_and_the_result(
+        self,
+    ) -> None:
+        """A tune that passes with a note says so; silence would hide it."""
+        note = "build/simd/simdcoverage was not built; the measurement"
+
+        def warn(facts, variant, profile, baseline=None, required=None):
+            return "passed", "ok", [note]
+
+        lines = []
+        sandbox = _Sandbox(_profile())
+        with sandbox, mock.patch.object(optimize, "gate_build_facts",
+                                        side_effect=warn):
+            result = run_optimization(_state(), progress=lines.append)
+        self.assertTrue(any(f"note: {note}" in line for line in lines),
+                        f"no note line: {lines[-6:]}")
+        self.assertIn(note, result["warnings"])
+        # One warning, however many tunes repeat it.
+        self.assertEqual(result["warnings"].count(note), 1)
+
+    def test_gate_1_requires_the_libraries_and_the_timed_program(
+        self,
+    ) -> None:
+        """The run hands gate 1 the artifacts the measurement needs."""
+        seen = []
+        real = optimize.gate_build_facts
+
+        def record(facts, variant, profile, baseline=None, required=None):
+            seen.append(required)
+            return real(facts, variant, profile, baseline, required)
+
+        sandbox = _Sandbox(_profile())
+        with sandbox, mock.patch.object(optimize, "gate_build_facts",
+                                        side_effect=record):
+            run_optimization(_state())
+        # The rebuild of the verified build runs before the workload is
+        # known, so it keeps the strict check; every tune gets the list.
+        self.assertIsNone(seen[0])
+        wanted = ["build/libz.a", "build/libz.so.1", "build/minigzip"]
+        self.assertTrue(any(req == wanted for req in seen),
+                        f"no gate call got {wanted}: {seen}")
+
     def test_a_baseline_crash_is_reported_as_a_port_problem(self) -> None:
         """A crash of the verified build leads the reason and the warnings."""
         crash = (
@@ -1687,7 +1760,6 @@ class TestRunOptimization(unittest.TestCase):
                       lines)
 
     def test_baseline_that_does_not_rebuild_stops(self) -> None:
-        """No copy of the verified build, no comparison."""
         sandbox = _Sandbox(_profile(), failing=("base",))
         with sandbox:
             result = run_optimization(_state())
@@ -1721,7 +1793,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(_by_id(result)["tune1"]["verdict"], "no effect")
 
     def test_harness_builds_in_every_tree(self) -> None:
-        """The workload's harness is part of each build under test."""
         sandbox = _Sandbox(_profile(), workload=_harness_workload(),
                            ratios={"tune3": (0.9, "faster"),
                                    "tune3-layout2": (0.9, "faster")})
@@ -1756,7 +1827,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertNotIn("tune1", [vid for vid, _ in sandbox.measured])
 
     def test_missing_baseline_artifacts_are_not_required(self) -> None:
-        """Only artifacts that the verified tree holds are checked."""
         sandbox = _Sandbox(_profile())
         original = sandbox.inspect
         asked = []
@@ -2067,7 +2137,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(result["verdict"], "built")
 
     def test_budget_below_one_step_builds_nothing(self) -> None:
-        """A budget below one step stops before the baseline build."""
         with _Sandbox(_profile()) as sandbox:
             result = run_optimization(
                 _state(), budget_seconds=optimize.MIN_STEP_SECONDS - 1
@@ -2077,7 +2146,6 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(sandbox.builds, {})
 
     def test_budget_skips_the_remaining_tunes(self) -> None:
-        """When the budget runs out, the rest of the tunes skip."""
         times = iter([0.0] + [0.0] * 6 + [10_000.0] * 200)
         with _Sandbox(_profile()) as sandbox:
             result = run_optimization(
@@ -2231,7 +2299,10 @@ class TestRunOptimization(unittest.TestCase):
                                  1 if code else 0)
 
     def test_pgo_label_names_what_it_trains_on(self) -> None:
-        """C/C++ trains on a second input; Go on its own benchmarks."""
+        """C/C++ trains on a second input; Go on its own benchmarks.
+
+        A C/C++ workload without an input trains on the workload itself.
+        """
         report = mock.Mock()
         context = {"root": ROOT, "report": report, "trees": []}
         cases = [
@@ -2277,7 +2348,10 @@ class TestRunOptimization(unittest.TestCase):
 
 
 class TestKeepArtifacts(unittest.TestCase):
-    """The scripts that keep a tree's artifacts run for real here."""
+    """The scripts that keep a tree's artifacts, and their wrappers.
+
+    The scripts run for real here; the wrapper test fakes execute_command.
+    """
 
     def _sh(self, script, tree, rels):
         return subprocess.run(["sh", "-c", script, "sh"] + rels, cwd=tree,

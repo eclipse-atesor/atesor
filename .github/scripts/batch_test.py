@@ -27,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 from dotenv import load_dotenv
 
@@ -39,6 +39,7 @@ _REPO_ROOT = os.path.abspath(
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# E402: the sys.path insert above must run before importing src modules.
 from src import sandbox, target  # noqa: E402
 from src.platforms import PROFILES  # noqa: E402
 from src.state import derive_repo_name  # noqa: E402
@@ -55,14 +56,12 @@ _NATIVE_GIB_PER_WORKER = 4
 # inside a critical section) cannot self-deadlock.
 _print_lock = threading.RLock()
 
-# ----------------------------------------------------------------------------
 # Pretty-printing helpers (presentation only — no impact on agent flow).
-# ----------------------------------------------------------------------------
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
 def _c(code: str, text: str) -> str:
-    """Wrap ``text`` in an ANSI color code when stdout is a TTY."""
+    """Wrap ``text`` in an ANSI color code when ``_USE_COLOR`` is set."""
     return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
 
 
@@ -128,13 +127,13 @@ _TERM_COLS = 80
 
 
 def _progress_tag() -> str:
-    """Return ``[ 12/172]`` style progress tag for the next completion."""
+    """Return the ``[ 12/172]`` progress tag of the latest completion."""
     width = len(str(_progress_total))
     return f"[{_progress_counter:>{width}}/{_progress_total}]"
 
 
 def _term_size() -> tuple[int, int]:
-    """Best-effort current terminal size as ``(rows, cols)``."""
+    """Return the terminal size as ``(rows, cols)``, else ``(24, 80)``."""
     try:
         size = os.get_terminal_size()
         return size.lines, size.columns
@@ -155,7 +154,7 @@ def _install_sticky_bar() -> None:
     # Make room for the bar: emit a newline so the cursor isn't on the last
     # row when we shrink the scroll region (otherwise terminals scroll once).
     sys.stdout.write("\n")
-    # Set scroll region [1, H-1], move cursor inside it, save state.
+    # Set scroll region [1, H-1], then move the cursor inside it.
     sys.stdout.write(f"\033[1;{_TERM_ROWS - 1}r")
     sys.stdout.write(f"\033[{_TERM_ROWS - 1};1H")
     sys.stdout.flush()
@@ -236,20 +235,18 @@ def _emit(line: str) -> None:
         _redraw_bar()
 
 
-# ----------------------------------------------------------------------------
 # Per-worker container pool
-# ----------------------------------------------------------------------------
+#
 # Each batch worker reserves its own Docker sandbox container by passing
-# --container atesor-ai-sandbox-w<N> to main.py. This eliminates contention on
-# dpkg / apk locks that previously deadlocked parallel runs when every worker
-# shared a single container. Containers are created on demand by
+# --container atesor-ai-sandbox-w<N> to main.py. This prevents contention on
+# dpkg / apk locks: parallel runs in one shared container deadlock on them.
+# Containers are created on demand by
 # setup_docker_environment() (same image, just different names) and persist
 # between packages so the pool only pays the ~5 s startup cost once.
 #
-# To switch distro for the whole batch, set ATESOR_PLATFORM=debian (or pass
+# To switch distro for the whole batch, set ATESOR_PLATFORM=alpine (or pass
 # --platform <name> below); the suffix is appended to the active profile's
 # default container name.
-# ----------------------------------------------------------------------------
 PLATFORM = os.environ.get("ATESOR_PLATFORM", "debian").strip().lower()
 _PLATFORM_CONTAINERS = {
     "alpine": "atesor-ai-sandbox",
@@ -287,7 +284,7 @@ class PackageRunResult:
     status: str
     output: str
     duration: float
-    returncode: int | None = None
+    returncode: Optional[int] = None
 
     @property
     def success(self) -> bool:
@@ -295,7 +292,7 @@ class PackageRunResult:
         return self.status == STATUS_PASS
 
     def __iter__(self) -> Iterator[bool | str | float]:
-        """Preserve tuple-unpack compatibility for older unit tests."""
+        """Yield ``success``, ``output`` and ``duration`` for tuple unpack."""
         yield self.success
         yield self.output
         yield self.duration
@@ -324,7 +321,7 @@ def _repo_lock(repo_url: str) -> threading.Lock:
 
 
 def _status_from_returncode(
-    returncode: int | None,
+    returncode: Optional[int],
     shutdown_requested: bool,
 ) -> str:
     """Map main.py's exit-code contract to a batch status."""
@@ -338,7 +335,14 @@ def _status_from_returncode(
 
 
 def _coerce_result(name: str, raw: object) -> PackageRunResult:
-    """Return a PackageRunResult from new or legacy worker returns."""
+    """Return ``raw`` as a PackageRunResult.
+
+    ``raw`` is a PackageRunResult or a ``(success, output, duration)``
+    tuple.
+
+    Raises:
+        TypeError: If ``raw`` has another form.
+    """
     if isinstance(raw, PackageRunResult):
         return raw
     if isinstance(raw, tuple) and len(raw) == 3:
@@ -395,15 +399,13 @@ def _read_machine_resources() -> tuple[str, int, int]:
     return name, int(cores), int(mem_kib) // (1024 * 1024)
 
 
-# ----------------------------------------------------------------------------
 # Package-list loading
-# ----------------------------------------------------------------------------
+#
 # Packages live in JSON files under ../packages/ (i.e. .github/packages/,
 # a sibling of this scripts/ dir). The CLI accepts either a bare name
 # (resolved against <packages_dir>/<name>.json) or an explicit path.
 # Per-list defaults (max_attempts, timeout_seconds) flow into the globals
 # below so run_agent() doesn't need to thread them through.
-# ----------------------------------------------------------------------------
 _PACKAGES_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "packages")
 )
@@ -430,6 +432,10 @@ def _load_package_list(
 
     Returns ``(packages, defaults, description)`` where ``packages`` is a
     list of ``(name, url)`` tuples in declaration order.
+
+    Raises:
+        SystemExit: If the file is missing, is not valid JSON, or breaks
+            the list schema.
     """
     if not os.path.isfile(path):
         raise SystemExit(f"[ERROR] Package list not found: {path}")
@@ -505,7 +511,7 @@ _STREAM_SETUP = os.environ.get("ATESOR_SETUP_STREAM", "").strip().lower() in {
 }
 
 
-def _parse_semver(value: str) -> tuple[int, int, int] | None:
+def _parse_semver(value: str) -> Optional[tuple[int, int, int]]:
     """Parse semantic versions like ``1.26`` or ``1.26.3``."""
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", value)
     if not match:
@@ -538,8 +544,8 @@ def _target_args() -> list[str]:
     """Return the ``--target`` flag for each ``main.py`` call.
 
     On native, each call gets ``--target native``, so a child cannot
-    take another target from its own ``.env``. QEMU calls keep today's
-    argv. The environment gives them ATESOR_TARGET.
+    take another target from its own ``.env``. QEMU calls get no flag.
+    The environment gives them ATESOR_TARGET.
     """
     return ["--target", target.NATIVE] if target.is_native() else []
 
@@ -633,7 +639,12 @@ def _stale_reasons(
 
 
 def _refresh_worker_pool_if_needed() -> bool:
-    """Refresh worker containers when toolchains are stale."""
+    """Refresh worker containers when toolchains are stale.
+
+    Probes only the w1 container: all workers share one image, so one
+    sample represents the pool. A stale toolchain rebuilds the image
+    and recreates every worker container before the batch starts.
+    """
     minimums = _MIN_TOOLCHAIN.get(PLATFORM, {})
     if not minimums:
         return True
@@ -708,15 +719,13 @@ def _tail(path: str, n: int = 40) -> str:
         return ""
 
 
-# ----------------------------------------------------------------------------
 # Two-stage Ctrl-C handling
-# ----------------------------------------------------------------------------
+#
 # First Ctrl-C  → soft shutdown: cancel queued futures, SIGTERM every live
 #                 child process-group so running agents exit promptly, then
 #                 let the executor drain so we can still print the summary.
 # Second Ctrl-C → hard shutdown: SIGKILL every tracked PGID, drop the sticky
 #                 bar, and exit immediately with code 130.
-# ----------------------------------------------------------------------------
 _live_pids: set[int] = set()
 _live_lock = threading.Lock()
 _shutdown_event = threading.Event()
@@ -799,7 +808,18 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
     Thread-safe: leases one container name from the per-worker pool, runs
     the agent against it, then returns the name so a later package can
     reuse the same container (warm apt/apk cache). Uses ``--container`` so
-    ``main.py`` knows which sandbox to spawn/attach to.
+    ``main.py`` knows which sandbox to spawn/attach to. A per-repo lock
+    serializes runs that share one clone directory.
+
+    Args:
+        repo_url: The repository URL to port.
+        repo_name: The package name. It names the log file
+            ``BATCH_LOGS_DIR/<repo_name>.log``.
+
+    Returns:
+        The run result. The status is SKIPPED after a shutdown request,
+        TIMEOUT after the ``timeout_seconds`` kill, and FAIL after an
+        exception. Else ``_status_from_returncode`` gives the status.
     """
     start_time = time.time()
     log_path = os.path.join(BATCH_LOGS_DIR, f"{repo_name}.log")
@@ -816,11 +836,13 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
 
     name_lock = _repo_lock(repo_url)
     name_lock.acquire()
-    container_name: str | None = None
+    container_name: Optional[str] = None
 
     global _progress_active
-    proc: subprocess.Popen | None = None
+    proc: Optional[subprocess.Popen] = None
     try:
+        # Re-check shutdown: it may have been requested while this worker
+        # was blocked acquiring name_lock.
         if _shutdown_event.is_set():
             return PackageRunResult(
                 repo_name,
@@ -868,7 +890,9 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
                 stdout=log_fh,
                 stderr=log_fh,
                 text=True,
-                preexec_fn=os.setsid,  # New group → kill children.
+                # New process group so _kill_proc_group() can signal the
+                # agent and every child it spawns with one killpg().
+                preexec_fn=os.setsid,
                 # main.py cuts its non-gating package tests to fit
                 # before this deadline (the kill below), so a slow test
                 # suite cannot turn a good port into a TIMEOUT.
@@ -945,7 +969,7 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """CLI: ``--list <name|path>`` + optional positional name filters."""
+    """Parse ``--list <name|path>``, the flags, and the name filters."""
     parser = argparse.ArgumentParser(
         description=(
             "Run the RISC-V porting agent across a list of packages "
@@ -1064,7 +1088,14 @@ def _apply_shard(
 
 
 def main() -> int:
-    """Run the configured packages through the agent in parallel."""
+    """Run the configured packages through the agent in parallel.
+
+    Returns:
+        Process exit code: 0 when every attempted package passes, 1 on
+        failures, unverified builds, a failed preflight, or an unreadable
+        native machine, 2 on invalid arguments or an unknown
+        ``ATESOR_PLATFORM``, and 130 after a requested shutdown.
+    """
     args = _parse_args(sys.argv[1:])
 
     global PLATFORM, _BASE_CONTAINER
@@ -1394,7 +1425,8 @@ def main() -> int:
     attempted = len(results) - skipped
     elapsed = time.time() - started_at
 
-    # Sort: failures first, then by duration desc, keeps eyes on what matters.
+    # Failures first, then longest duration: the summary table leads with
+    # the packages that need attention.
     status_rank = {
         STATUS_FAIL: 0,
         STATUS_TIMEOUT: 1,
@@ -1408,7 +1440,7 @@ def main() -> int:
         key=lambda r: (status_rank.get(r.status, 0), -r.duration),
     )
 
-    # ---- Results table ----
+    # Results table
     col_idx, col_status, col_pkg, col_dur = 4, 9, 36, 12
     table_w = 2 + col_idx + 3 + col_status + 3 + col_pkg + 3 + col_dur + 2
 
@@ -1461,7 +1493,7 @@ def main() -> int:
 
     print(_bold("└" + "─" * (table_w - 2) + "┘"))
 
-    # ---- Stats panel ----
+    # Stats panel
     rate = (passed / attempted * 100) if attempted else 0.0
     rate_color = _green if rate >= 80 else (_yellow if rate >= 50 else _red)
 

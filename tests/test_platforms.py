@@ -21,17 +21,15 @@ from src.platforms import (
 
 
 class TestProfileHelpers(unittest.TestCase):
-    """Tests for ProfileHelpers."""
+    """Tests for PlatformProfile helper methods and mappings."""
 
     def test_install_cmd_chains_update_and_install(self) -> None:
-        """Test install cmd chains update and install."""
         cmd = ALPINE_RISCV.install_cmd(["zlib-dev", "openssl-dev"])
         self.assertIn("apk update", cmd)
         self.assertIn("apk add zlib-dev openssl-dev", cmd)
         self.assertIn("&&", cmd)
 
     def test_install_cmd_debian_uses_apt(self) -> None:
-        """Test install cmd debian uses apt."""
         cmd = DEBIAN_RISCV.install_cmd(["libssl-dev"])
         self.assertIn("apt-get update", cmd)
         self.assertIn(
@@ -39,7 +37,6 @@ class TestProfileHelpers(unittest.TestCase):
         )
 
     def test_resolve_known_canonical_maps_to_distro_name(self) -> None:
-        """Test resolve known canonical maps to distro name."""
         self.assertEqual(ALPINE_RISCV.resolve("zlib"), "zlib-dev")
         self.assertEqual(DEBIAN_RISCV.resolve("zlib"), "zlib1g-dev")
         self.assertEqual(ALPINE_RISCV.resolve("boost"), "boost-dev")
@@ -60,51 +57,42 @@ class TestProfileHelpers(unittest.TestCase):
         self.assertEqual(DEBIAN_RISCV.resolve("libjpeg-turbo"), "libjpeg-dev")
 
     def test_resolve_unknown_falls_back_to_input(self) -> None:
-        """Test resolve unknown falls back to input."""
         self.assertEqual(ALPINE_RISCV.resolve("foo-bar-zzz"), "foo-bar-zzz")
 
     def test_alpine_libc_is_musl_debian_is_glibc(self) -> None:
-        """Test alpine libc is musl debian is glibc."""
         self.assertEqual(ALPINE_RISCV.libc, "musl")
         self.assertEqual(DEBIAN_RISCV.libc, "glibc")
 
     def test_ubuntu_aliases_to_debian(self) -> None:
-        """Test ubuntu aliases to debian."""
         self.assertIs(PROFILES["ubuntu"], DEBIAN_RISCV)
 
 
 class TestSetActiveProfile(unittest.TestCase):
-    """Tests for SetActiveProfile."""
+    """Tests for set_active_profile / get_active_profile."""
 
     def test_set_by_name(self) -> None:
-        """Test set by name."""
         p = set_active_profile("debian")
         self.assertIs(p, DEBIAN_RISCV)
         self.assertIs(get_active_profile(), DEBIAN_RISCV)
 
     def test_set_by_profile_object(self) -> None:
-        """Test set by profile object."""
         set_active_profile(ALPINE_RISCV)
         self.assertIs(get_active_profile(), ALPINE_RISCV)
 
     def test_unknown_name_raises_value_error(self) -> None:
-        """Test unknown name raises value error."""
         with self.assertRaises(ValueError) as ctx:
             set_active_profile("solaris")
         self.assertIn("solaris", str(ctx.exception))
 
 
 class TestDetectPlatform(unittest.TestCase):
-    """Tests for DetectPlatform."""
+    """Tests for detect_platform."""
 
     def setUp(self) -> None:
-        # Clear cache and env
-        """Set up test fixtures."""
         platforms._cached_profile = None
         self._old_env = os.environ.pop("ATESOR_PLATFORM", None)
 
     def tearDown(self) -> None:
-        """Tear down test fixtures."""
         platforms._cached_profile = None
         if self._old_env is not None:
             os.environ["ATESOR_PLATFORM"] = self._old_env
@@ -112,7 +100,6 @@ class TestDetectPlatform(unittest.TestCase):
             os.environ.pop("ATESOR_PLATFORM", None)
 
     def test_env_override_takes_precedence(self) -> None:
-        """Test env override takes precedence."""
         os.environ["ATESOR_PLATFORM"] = "debian"
         # Even if subprocess would say alpine, the override wins
         with mock.patch("src.platforms.subprocess.run") as mrun:
@@ -123,7 +110,6 @@ class TestDetectPlatform(unittest.TestCase):
             mrun.assert_not_called()  # override short-circuits the docker call
 
     def test_env_platform_used_without_container_override(self) -> None:
-        """ATESOR_PLATFORM wins when no container override exists."""
         os.environ["ATESOR_PLATFORM"] = "debian"
         with mock.patch("src.platforms.subprocess.run") as mrun:
             self.assertIs(detect_platform(), DEBIAN_RISCV)
@@ -149,7 +135,6 @@ class TestDetectPlatform(unittest.TestCase):
                 mrun.assert_not_called()
 
     def test_env_container_is_inspected_without_a_platform(self) -> None:
-        """With no platform given, ATESOR_CONTAINER says what to read."""
         with mock.patch.dict(os.environ, {"ATESOR_CONTAINER": "box"}):
             with mock.patch("src.platforms.subprocess.run") as mrun:
                 mrun.return_value = SimpleNamespace(
@@ -166,7 +151,6 @@ class TestDetectPlatform(unittest.TestCase):
                 mrun.assert_not_called()
 
     def test_invalid_env_override_ignored(self) -> None:
-        """Test invalid env override ignored."""
         os.environ["ATESOR_PLATFORM"] = "windows"
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
@@ -176,7 +160,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(p, ALPINE_RISCV)
 
     def test_detects_alpine_from_os_release(self) -> None:
-        """Test detects alpine from os release."""
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
                 returncode=0, stdout="ID=alpine\nVERSION_ID=3.19\n", stderr=""
@@ -184,7 +167,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), ALPINE_RISCV)
 
     def test_detects_debian_from_os_release(self) -> None:
-        """Test detects debian from os release."""
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
                 returncode=0, stdout="ID=debian\nVERSION_ID=12\n", stderr=""
@@ -192,7 +174,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), DEBIAN_RISCV)
 
     def test_unknown_distro_falls_back_to_default(self) -> None:
-        """Test unknown distro falls back to default."""
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
                 returncode=0, stdout="ID=arch\n", stderr=""
@@ -200,7 +181,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), ALPINE_RISCV)
 
     def test_docker_failure_falls_back_to_default(self) -> None:
-        """Test docker failure falls back to default."""
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
                 returncode=1, stdout="", stderr="no such container"
@@ -208,7 +188,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), ALPINE_RISCV)
 
     def test_docker_timeout_falls_back_to_default(self) -> None:
-        """Test docker timeout falls back to default."""
         with mock.patch(
             "src.platforms.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10),
@@ -216,7 +195,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), ALPINE_RISCV)
 
     def test_docker_missing_falls_back_to_default(self) -> None:
-        """Test docker missing falls back to default."""
         with mock.patch(
             "src.platforms.subprocess.run",
             side_effect=FileNotFoundError("no docker"),
@@ -224,7 +202,6 @@ class TestDetectPlatform(unittest.TestCase):
             self.assertIs(detect_platform("c"), ALPINE_RISCV)
 
     def test_os_release_quoted_id_handled(self) -> None:
-        """Test os release quoted id handled."""
         with mock.patch("src.platforms.subprocess.run") as mrun:
             mrun.return_value = SimpleNamespace(
                 returncode=0, stdout='ID="alpine"\n', stderr=""
@@ -233,15 +210,13 @@ class TestDetectPlatform(unittest.TestCase):
 
 
 class TestGetContainerName(unittest.TestCase):
-    """Tests for GetContainerName."""
+    """Tests for get_container_name."""
 
     def setUp(self) -> None:
-        """Set up test fixtures."""
         self._old = os.environ.pop("ATESOR_CONTAINER", None)
         platforms._cached_profile = ALPINE_RISCV
 
     def tearDown(self) -> None:
-        """Tear down test fixtures."""
         if self._old is not None:
             os.environ["ATESOR_CONTAINER"] = self._old
         else:
@@ -249,39 +224,33 @@ class TestGetContainerName(unittest.TestCase):
         platforms._cached_profile = None
 
     def test_env_override_used(self) -> None:
-        """Test env override used."""
         os.environ["ATESOR_CONTAINER"] = "atesor-w3"
         self.assertEqual(get_container_name(), "atesor-w3")
 
     def test_env_override_is_stripped(self) -> None:
-        """Test env override is stripped."""
         os.environ["ATESOR_CONTAINER"] = "  atesor-w4 \n"
         self.assertEqual(get_container_name(), "atesor-w4")
 
     def test_falls_back_to_active_profile_name(self) -> None:
-        """Test falls back to active profile name."""
         self.assertEqual(get_container_name(), "atesor-ai-sandbox")
         set_active_profile("debian")
         self.assertEqual(get_container_name(), "atesor-ai-sandbox-debian")
 
 
 class TestNameCorrections(unittest.TestCase):
-    """Tests for NameCorrections."""
+    """Tests for the name_corrections translation maps."""
 
     def test_alpine_corrects_debian_lzma_name(self) -> None:
-        """Test alpine corrects debian lzma name."""
         self.assertEqual(
             ALPINE_RISCV.name_corrections.get("liblzma-dev"), "xz-dev"
         )
 
     def test_debian_corrects_alpine_xz_name(self) -> None:
-        """Test debian corrects alpine xz name."""
         self.assertEqual(
             DEBIAN_RISCV.name_corrections.get("xz-dev"), "liblzma-dev"
         )
 
     def test_both_profiles_have_corrections_for_common_libs(self) -> None:
-        """Test both profiles have corrections for common libs."""
         for lib in ["zlib-dev", "openssl-dev"]:
             with self.subTest(lib=lib):
                 # Debian should know how to translate this Alpine name
@@ -295,12 +264,12 @@ class TestDebianGoBundling(unittest.TestCase):
     /usr/local/go. Ubuntu jammy's ``golang`` package is Go 1.18 and
     cannot parse modern go.mod files. Regression guard: planner/scout
     must not be able to derive an ``apt-get install golang`` from the
-    package map.
+    package map. The class also checks the Debian corrections for
+    invented package names.
     """
 
     def test_debian_pkgmap_does_not_route_go_to_apt(self) -> None:
         # Either the key is absent, or it explicitly opts out (empty string).
-        """Test debian pkgmap does not route go to apt."""
         if "go" in DEBIAN_RISCV.package_map:
             self.assertFalse(
                 DEBIAN_RISCV.package_map["go"],
@@ -309,7 +278,6 @@ class TestDebianGoBundling(unittest.TestCase):
             )
 
     def test_debian_notes_warn_about_bundled_go(self) -> None:
-        """Test debian notes warn about bundled go."""
         notes = " ".join(DEBIAN_RISCV.extra_notes).lower()
         self.assertIn(
             "go is pre-installed",
@@ -320,7 +288,6 @@ class TestDebianGoBundling(unittest.TestCase):
 
     def test_debian_corrects_invented_package_names(self) -> None:
         # Real failures observed in workspace/logs/ batch run.
-        """Test debian corrects invented package names."""
         self.assertEqual(
             DEBIAN_RISCV.name_corrections.get("libcurl4-libssl-dev"),
             "libcurl4-openssl-dev",
@@ -334,7 +301,6 @@ class TestProfileCacheAndDefaults(unittest.TestCase):
     """Cover the cache-miss path and default container resolution."""
 
     def test_get_active_profile_detects_on_cache_miss(self) -> None:
-        """Test get active profile detects on cache miss."""
         platforms._cached_profile = None
         with mock.patch.object(
             platforms, "detect_platform", return_value=DEBIAN_RISCV
@@ -345,7 +311,6 @@ class TestProfileCacheAndDefaults(unittest.TestCase):
         self.assertIs(get_active_profile(), DEBIAN_RISCV)
 
     def test_detect_platform_uses_default_container(self) -> None:
-        """Test detect platform uses default container."""
         env = {k: v for k, v in os.environ.items()}
         env.pop("ATESOR_PLATFORM", None)
         env.pop("ATESOR_CONTAINER", None)

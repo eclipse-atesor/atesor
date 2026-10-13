@@ -68,7 +68,6 @@ class TestStatistics(unittest.TestCase):
         self.assertEqual(mann_whitney_p([], [1.0]), 1.0)
 
     def test_bootstrap_interval_is_reproducible(self) -> None:
-        """The same samples and seed give the same interval."""
         baseline = [1.0 + 0.01 * (i % 3) for i in range(20)]
         variant = [0.9 + 0.01 * (i % 3) for i in range(20)]
         first = bootstrap_ratio_interval(baseline, variant)
@@ -95,7 +94,11 @@ class TestStatistics(unittest.TestCase):
 
 
 class TestWorkloadGrammar(unittest.TestCase):
-    """LLM workload commands must pass a strict grammar."""
+    """LLM workload commands must pass a strict grammar.
+
+    It also covers the rendering of placeholders and tree paths, the
+    Workload round trip and the Go benchmark parser.
+    """
 
     def test_accepted_shapes(self) -> None:
         """Pipes of the program and helpers, with fixed redirections."""
@@ -239,7 +242,6 @@ class TestPrograms(unittest.TestCase):
     """The in-sandbox programs run for real on this host."""
 
     def setUp(self) -> None:
-        """Create a scratch directory."""
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = self._tmp.name
@@ -255,7 +257,6 @@ class TestPrograms(unittest.TestCase):
         return done.stdout
 
     def test_programs_parse(self) -> None:
-        """Both embedded programs are valid Python."""
         ast.parse(bench._RUNNER_PROGRAM)
         ast.parse(bench._INPUT_PROGRAM)
 
@@ -326,7 +327,6 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual(payload["pin"], allowed[-1])
 
     def test_runner_stops_at_a_failing_job(self) -> None:
-        """A non-zero exit ends the session with an error."""
         spec = {
             "jobs": {"B": {"cmd": "exit 3"}, "V": {"cmd": "true"}},
             "rounds": 2,
@@ -338,7 +338,6 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual(payload["error"], "B exited 3")
 
     def test_runner_stops_a_run_that_changes_its_input(self) -> None:
-        """A run that writes its input file ends the session."""
         source = os.path.join(self.dir, "in.text")
         with open(source, "w") as fh:
             fh.write("data\n")
@@ -524,7 +523,10 @@ def _session(base, variant, sha_b="x", sha_v="x", pre=None, post=None,
 
 
 class TestMeasure(unittest.TestCase):
-    """measure() follows the protocol with a mocked runner."""
+    """measure() and check_once() follow the protocol with a mocked runner.
+
+    It also covers the failure reasons (failure_reason()).
+    """
 
     def setUp(self) -> None:
         """Prepare a deterministic program workload and two jobs."""
@@ -543,6 +545,46 @@ class TestMeasure(unittest.TestCase):
         self.assertEqual(outcome["comparison"]["verdict"], "faster")
         self.assertEqual(outcome["rounds"], 20)
         self.assertTrue(outcome["outputs_match"])
+
+    def test_the_timeout_covers_the_whole_measurement(self) -> None:
+        """Two sessions share one budget, so a tune cannot spend it twice."""
+        base = [1.0 + 0.001 * (i % 4) for i in range(20)]
+        session = _session(base, base)
+        seen = []
+        clock = [0.0]
+
+        def run(spec, timeout, extra_env=None):
+            seen.append(timeout)
+            clock[0] += 400.0  # each session burns 400 s
+            return session
+
+        with mock.patch.object(bench, "run_jobs", side_effect=run), \
+                mock.patch.object(bench.time, "monotonic",
+                                  side_effect=lambda: clock[0]):
+            outcome = measure(*self.jobs, self.workload, timeout=1000)
+        self.assertEqual(outcome["status"], "measured")
+        # First session gets the budget; the second gets what is left.
+        self.assertEqual(seen, [1000, 600])
+
+    def test_a_measurement_stops_when_its_budget_ends(self) -> None:
+        """No timed rounds start with less than one session left."""
+        base = [1.0 + 0.001 * (i % 4) for i in range(20)]
+        session = _session(base, base)
+        clock = [0.0]
+
+        def run(spec, timeout, extra_env=None):
+            clock[0] += 980.0
+            return session
+
+        with mock.patch.object(bench, "run_jobs",
+                               side_effect=run) as runner, \
+                mock.patch.object(bench.time, "monotonic",
+                                  side_effect=lambda: clock[0]):
+            outcome = measure(*self.jobs, self.workload, timeout=1000)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("budget ended before the timed rounds",
+                      outcome["reason"])
+        self.assertEqual(runner.call_count, 1)
 
     def test_check_prefix_reaches_the_runner(self) -> None:
         """A harness compares its check lines in both sessions."""
@@ -567,7 +609,7 @@ class TestMeasure(unittest.TestCase):
         self.assertIn("differs", outcome["reason"])
 
     def test_frequency_drift_makes_the_session_unstable(self) -> None:
-        """A frequency change between sessions voids the verdict."""
+        """A frequency change between sessions or 80 C voids the verdict."""
         base = [1.0 + 0.001 * (i % 4) for i in range(20)]
         slow = {"governor": "schedutil", "cur_freq_khz": "1400000",
                 "temperatures_mc": [80000], "loadavg_1m": 2.5}

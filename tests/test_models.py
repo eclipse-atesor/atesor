@@ -1,4 +1,4 @@
-"""Tests for src.models LLM pool behavior."""
+"""Tests for src.models provider setup, LLM pools, and call pricing."""
 
 import os
 import unittest
@@ -26,7 +26,6 @@ class TestCheckApiKeys(unittest.TestCase):
     """Tests for provider API-key validation."""
 
     def test_openai_key_branches(self) -> None:
-        """Validate missing, placeholder, and present OpenAI keys."""
         cases = [
             ({}, False, "OPENAI_API_KEY not found"),
             ({"OPENAI_API_KEY": "your_key_here"}, False, "not found"),
@@ -43,7 +42,6 @@ class TestCheckApiKeys(unittest.TestCase):
                 self.assertEqual(provider, "openai")
 
     def test_gemini_key_branches(self) -> None:
-        """Validate missing, placeholder, and present Gemini keys."""
         cases = [
             ({}, False, "GOOGLE_API_KEY not found"),
             ({"GOOGLE_API_KEY": "your_key_here"}, False, "not found"),
@@ -60,7 +58,6 @@ class TestCheckApiKeys(unittest.TestCase):
                 self.assertEqual(provider, "gemini")
 
     def test_openrouter_key_branches(self) -> None:
-        """Validate missing, placeholder, and present OpenRouter keys."""
         cases = [
             ({}, False, "OPENROUTER_API_KEY not found"),
             ({"OPENROUTER_API_KEY": "your_key_here"}, False, "not found"),
@@ -96,12 +93,10 @@ class TestIsFreeModel(unittest.TestCase):
     """Tests for free-model slug detection."""
 
     def test_detects_free_tier_slugs_case_insensitively(self) -> None:
-        """Free suffixes and router id are detected."""
         self.assertTrue(is_free_model("QWEN/QWEN3-CODER:FREE"))
         self.assertTrue(is_free_model(OPENROUTER_FREE_ROUTER))
 
     def test_false_for_empty_or_paid_model(self) -> None:
-        """Empty and paid model ids are not free."""
         self.assertFalse(is_free_model(""))
         self.assertFalse(is_free_model("gpt-4o"))
 
@@ -116,7 +111,6 @@ class TestCreateLLM(unittest.TestCase):
         mock_create_with_model: mock.MagicMock,
         mock_resolve: mock.MagicMock,
     ) -> None:
-        """create_llm delegates construction to the explicit builder."""
         self.assertEqual(create_llm(AgentRole.SCOUT), "llm")
         mock_resolve.assert_called_once_with(AgentRole.SCOUT)
         mock_create_with_model.assert_called_once_with(
@@ -124,7 +118,6 @@ class TestCreateLLM(unittest.TestCase):
         )
 
     def test_resolve_model_uses_provider_role_and_fallbacks(self) -> None:
-        """Model resolution falls back for unknown providers and roles."""
         with mock.patch.dict(
             os.environ, {"LLM_PROVIDER": "openai"}, clear=True
         ):
@@ -152,7 +145,6 @@ class TestCreateLLMWithModel(unittest.TestCase):
     def test_openai_constructor_arguments(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """Provider clients receive role temperature and token limits."""
         _create_llm_with_model(AgentRole.BUILDER, "gpt-test")
 
         mock_chat.assert_called_once_with(
@@ -167,7 +159,6 @@ class TestCreateLLMWithModel(unittest.TestCase):
     def test_gemini_constructor_arguments(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """Gemini clients receive timeout and max-output arguments."""
         _create_llm_with_model(AgentRole.SCOUT, "gemini-test")
 
         mock_chat.assert_called_once_with(
@@ -186,7 +177,6 @@ class TestCreateLLMWithModel(unittest.TestCase):
     def test_openrouter_constructor_arguments(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """Router clients use base URL and fallback settings."""
         _create_llm_with_model(AgentRole.FIXER, "openai/gpt-oss-120b:free")
 
         kwargs = mock_chat.call_args.kwargs
@@ -203,7 +193,6 @@ class TestCreateLLMWithModel(unittest.TestCase):
     def test_unknown_provider_falls_back_to_gemini(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """Unknown configured providers fall back to Gemini."""
         _create_llm_with_model(AgentRole.SCOUT, "gemini-test")
         self.assertEqual(mock_chat.call_args.kwargs["model"], "gemini-test")
 
@@ -212,13 +201,11 @@ class TestCreateLLMWithModel(unittest.TestCase):
     def test_unknown_role_falls_back_to_supervisor_temperature(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """Unknown roles use the supervisor temperature."""
         _create_llm_with_model("unknown-role", "gpt-test")
         self.assertEqual(mock_chat.call_args.kwargs["temperature"], 0.0)
 
     @mock.patch.dict(os.environ, {"LLM_PROVIDER": "unsupported"}, clear=True)
     def test_configured_but_unsupported_provider_raises(self) -> None:
-        """Providers in config but without plumbing raise ValueError."""
         fake_config = {
             "unsupported": {
                 "supervisor": {
@@ -245,9 +232,9 @@ class TestCreateLLMPool(unittest.TestCase):
     ) -> None:
         """Use built-in fallback models when env var is unset.
 
-        Health-check probing was removed (self-inflicted rate limits and
-        false rejections of throttled models). The pool now includes
-        every curated fallback that instantiates successfully.
+        The pool does not probe models: a probe self-inflicts rate
+        limits and rejects throttled models. The pool includes every
+        curated fallback that instantiates successfully.
         """
         with mock.patch.dict(
             os.environ, {"OPENROUTER_FALLBACK_MODELS": ""}, clear=False
@@ -274,7 +261,6 @@ class TestCreateLLMPool(unittest.TestCase):
     def test_non_openrouter_returns_primary_only(
         self, mock_create_llm: mock.MagicMock
     ) -> None:
-        """Gemini/OpenAI should not build fallback pools."""
         mock_create_llm.return_value = "primary"
         pool = create_llm_pool(AgentRole.SCOUT)
         self.assertEqual(pool, ["primary"])
@@ -294,7 +280,6 @@ class TestCreateLLMPool(unittest.TestCase):
         mock_create_llm: mock.MagicMock,
         mock_create_with_model: mock.MagicMock,
     ) -> None:
-        """Router pools skip duplicate and failed fallback models."""
         primary = SimpleNamespace(model_name="primary-model")
         mock_create_llm.return_value = primary
         mock_create_with_model.side_effect = [
@@ -319,7 +304,6 @@ class TestOpenRouterFallbackIds(unittest.TestCase):
         os.environ, {"OPENROUTER_FALLBACK_MODELS": ""}, clear=False
     )
     def test_free_router_is_terminal_entry(self) -> None:
-        """openrouter/free must close the default chain."""
         ids = _openrouter_fallback_ids()
         self.assertEqual(ids[-1], OPENROUTER_FREE_ROUTER)
 
@@ -340,7 +324,6 @@ class TestOpenRouterFallbackIds(unittest.TestCase):
         clear=False,
     )
     def test_env_override_still_appends_free_router(self) -> None:
-        """A custom chain still degrades to openrouter/free last."""
         self.assertEqual(
             _openrouter_fallback_ids(),
             ["a/x:free", "b/y:free", OPENROUTER_FREE_ROUTER],
@@ -363,7 +346,6 @@ class TestServerSideFallback(unittest.TestCase):
     def test_extra_body_models_excludes_primary(
         self, mock_chat: mock.MagicMock
     ) -> None:
-        """extra_body carries the fallback chain minus the primary."""
         def fake_openai(**kwargs):
             """Return constructor kwargs as a simple fake LLM."""
             return SimpleNamespace(**kwargs, model_name=kwargs["model"])
@@ -386,7 +368,6 @@ class TestCostForUsage(unittest.TestCase):
     """Tests for real token-based cost computation."""
 
     def test_free_slug_costs_zero(self) -> None:
-        """Free-tier ``:free`` slugs bill nothing."""
         from src.models import cost_for_usage
 
         self.assertEqual(
@@ -394,13 +375,11 @@ class TestCostForUsage(unittest.TestCase):
         )
 
     def test_free_router_costs_zero(self) -> None:
-        """The Free Models Router bills nothing."""
         from src.models import cost_for_usage
 
         self.assertEqual(cost_for_usage("openrouter/free", 1000, 1000), 0.0)
 
     def test_paid_model_priced_from_table(self) -> None:
-        """Table-listed paid models price per million tokens."""
         from src.models import cost_for_usage
 
         self.assertAlmostEqual(cost_for_usage("gpt-4o", 1_000_000, 0), 2.50)
@@ -416,7 +395,6 @@ class TestCostForUsage(unittest.TestCase):
         self.assertGreater(cost, 0.0)
 
     def test_negative_tokens_clamped(self) -> None:
-        """Bogus negative usage never produces negative cost."""
         from src.models import cost_for_usage
 
         self.assertEqual(cost_for_usage("gpt-4o", -5, -5), 0.0)
@@ -430,7 +408,6 @@ class TestPrintModelInfo(unittest.TestCase):
     def test_prints_provider_and_models(
         self, mock_print: mock.MagicMock
     ) -> None:
-        """Known providers print the compact model summary."""
         print_model_info()
 
         printed = [call.args[0] for call in mock_print.call_args_list]
@@ -443,7 +420,6 @@ class TestPrintModelInfo(unittest.TestCase):
     def test_unknown_provider_prints_provider_only(
         self, mock_print: mock.MagicMock
     ) -> None:
-        """Unknown providers do not attempt a model summary."""
         print_model_info()
 
         mock_print.assert_called_once_with("   Provider: unknown")

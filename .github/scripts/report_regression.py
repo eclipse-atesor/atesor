@@ -5,14 +5,16 @@ Reads ``results-<category>.xml`` JUnit files and the matching
 ``paths-<category>.txt`` file lists produced by the regression-tests
 workflow matrix, then:
 
-    1. Writes a Markdown results table to ``$GITHUB_STEP_SUMMARY``
-       (falls back to stdout when unset).
+    1. Prints a Markdown results table to stdout and also appends it
+       to ``$GITHUB_STEP_SUMMARY`` when that variable is set (it is
+       set on GitHub Actions runners, unset locally).
     2. Verifies every ``tests/test_*.py`` file in the repository is
        claimed by exactly one category, so new test files cannot
        silently escape CI.
 
-Exits non-zero when any category reports failures or errors, or when
-a test file is uncategorized or double-categorized.
+Exits non-zero when any category reports failures or errors, when a
+test file is uncategorized or double-categorized, when a category
+claims a missing file, or when no ``results-*.xml`` file exists.
 
 Example::
 
@@ -83,6 +85,8 @@ def check_coverage(
     tests_dir: str,
 ) -> List[str]:
     """Verify every test file is claimed by exactly one category.
+
+    A claimed path that does not exist is also a problem.
 
     Args:
         rows: Output of :func:`collect_categories`.

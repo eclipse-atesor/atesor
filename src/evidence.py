@@ -110,8 +110,12 @@ def collect_build_evidence(repo_path: str) -> str:
 
     Returns:
         A bounded markdown bundle: top-level listing, then excerpts of
-        every build file and build-relevant doc that exists, in
-        priority order until the total budget is spent.
+        every build file that exists and of the first build-relevant
+        doc that exists, in priority order until the total budget is
+        spent.
+
+    Raises:
+        SandboxUnavailableError: On native, if the mirror copy fails.
     """
     host_repo = to_host_path(repo_path)
     sections: List[str] = [
@@ -176,6 +180,9 @@ def error_context_excerpts(error_text: str, repo_path: str) -> str:
         Markdown excerpts (±12 lines around each referenced line) for
         up to 3 distinct in-repo files, or an empty string when the
         error references no readable repo files.
+
+    Raises:
+        SandboxUnavailableError: On native, if the mirror copy fails.
     """
     if not error_text:
         return ""
@@ -187,7 +194,8 @@ def error_context_excerpts(error_text: str, repo_path: str) -> str:
         rel_path, line_no = match.group(1), int(match.group(2))
         if rel_path in seen:
             continue
-        # Containment: never follow references outside the repo.
+        # Containment: skip absolute and ".." references. This check
+        # does not stop a symlink in the repo that points outside it.
         if os.path.isabs(rel_path) or ".." in rel_path.split("/"):
             continue
         host_file = os.path.join(host_repo, rel_path)

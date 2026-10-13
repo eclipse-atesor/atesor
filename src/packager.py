@@ -19,6 +19,8 @@ Layout produced::
     │                            # riscv64 artifacts with SHA-256
     ├── <repo>.log               # batch_test per-package log (optional)
     ├── agent_<repo>.log         # main.py per-package debug log (optional)
+    ├── optimized/               # accepted variant artifacts
+    │                            # (--optimize only, manifest v3)
     └── <repo>/                  # source tree (excluding .git/, symlinks)
         └── ...
 
@@ -37,7 +39,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Top-level entries inside the repo subtree that are excluded from packages.
+# Directory names that are excluded from packages at every depth of the
+# repo subtree.
 # Kept conservative on purpose — users asked for "repo code", not a clone.
 _EXCLUDED_DIRS = frozenset({".git"})
 
@@ -62,6 +65,7 @@ def _url_path_parts(repo_url: str) -> list:
 
 
 def _sanitize_stem(raw: str) -> str:
+    """Replace path-unsafe characters with ``-`` and drop leading dots."""
     return _UNSAFE_STEM_CHARS.sub("-", raw).lstrip(".")
 
 
@@ -78,7 +82,8 @@ def package_stem(repo_url: str) -> str:
 
     Returns:
         A lower-case, path-safe stem such as ``"hetznercloud-cli"``.
-        A URL without an owner segment gives the bare repo stem.
+        A URL without an owner segment gives the bare repo stem. A URL
+        that gives no usable name gives ``"repo"``.
     """
     parts = _url_path_parts(repo_url)
     stem = _sanitize_stem("-".join(parts[-2:])).lower()
@@ -159,10 +164,9 @@ def _add_repo_tree(
     files_added = 0
     symlinks_skipped = 0
 
-    # ``followlinks=False`` keeps os.walk from descending into symlinked dirs.
     for root, dirs, files in os.walk(repo_path, followlinks=False):
-        # Skip symlinked directories (os.walk lists them in ``dirs`` but
-        # would only recurse if followlinks=True; we still want to log).
+        # Even with followlinks=False, os.walk lists symlinked
+        # directories in ``dirs``; filter them out to count and log them.
         kept_dirs = []
         for d in dirs:
             full = os.path.join(root, d)
@@ -244,6 +248,7 @@ def _manifest_artifacts(
     return entries
 
 
+# Machine-profile keys copied into the v3 manifest's "machine" section.
 _MACHINE_KEYS = (
     "kind",
     "emulated_cpu",
@@ -375,7 +380,7 @@ def package_build(
             artifacts (``<repo>.opt/accepted``), or None.
 
     Returns:
-        Absolute path to the created zip file.
+        Path to the created zip file in ``packages_dir``.
 
     Raises:
         FileNotFoundError: if ``repo_path`` is not a directory or
@@ -494,6 +499,8 @@ def package_build(
                 zf, repo_path, arc_root=repo_name
             )
         os.replace(part_path, zip_path)
+    # BaseException, not Exception: a Ctrl-C (KeyboardInterrupt) during
+    # the write must also remove the partial zip.
     except BaseException:
         try:
             os.remove(part_path)

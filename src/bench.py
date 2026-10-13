@@ -23,11 +23,13 @@ Protocol (tab D of the research doc):
 2. Run 20 rounds (40 when the MDE is above 2%). Each round runs the
    baseline B and the variant V in random order, pinned to one CPU,
    with a new random environment padding.
-3. Compare the per-round ratios V/B: the median, a 95% bootstrap
-   interval and the Mann-Whitney p-value. V is faster when the upper
-   bound is below 0.98 and p < 0.05; slower when the lower bound is
-   above 1.02; otherwise there is no change.
-4. Discard the session when the frequency or the temperature drifts.
+3. Compare the per-round ratios V/B (the median and a 95% bootstrap
+   interval) and the two sets of times (the Mann-Whitney p-value). V is
+   faster when the upper bound is below 0.98 and p < 0.05; slower when
+   the lower bound is above 1.02 and p < 0.05; otherwise there is no
+   change.
+4. Discard the session when the CPU frequency moves or the temperature
+   reaches 75 C.
 """
 
 import json
@@ -36,6 +38,7 @@ import math
 import random
 import re
 import shlex
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -56,12 +59,16 @@ BOOTSTRAP_ITERATIONS = 2000
 # may disturb the numbers. The load average is no good for this check:
 # it lags a build that ended a moment ago.
 BUSY_CPUS_LIMIT = 0.5
-TEMPERATURE_LIMIT_MC = 75000
+TEMPERATURE_LIMIT_MC = 75000  # Millicelsius: 75 C.
 # One workload run should take this long. With about 56 runs per
 # measurement, 5 s gives sessions of about 5 min, so the ladder fits in
 # the one-hour budget.
 RUN_SECONDS = (0.5, 5.0)
-RUN_TIMEOUT = 300
+RUN_TIMEOUT = 300  # Seconds per run; sizing keeps runs at 0.5-5 s.
+# The least time that a runner session gets. A measurement with less
+# time left stops before its timed rounds. The first session gets this
+# much even when the budget is smaller.
+MIN_SESSION_SECONDS = 60
 INPUT_KINDS = ("binary", "text", "json", "csv")
 MAX_INPUT_MB = 512
 GOBENCH_BINARY = "atesor-bench.test"
@@ -165,8 +172,9 @@ with open(path, "wb") as out:
 # (name -> cmd, cwd, env, output, input; a run that changes its input
 # file stops the session), "warmups", "calibrate" (a job name),
 # "calibration", "rounds", "pin", "pad_max", "seed", "timeout",
-# "hash_output" and "check_prefix" (hash only the stdout lines that
-# start with it, so timing lines do not count).
+# "hash_output", "check_prefix" (hash only the stdout lines that
+# start with it, so timing lines do not count) and "keep_stderr"
+# (return the stderr of a run that exits 0).
 _RUNNER_PROGRAM = r'''
 import glob
 import hashlib
@@ -196,6 +204,7 @@ def read(path):
 
 
 def busy_cpus():
+    # The busy CPUs right now, from two /proc/stat samples 0.5 s apart.
     def sample():
         with open("/proc/stat") as handle:
             values = [int(x) for x in handle.readline().split()[1:]]
@@ -215,6 +224,7 @@ def busy_cpus():
 
 
 def board():
+    # The readings that the drift check and the warnings compare.
     temps = []
     for zone in sorted(glob.glob("/sys/class/thermal/thermal_zone*/temp")):
         value = read(zone)
@@ -231,6 +241,7 @@ def board():
 
 
 def stamp(path):
+    # (size, mtime_ns) of a file, so a later stamp detects a change.
     try:
         info = os.stat(path)
     except OSError:
@@ -239,8 +250,11 @@ def stamp(path):
 
 
 def run_job(job, rng):
+    # Time one run of a job; record its output hash and input change.
     env = dict(os.environ)
     env.update(job.get("env") or {})
+    # A random padding shifts each run's stack layout, so an address
+    # accident cannot favour the same build in every round.
     env["ATESOR_PAD"] = "x" * rng.randint(0, int(SPEC.get("pad_max", 4096)))
     output = job.get("output")
     if output and os.path.exists(output):
@@ -320,6 +334,8 @@ def main():
         count = int(SPEC.get("calibration", 0))
         plan += [(SPEC["calibrate"], "calibration", i) for i in range(count)]
     for index in range(int(SPEC.get("rounds", 0))):
+        # Random order per round: an order effect (a heating board, a
+        # warming cache) then hits B and V equally.
         order = sorted(jobs)
         rng.shuffle(order)
         plan += [(name, "round", index) for name in order]
@@ -373,8 +389,9 @@ class Workload:
             it are compared between B and V.
         files: Tree-relative path to file content: the harness source,
             written into every tree before ``build`` runs.
-        build: Commands that build the harness in a tree; they run in
-            the tree with that tree's environment.
+        build: Commands that build the harness (or the Go test binary)
+            in a tree; they run in the tree with that tree's
+            environment.
         env: Extra environment of each run; ``{input}`` is replaced.
         source_language: ``c``, ``c++``, ``go`` or ``rust`` for a
             harness, else None.
@@ -509,6 +526,9 @@ def bootstrap_ratio_interval(
 
     Returns:
         ``(median ratio, lower bound, upper bound)``.
+
+    Raises:
+        ValueError: When no round has a baseline time above 0.
     """
     ratios = [v / b for b, v in zip(baseline, variant) if b > 0]
     if not ratios:
@@ -603,6 +623,11 @@ def compare(
 
 
 def _parse_runner_output(stdout: str) -> Optional[Dict[str, Any]]:
+    """Return the result of the last marker line, or None.
+
+    The scan goes from the end: the runner prints its marker last,
+    after job output that can contain anything.
+    """
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_RUNNER_MARKER):
             try:
@@ -629,8 +654,8 @@ def run_jobs(
         The runner result; ``error`` is set when the session failed.
     """
     # validate=False: the runner is a fixed program. Every workload
-    # command it runs was built by Atesor or passed the validator in
-    # select_workload.
+    # command it runs was built by Atesor or passed
+    # check_workload_command (an agent's program run).
     result = execute_command(
         ["python3", "-c", _RUNNER_PROGRAM, json.dumps(spec)],
         timeout=timeout,
@@ -658,6 +683,8 @@ def write_input(
     """
     if kind not in INPUT_KINDS:
         return f"unknown input kind {kind!r}"
+    # validate=False: the program is a fixed constant, and each argument
+    # is one shlex-quoted argv element.
     result = execute_command(
         [
             "python3",
@@ -726,6 +753,11 @@ def _times(payload: Dict[str, Any], job: str, phase: str) -> List[float]:
 
 
 def _round_pairs(payload: Dict[str, Any]) -> Tuple[List[float], List[float]]:
+    """Return the paired (baseline, variant) times of complete rounds.
+
+    A round counts only when both B and V ran; the pairing is what the
+    bootstrap resamples.
+    """
     rounds: Dict[int, Dict[str, float]] = {}
     for run in payload.get("runs", []):
         if run.get("phase") == "round":
@@ -742,6 +774,11 @@ def _round_pairs(payload: Dict[str, Any]) -> Tuple[List[float], List[float]]:
 
 
 def _board_drift(pre: Dict[str, Any], post: Dict[str, Any]) -> List[str]:
+    """Return the drift between the board readings around a session.
+
+    A moved CPU frequency or a temperature at the limit makes the
+    early and late rounds incomparable, so the session is discarded.
+    """
     problems = []
     if pre.get("cur_freq_khz") != post.get("cur_freq_khz"):
         problems.append(
@@ -757,9 +794,9 @@ def _board_drift(pre: Dict[str, Any], post: Dict[str, Any]) -> List[str]:
     return problems
 
 
-# A crash signal, by the number that a shell reports. The runner starts
-# every job with "/bin/sh -c", and a shell reports a child that a signal
-# killed as 128 + N. A build that dies this way runs code the machine
+# Crash signals by signal number N. The runner starts every job with
+# "/bin/sh -c", and a shell reports a child that a signal killed as
+# 128 + N. A build that dies this way runs code the machine
 # cannot execute, or corrupts its own memory; it is not a slow build.
 _CRASH_SIGNALS = {
     4: "SIGILL",
@@ -834,6 +871,7 @@ def failure_reason(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 
 
 def _failure(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the failed outcome of a runner payload."""
     reason, job = failure_reason(payload)
     failure = {"status": "failed", "reason": reason, "failed_job": job}
     if payload.get("input_changed"):
@@ -843,6 +881,12 @@ def _failure(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _outputs_match(payload: Dict[str, Any]) -> Optional[bool]:
+    """Return whether the B and V runs produced identical output.
+
+    True when each job gave exactly one digest and they match; False
+    when a run printed no check line or the digests differ; None when
+    nothing was hashed (a non-deterministic workload).
+    """
     digests: Dict[str, set] = {}
     for run in payload.get("runs", []):
         if run.get("check_lines") == 0:
@@ -869,13 +913,24 @@ def measure(
         variant_job: The variant job (cmd, cwd, env, output).
         workload: The workload, for output comparison.
         pin: The CPU to pin each run to, or None.
-        timeout: The timeout of each runner session.
+        timeout: The seconds that the whole measurement may take. A
+            measurement runs two runner sessions, so each one gets
+            what the one before it left. The caller's budget then
+            holds: without this, one measurement could spend the
+            budget twice and leave none for the tunes after it. The
+            first session gets at least ``MIN_SESSION_SECONDS``, so a
+            budget below that can run over.
 
     Returns:
         A dict with ``status`` (``measured``, ``failed`` or
         ``unstable``), the reason, the comparison, the noise figures
         and the board readings.
     """
+    started = time.monotonic()
+
+    def left() -> int:
+        return int(timeout - (time.monotonic() - started))
+
     jobs = {"B": baseline_job, "V": variant_job}
     common = {
         "jobs": jobs,
@@ -893,7 +948,7 @@ def measure(
             calibration=CALIBRATION_RUNS,
             seed=11,
         ),
-        timeout,
+        max(MIN_SESSION_SECONDS, left()),
     )
     outcome: Dict[str, Any] = {"warnings": []}
     if first.get("error"):
@@ -932,9 +987,15 @@ def measure(
             f"the workload is noisy (CV {cv:.1%}): changes below "
             f"{minimum_detectable_effect(cv, rounds):.1%} stay hidden"
         )
+    if left() < MIN_SESSION_SECONDS:
+        outcome.update(
+            status="failed",
+            reason="the time budget ended before the timed rounds",
+        )
+        return outcome
     second = run_jobs(
         dict(common, warmups=1, rounds=rounds, seed=23),
-        timeout,
+        left(),
     )
     if second.get("error"):
         outcome.update(_failure(second))
@@ -968,6 +1029,10 @@ def check_once(
 
     QEMU runs use this for gate 3: the speed of emulation says nothing
     about hardware, but a differing output is still a failure.
+
+    Returns:
+        A dict with ``status`` (``checked`` or ``failed``) and the
+        reason. A failed runner session also gives ``failed_job``.
     """
     payload = run_jobs(
         {
@@ -993,9 +1058,7 @@ def check_once(
     return {"status": "checked", "reason": "outputs match"}
 
 
-# ---------------------------------------------------------------------------
 # Workload choice
-# ---------------------------------------------------------------------------
 
 _BENCH_LINE = re.compile(
     r"^(Benchmark\S+)\s+(\d+)\s+([\d.]+) ns/op", re.MULTILINE
@@ -1055,9 +1118,12 @@ def check_workload_command(command: str) -> Optional[str]:
     """Check a workload command template against the strict grammar.
 
     Each pipe stage starts with ``{bin}`` or a helper from
-    :data:`WORKLOAD_HELPERS`. ``<`` reads only ``{input}`` and ``>``
-    writes only ``{output}`` or ``/dev/null``. No ``;``, ``&``, ``$``,
-    backticks or parentheses, and no absolute or ``..`` paths.
+    :data:`WORKLOAD_HELPERS`. ``<`` reads only ``{input}`` or
+    ``/dev/null``, and ``>`` writes only ``{output}`` or ``/dev/null``.
+    Outside quotes there is no ``;``, ``$``, backtick, parenthesis, or
+    ``&`` other than in ``2>&1``, and no absolute or ``..`` path. A
+    double-quoted word has no ``$``, backtick or backslash. The path
+    rule does not apply to a quoted word.
 
     Args:
         command: The template, for example ``{bin} -9 < {input}``.

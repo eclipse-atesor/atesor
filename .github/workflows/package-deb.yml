@@ -9,6 +9,7 @@ name: Package .deb
 #
 # The pipeline mirrors the local flow exactly:
 #   PYTHONPATH=. pytest                     -> the suite must be green
+#   python3 -m flake8 main.py src/ tests/ .github/scripts/ -> lint clean
 #   packaging/deb/build_deb.sh [image]      -> dist/*.deb + build log
 #   packaging/deb/validate_deb.sh [image]   -> 9-step contract check
 #
@@ -50,8 +51,8 @@ permissions:
   contents: write   # required to publish the release and upload assets
 
 concurrency:
-  # One packaging run at a time per ref: two builds would race the shared
-  # dist/ artifact name and the release tag.
+  # One packaging run at a time per ref: two runs would race on the same
+  # release tag and its assets.
   group: package-deb-${{ github.ref }}
   cancel-in-progress: false
 

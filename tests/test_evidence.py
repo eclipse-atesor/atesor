@@ -30,7 +30,6 @@ class TestCollectBuildEvidence(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_bundle_contains_real_file_contents(self) -> None:
-        """The bundle must contain the ACTUAL build file contents."""
         bundle = collect_build_evidence(self.repo)
         self.assertIn("find_package(ZLIB REQUIRED)", bundle)
         self.assertIn("### CMakeLists.txt", bundle)
@@ -43,13 +42,11 @@ class TestCollectBuildEvidence(unittest.TestCase):
         self.assertIn("src/", bundle)
 
     def test_missing_files_are_skipped(self) -> None:
-        """Absent build files produce no empty sections."""
         bundle = collect_build_evidence(self.repo)
         self.assertNotIn("### go.mod", bundle)
         self.assertNotIn("### Cargo.toml", bundle)
 
     def test_large_file_is_truncated(self) -> None:
-        """Oversized files are cut to the per-file cap."""
         with open(os.path.join(self.repo, "Makefile"), "w") as f:
             f.write("x" * 10000)
         bundle = collect_build_evidence(self.repo)
@@ -95,16 +92,13 @@ class TestErrorContextExcerpts(unittest.TestCase):
         self.assertEqual(error_context_excerpts(error, self.repo), "")
 
     def test_ignores_unreadable_references(self) -> None:
-        """References to missing files are skipped silently."""
         error = "src/ghost.c:5: error: boom"
         self.assertEqual(error_context_excerpts(error, self.repo), "")
 
     def test_empty_error_returns_empty(self) -> None:
-        """No error text, no excerpts."""
         self.assertEqual(error_context_excerpts("", self.repo), "")
 
     def test_deduplicates_repeated_references(self) -> None:
-        """Multiple refs to one file yield a single excerpt."""
         error = "src/main.c:5: error a\nsrc/main.c:6: error b"
         out = error_context_excerpts(error, self.repo)
         self.assertEqual(out.count("### src/main.c"), 1)
@@ -123,14 +117,12 @@ class TestEvidenceEdgeCases(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_unreadable_build_file_is_skipped(self) -> None:
-        """Test unreadable build file is skipped."""
         path = os.path.join(self.repo, "Makefile")
         with open(path, "w") as f:
             f.write("all:\n\ttrue\n")
         real_open = open
 
         def failing_open(fname, *args, **kwargs):
-            """Failing open."""
             if fname == path:
                 raise OSError("permission denied")
             return real_open(fname, *args, **kwargs)
@@ -140,14 +132,12 @@ class TestEvidenceEdgeCases(unittest.TestCase):
         self.assertNotIn("### Makefile", out)
 
     def test_whitespace_only_build_file_is_skipped(self) -> None:
-        """Test whitespace only build file is skipped."""
         with open(os.path.join(self.repo, "Makefile"), "w") as f:
             f.write("   \n\t\n")
         out = collect_build_evidence(self.repo)
         self.assertNotIn("### Makefile", out)
 
     def test_top_level_listing_truncates_long_dirs(self) -> None:
-        """Test top level listing truncates long dirs."""
         for i in range(70):
             with open(os.path.join(self.repo, f"f{i:03d}.txt"), "w") as f:
                 f.write("x")
@@ -155,7 +145,6 @@ class TestEvidenceEdgeCases(unittest.TestCase):
         self.assertIn("more entries ...]", out)
 
     def test_budget_exhaustion_stops_collection(self) -> None:
-        """Test budget exhaustion stops collection."""
         big = "x" * 3000 + "\n"
         for name in (
             "go.mod",
@@ -177,12 +166,10 @@ class TestEvidenceEdgeCases(unittest.TestCase):
         self.assertNotIn("### Makefile\n", out)
 
     def test_error_refs_outside_repo_are_ignored(self) -> None:
-        """Test error refs outside repo are ignored."""
         error = "../secrets/evil.c:3: error: nope"
         self.assertEqual(error_context_excerpts(error, self.repo), "")
 
     def test_error_excerpts_capped_at_three_files(self) -> None:
-        """Test error excerpts capped at three files."""
         refs = []
         for name in ("a.c", "b.c", "c.c", "d.c"):
             with open(os.path.join(self.repo, name), "w") as f:

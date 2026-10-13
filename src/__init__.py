@@ -11,9 +11,9 @@
 
 """Core package for the Atesor AI RISC-V software porting system.
 
-Atesor AI is a smart, multi-stage agentic system that automates porting
-software packages to RISC-V. This package initializes the core source
-module.
+Atesor AI is a multi-stage agentic system that automates porting
+software packages to RISC-V. This module only defines ``__version__``,
+which ``main.py`` and ``packaging/deb/build_deb.sh`` read.
 """
 
 __version__ = "0.1.0"

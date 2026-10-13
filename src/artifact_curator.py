@@ -9,7 +9,7 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Artifact curator.
+"""Rank build artifacts as primary or secondary, and drop the noise.
 
 The ArtifactScanner returns *every* executable / library / static-lib
 in the build tree, which is noisy: CMake leaves compiler-probe binaries
@@ -22,7 +22,7 @@ prefix).
 This module asks the LLM to classify each path into:
     - primary: the package's headline deliverable(s).
     - secondary: still useful (tests, examples); rank below primary.
-    - drop: build-system internals / intermediates / probe artefacts.
+    - drop: build-system internals / intermediates / probe artifacts.
 
 Failure modes (LLM unavailable, rate-limited, malformed JSON) fall back
 to a deterministic rule-based filter, so the curator is always safe to
@@ -40,9 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Rule-based filter (fallback + sanitiser run BEFORE the LLM sees the list)
-# ---------------------------------------------------------------------------
+# Rule-based filter (fallback + sanitizer run BEFORE the LLM sees the list)
 
 # Path substrings that are always build-system internals and should never be
 # surfaced to the user, even if the LLM gets it wrong.
@@ -100,8 +98,9 @@ def _rule_based_curate(
     """Curate raw artifacts using deterministic rules.
 
     Drops obvious build-system noise, marks test/example binaries as
-    secondary, and ranks everything else as primary. Library files
-    (.a / .so) are always primary. Output is primary-first.
+    secondary, and ranks everything else as primary. Libraries (type
+    ``library_*``) and a binary named after the package are always
+    primary. Output is primary-first.
 
     Args:
         repo_name: Package name, used to detect the primary binary.
@@ -140,9 +139,7 @@ def _rule_based_curate(
     return primary + secondary
 
 
-# ---------------------------------------------------------------------------
 # LLM-driven curator
-# ---------------------------------------------------------------------------
 
 _CURATOR_PROMPT = (
     "You are an artifact curator for a multi-distro RISC-V porting"
@@ -186,6 +183,7 @@ _CURATOR_PROMPT = (
 
 
 def _format_numbered(raw_artifacts: List[Dict[str, Any]]) -> str:
+    """Return the artifacts as numbered ``[type] path`` prompt lines."""
     lines = []
     for i, art in enumerate(raw_artifacts, start=1):
         path = art.get("filepath") or art.get("path") or ""
@@ -200,7 +198,8 @@ def _parse_curator_json(
     """Extract {primary, secondary, drop} index lists from raw LLM output."""
     if not text:
         return None
-    # Grab the first {...} JSON object
+    # Models often wrap the JSON in prose despite the strict-output
+    # rule; take the span from the first "{" to the last "}".
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not match:
         return None
@@ -237,8 +236,9 @@ def curate_artifacts(
             entries).
         repo_name: Package name, used as a hint for primary-binary
             detection.
-        build_system: One of cmake / meson / make / autotools / go /
-            cargo / unknown.
+        build_system: The detected build system, such as cmake, meson,
+            make, autotools, go or cargo. The prompt shows it as a
+            hint.
         llm: An instance returned by ``get_model_for_role()``. When
             ``None``, the deterministic rule-based curator is used.
 
@@ -264,14 +264,12 @@ def curate_artifacts(
         )
         return []
 
-    # No LLM → deterministic fallback
     if llm is None:
         logger.info(
             "Artifact curator: using rule-based curation (no LLM provided)."
         )
         return _rule_based_curate(repo_name, pre_filtered)
 
-    # LLM path — keep prompt tight for free-tier models
     n = len(pre_filtered)
     prompt = _CURATOR_PROMPT.format(
         repo_name=repo_name or "unknown",

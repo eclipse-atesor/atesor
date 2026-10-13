@@ -43,7 +43,11 @@ from .tools import DockerConfig, execute_command
 
 logger = logging.getLogger(__name__)
 
+# Seconds; the probe compiles dozens of tiny test programs, and each
+# compiler invocation costs seconds under QEMU emulation.
 PROBE_TIMEOUT = 600
+# Marks the probe's JSON line on stdout; the trailing space delimits
+# the payload.
 _OUTPUT_MARKER = "ATESOR_PROBE_JSON "
 
 # riscv_hwprobe (Linux uapi asm/hwprobe.h). Key numbers and the bits
@@ -88,6 +92,7 @@ _IMA_EXT_0_BITS = {
     55: "zicbom",
     60: "zicbop",
 }
+# The RISCV_HWPROBE_MISALIGNED_* values (same Linux uapi header).
 _MISALIGNED = {
     0: "unknown",
     1: "emulated",
@@ -203,6 +208,7 @@ CORE_TABLE: Tuple[Dict[str, Any], ...] = (
 
 
 def _unique(names: Sequence[str]) -> Tuple[str, ...]:
+    """Return the non-empty names, deduplicated in first-seen order."""
     seen: List[str] = []
     for name in names:
         if name and name not in seen:
@@ -235,7 +241,8 @@ _RUST_STABLE_FEATURES = ("zba", "zbb", "zbs")
 
 # Runs inside the sandbox. It must stay self-contained and compatible
 # with Python 3.8+. It collects raw facts only; the host parses them.
-# Argument: a JSON object with "compilers" and "isa_candidates".
+# Argument: a JSON object with "compilers", "isa_candidates",
+# "tune_candidates" and "rust_cpus".
 _PROBE_PROGRAM = r'''
 import ctypes
 import glob
@@ -274,6 +281,8 @@ buf.write(code)
 addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
 libc = ctypes.CDLL(None, use_errno=True)
 try:
+    # Syscall 259, riscv_flush_icache: make the freshly written words
+    # visible to the instruction fetch before calling them.
     libc.syscall(
         ctypes.c_long(259),
         ctypes.c_void_p(addr),
@@ -305,6 +314,7 @@ buf.write(code)
 addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
 libc = ctypes.CDLL(None, use_errno=True)
 try:
+    # Syscall 259, riscv_flush_icache (see the TESTS child above).
     libc.syscall(
         ctypes.c_long(259),
         ctypes.c_void_p(addr),
@@ -316,7 +326,7 @@ except Exception:
 kind = ctypes.c_uint64
 func = ctypes.CFUNCTYPE(kind, kind, kind)(addr)
 data = ctypes.create_string_buffer(512)
-base = (ctypes.addressof(data) + 63) & ~63
+base = (ctypes.addressof(data) + 63) & ~63  # 64-aligned start
 
 
 def per_load(pointer, count):
@@ -329,8 +339,10 @@ def per_load(pointer, count):
     return best / count
 
 
-per_load(base, 1000)
+per_load(base, 1000)  # warm-up; the result is discarded
 aligned = per_load(base, 2000000)
+# Fewer misaligned iterations keep an emulated access (hundreds of
+# cycles each) inside the child's timeout.
 misaligned = per_load(base + 1, 20000)
 sys.stdout.write(json.dumps({
     "aligned_ns": aligned * 1e9,
@@ -375,6 +387,8 @@ def hwprobe():
         pairs[index].key = key
     try:
         libc = ctypes.CDLL(None, use_errno=True)
+        # Syscall 258, riscv_hwprobe (Linux 6.4+); the kernel answers
+        # a key it does not know with key -1, filtered out below.
         libc.syscall.restype = ctypes.c_long
         rc = libc.syscall(
             ctypes.c_long(258),
@@ -413,7 +427,7 @@ def test_instructions():
             try:
                 entry["value"] = json.loads(proc.stdout.decode())["value"]
             except (ValueError, KeyError):
-                entry["rc"] = 99
+                entry["rc"] = 99  # child ran but printed no JSON
         else:
             entry["err"] = proc.stderr.decode("utf-8", "replace")[-300:]
         results[name] = entry
@@ -435,7 +449,7 @@ def misaligned_test():
         try:
             entry.update(json.loads(proc.stdout.decode()))
         except ValueError:
-            entry["rc"] = 99
+            entry["rc"] = 99  # child ran but printed no JSON
     else:
         entry["err"] = proc.stderr.decode("utf-8", "replace")[-300:]
     return entry
@@ -463,6 +477,9 @@ def rust_cpu_features(cpus_text):
     return features
 
 
+# f compiles to sh3add (Zba) and g to andn (Zbb); the host reads the
+# assembly to check that a compiler accepting -march=...zba_zbb also
+# emits the instructions (plain acceptance is not proof).
 EMIT_SOURCE = (
     "unsigned long f(unsigned long a, unsigned long b)"
     "{return (a << 3) + b;}\n"
@@ -571,8 +588,11 @@ def main():
 
 
 main()
+# The marker text lives in one constant; the placeholder keeps the
+# program string from duplicating it.
 '''.replace("@@MARKER@@", _OUTPUT_MARKER)
 
+# Compiler names the probe looks for; only installed ones are run.
 PROBE_COMPILERS = (
     "gcc",
     "clang",
@@ -595,7 +615,8 @@ class MachineProfile:
         vlen: The vector register length in bits, or None without V.
         core: Raw identity facts: ``mvendorid``, ``marchid``,
             ``mimpid``, ``uarch``, ``model`` and ``compatible``.
-        core_name: The core table entry that matched, or None.
+        core_name: The name of the core table entry that matched, or
+            None.
         misaligned: Scalar misaligned access speed: ``fast``, ``slow``,
             ``emulated``, ``unsupported`` or ``unknown``.
         misaligned_source: ``hwprobe``, ``timing test`` or ``none``.
@@ -608,7 +629,8 @@ class MachineProfile:
         kernel: The kernel release.
         libc: ``glibc <version>``, ``musl`` or None.
         board: Governor, frequencies (kHz), temperatures (millidegrees
-            C), ``perf_event_paranoid``, the perf path and the load.
+            C), ``perf_event_paranoid``, the perf path, the load and the
+            caches.
         toolchains: Facts per compiler, plus ``go`` and ``rust``.
         label: A short description, for example ``rv64gc+zba+zbb``.
         sources: Which sources answered: ``cpuinfo``, ``hwprobe``,
@@ -814,8 +836,8 @@ def match_core(core: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     A device-tree ``compatible`` string or the cpuinfo ``uarch`` value
     matches first. Otherwise both ``mvendorid`` and ``marchid`` must
-    equal the entry's values; an entry without them matches by name
-    only.
+    equal the entry's values; an entry without them matches by
+    ``compatible`` only.
     """
     names = set(core.get("compatible") or [])
     if core.get("uarch"):
@@ -840,7 +862,8 @@ def profile_label(extensions: Set[str]) -> str:
 
     ``RVA23U64`` or ``RVA22U64`` when every checked item is present;
     otherwise ``rv64gc`` plus the notable extras, for example
-    ``rv64gc+zba+zbb``.
+    ``rv64gc+zba+zbb``. ``below rv64gc`` when a base letter (IMAFDC)
+    is missing.
     """
     if all(name in extensions for name in _RVA23_CHECK):
         return "RVA23U64"
@@ -853,6 +876,7 @@ def profile_label(extensions: Set[str]) -> str:
 
 
 def _parse_int(text: Any) -> Optional[int]:
+    """Return the text as an int (decimal or 0x-prefixed), or None."""
     try:
         return int(str(text).strip(), 0)
     except (TypeError, ValueError):
@@ -860,6 +884,7 @@ def _parse_int(text: Any) -> Optional[int]:
 
 
 def _version_tuple(text: Optional[str]) -> Optional[Tuple[int, ...]]:
+    """Return ``(major, minor[, patch])`` parsed from text, or None."""
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text or "")
     if not match:
         return None
@@ -867,6 +892,11 @@ def _version_tuple(text: Optional[str]) -> Optional[Tuple[int, ...]]:
 
 
 def _emits_bitmanip(asm: Optional[str]) -> bool:
+    """Return True when the emit-test assembly uses Zba and Zbb.
+
+    ``sh3add`` and ``andn`` are what EMIT_SOURCE compiles to when the
+    compiler really emits the extensions it accepted.
+    """
     text = asm or ""
     return "sh3add" in text and "andn" in text
 
@@ -876,6 +906,12 @@ def _compiler_family(name: str) -> str:
 
 
 def _toolchains(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the profile's ``toolchains`` record from the payload.
+
+    Compiler facts shrink to family, version, accepted ISA candidates
+    and tunes, flags and the bitmanip emit check; the Go and Rust
+    versions come out of their ``--version`` lines.
+    """
     compilers: Dict[str, Any] = {}
     for name, facts in (payload.get("compilers") or {}).items():
         compilers[name] = {
@@ -1239,6 +1275,11 @@ def integrity_failures(result: Dict[str, Any]) -> Dict[str, int]:
 
 
 def _parse_probe_output(stdout: str) -> Optional[Dict[str, Any]]:
+    """Return the JSON document after the last marker line, or None.
+
+    The marker line is the probe's final write; reading from the end
+    skips any earlier noise on stdout.
+    """
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_OUTPUT_MARKER):
             try:
@@ -1301,9 +1342,7 @@ def probe_machine(
     return profile, None
 
 
-# ---------------------------------------------------------------------------
 # Rules: from a profile to flags
-# ---------------------------------------------------------------------------
 
 
 def march_for(
@@ -1378,7 +1417,9 @@ def align_flags(profile: MachineProfile, compiler: str) -> List[str]:
 
     On a core that traps on a misaligned access, the kernel or the
     firmware emulates each one (hundreds of cycles), so a variant lets
-    the compiler emit them only when the probe found them fast.
+    the compiler emit them only when the probe found them fast. A
+    compiler that did not accept ``-mstrict-align`` in the probe gets
+    no flag.
     """
     if profile.misaligned == "fast":
         return []
@@ -1393,7 +1434,8 @@ def goriscv64_for(profile: MachineProfile) -> Tuple[str, Optional[str]]:
 
     The highest level whose extensions the machine has in full wins.
     One exception: ``rva22u64`` on a machine that lacks only Zbs, with
-    a Go release that emits no Zbs (gate 2 then checks the binary).
+    a Go release that emits no Zbs (gate 2, the package tests on the
+    machine, then decides).
 
     Returns:
         ``(level, note)``; the note is None unless the exception
@@ -1520,6 +1562,7 @@ def qemu_cpu_for(profile: MachineProfile) -> str:
 
 
 def _timing_text(profile: MachineProfile) -> str:
+    """Return the load-times suffix for ``describe``, or ""."""
     test = profile.misaligned_test or {}
     aligned, misaligned = test.get("aligned_ns"), test.get("misaligned_ns")
     if profile.misaligned_source != "timing test" or not aligned:
@@ -1595,6 +1638,10 @@ def describe_rules(profile: MachineProfile) -> List[str]:
 
 
 def tune_names(compilers: Sequence[str]) -> List[str]:
-    """Return the tune candidates, for tests and documentation."""
+    """Return the tune candidates, for tests and documentation.
+
+    ``compilers`` is accepted and ignored: the candidate list is the
+    static core table.
+    """
     del compilers
     return list(TUNE_CANDIDATES)

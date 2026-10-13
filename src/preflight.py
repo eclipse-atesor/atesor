@@ -40,12 +40,15 @@ from . import target
 logger = logging.getLogger(__name__)
 
 LAST_RUNG = 11
+# --cleanup and --clean-image run only rungs 2 to 8, so teardown still
+# works on a full disk, where rung 11 would fail the full ladder.
 CLEANUP_LAST_RUNG = 8
 # Rungs up to this number stop the ladder when they fail.
 LAST_STOPPING_RUNG = 4
 MIN_PODMAN_MAJOR = 4
 # 10 GB each for podman storage and the work directory, in KB.
 MIN_FREE_KB = 10 * 1024 * 1024
+# Seconds before one ssh call counts as a failed connection.
 REMOTE_TIMEOUT = 60
 PREFLIGHT_COMMAND = "atesor-ai --target native --preflight"
 
@@ -183,7 +186,7 @@ class PreflightReport:
                 ``termcolor.colored``. The default adds no color.
 
         Returns:
-            The report text.
+            The report text, or an empty string when no rung ran.
         """
         if not self.results:
             return ""
@@ -244,9 +247,13 @@ def run_preflight(first: int = 1, last: int = LAST_RUNG) -> PreflightReport:
     all run. Rungs 2 and up need a valid native configuration, so the
     caller runs rung 1 first.
 
+    Rung 3 writes the local SSH config in field mode. Rungs 5 and 10
+    record the host name and the physical work directory in ``target``.
+
     Args:
         first: The first rung to run.
-        last: The last rung to run: 8 for cleanup, 11 otherwise.
+        last: The last rung to run. The default runs the full ladder;
+            ``--cleanup`` passes ``CLEANUP_LAST_RUNG`` (8).
 
     Returns:
         The report, with one result per rung that ran.
@@ -284,6 +291,8 @@ def _rung_line(result: RungResult, paint: Paint) -> str:
 
 def _format_items(items: List[Missing]) -> List[str]:
     """Format missing items as aligned console lines."""
+    # Cap the item column so one long item cannot push every fix far
+    # to the right.
     width = min(max((len(entry.item) for entry in items), default=0), 40)
     lines = []
     for entry in items:
@@ -300,7 +309,7 @@ def _remote(
     """Run one shell script on the machine over ssh.
 
     The script reaches the remote login shell as one argv element.
-    Stdin is closed, so ssh never forwards the local terminal.
+    Stdin is ``/dev/null``, so ssh never forwards the local terminal.
 
     Args:
         script: A POSIX shell script.
@@ -631,7 +640,7 @@ def _check_rootless(
         "'{{.Host.Security.Rootless}} {{.Store.GraphRoot}}'"
     )
     if completed.returncode == 255:
-        # Every other rung reports exit 255 as a stable-SSH problem;
+        # Every rung after rung 4 reports exit 255 as a stable-SSH problem;
         # this rung must do the same, or a dropped connection here
         # would be reported as a broken podman setup even when podman
         # is fine (or, when the ID mapping is also missing, would be
@@ -740,6 +749,9 @@ def _rung_disk(facts: _Facts) -> RungResult:
         work_expr = shlex.quote(facts.workdir)
     else:
         work_expr = target.remote_path_expr(config.remote_workdir)
+    # free_kb climbs to the nearest existing parent: the podman
+    # storage or the work directory may not exist yet, and df needs a
+    # real path.
     completed = _remote(
         'free_kb() { p=$1; while [ ! -e "$p" ]; do p=$(dirname "$p"); '
         "done; df -Pk \"$p\" | awk 'NR==2 {print $1, $4}'; }; "

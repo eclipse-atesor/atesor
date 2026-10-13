@@ -22,6 +22,8 @@ the type of the package, not from its name:
   harness, against the library's public API. C or C++ for a C/C++
   library, a Go benchmark function for a Go package, a Cargo example
   for a Rust crate.
+* A test or example program of the package that calls its library
+  (``nm`` check): the optimizer agent proposes a run of it.
 * Last, the package tests: a weak signal, because tests check
   correctness and do not model real use.
 
@@ -31,7 +33,10 @@ time does not show the speed.
 
 Every candidate runs on the baseline tree first. It must build, exit 0,
 print the same check line in two runs, and take 0.5-5 s per run on
-native hardware. When a check fails, the agent gets the error and tries
+native hardware. A program run compares its whole output and can take
+less than 0.5 s. The module's own Go benchmarks compare no output. The
+package tests run once, on native hardware only, and only the 5 s limit
+applies. When a check fails, the agent gets the error and tries
 again, for :data:`AGENT_ROUNDS` rounds, and up to
 :data:`AGENT_MAX_ROUNDS` while each round gives a new error.
 """
@@ -56,15 +61,16 @@ GO_HARNESS_FILE = "atesor_bench_test.go"
 GO_BENCHMARK = "BenchmarkAtesor"
 RUST_EXAMPLE = "atesor_bench"
 AGENT_ROUNDS = 3
-# A round whose error differs from the round before shows progress (a
-# harness fixed one error and met the next one): the rounds go on, up
-# to this many. An API that needs several required parameters costs one
+# A round whose error no earlier round met shows progress (a harness
+# fixed one error and met the next one): the rounds go on, up to this
+# many. An API that needs several required parameters costs one
 # round per parameter, so a low limit stops a harness that still
-# converges. Every round costs one LLM request.
+# converges. Every round costs at least one LLM request.
 AGENT_MAX_ROUNDS = 8
 # The agent rounds stop when less than this much of the budget is left.
 AGENT_MIN_SECONDS = 600
-# A harness run is sized to take about this long.
+# A harness, Go benchmark or program run is sized to take about this
+# many seconds.
 TARGET_SECONDS = 2.0
 MAX_ITERATIONS = 10_000_000
 MAX_SOURCE_BYTES = 32_000
@@ -141,7 +147,10 @@ class PackageProfile:
     purpose: str = ""
 
     def describe(self) -> str:
-        """Return one line for the console, for example ``C library``."""
+        """Return one line for the console.
+
+        For example ``C/C++ library (cmake): build/libz.a``.
+        """
         names = {"c": "C/C++", "go": "Go", "rust": "Rust"}
         kind = {
             "library": "library",
@@ -177,7 +186,8 @@ class WorkloadContext:
         agent: Asks the optimizer agent, or None without an LLM.
         say: Prints one progress line.
         time_left: Seconds left in the budget.
-        build_timeout: The timeout of one harness build.
+        build_timeout: The timeout of one harness build command, in
+            seconds.
         paths: The baseline tree's path of each artifact that its build
             put in another directory (see :func:`bench.shell_path`).
         crashes: Every crash of the baseline build during the workload
@@ -200,12 +210,11 @@ class WorkloadContext:
     crashes: List[str] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # Package profile
-# ---------------------------------------------------------------------------
 
 
 def _is_helper(rel: str) -> bool:
+    """Return True when ``rel`` is a test, example or benchmark program."""
     parts = [part.lower() for part in rel.split("/")[:-1]]
     if any(part in HELPER_DIRS for part in parts):
         return True
@@ -259,6 +268,8 @@ def profile_package(state: Any, language: str) -> PackageProfile:
         kind = "unknown"
     analysis = getattr(state, "package_analysis", None)
     purpose = str(getattr(analysis, "purpose", "") or "")
+    # The analyst's fallback purpose is "<repo> (analysis unavailable —
+    # LLM starved)"; it says nothing about the package.
     if "unavailable" in purpose:
         purpose = ""
     return PackageProfile(
@@ -272,9 +283,8 @@ def profile_package(state: Any, language: str) -> PackageProfile:
     )
 
 
-# ---------------------------------------------------------------------------
 # Sandbox helpers
-# ---------------------------------------------------------------------------
+
 
 # Runs in the sandbox. Argument: JSON {"tree", "files": {rel: base64}}.
 # Writes each file below the tree; a path that resolves outside the
@@ -535,6 +545,13 @@ def _run_program(
     spec: Dict[str, Any],
     timeout: int,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Run one of the in-sandbox Python programs above.
+
+    Returns:
+        ``(payload, "")`` parsed from the program's marker line (the
+        last one wins), or ``(None, error)`` with the exit code and
+        the tail of its output.
+    """
     # validate=False: the programs are fixed constants and their only
     # argument is a JSON spec in one argv element.
     result = execute_command(
@@ -621,9 +638,7 @@ def install_workload(
     return None
 
 
-# ---------------------------------------------------------------------------
 # Running a candidate on the baseline
-# ---------------------------------------------------------------------------
 
 
 def _input_path(root: str, kind: Optional[str], seed: str) -> str:
@@ -631,7 +646,11 @@ def _input_path(root: str, kind: Optional[str], seed: str) -> str:
 
 
 def rewrite_for_tree(command: str, repo_path: str, dest: str) -> str:
-    """Point absolute paths into the baseline tree at another tree."""
+    """Point absolute paths into ``repo_path`` at the tree ``dest``.
+
+    ``repo_path`` is the verified tree of the port, not the baseline
+    copy.
+    """
     pattern = re.escape(repo_path.rstrip("/")) + r"(?=$|[/\s'\";&|)])"
     return re.sub(pattern, lambda _: dest.rstrip("/"), command)
 
@@ -672,7 +691,11 @@ def baseline_job(
 
 
 def _write_input(ctx: WorkloadContext, workload: bench.Workload) -> str:
-    """Write the measure input; return its path, or raise ValueError."""
+    """Write the measure input; return its path, or "" for no input.
+
+    Raises:
+        ValueError: When the input directory or file cannot be written.
+    """
     if not workload.input_kind:
         return ""
     inputs = shlex.quote(ctx.root + "/inputs")
@@ -693,6 +716,8 @@ def _two_runs(
     input_path: str,
 ) -> Tuple[Optional[float], str]:
     """Run the workload twice on the baseline tree.
+
+    A crash of the baseline build also goes into ``ctx.crashes``.
 
     Returns:
         ``(median seconds, "")``, or ``(None, problem)`` when a run
@@ -858,7 +883,14 @@ def check_duration(
     ctx: WorkloadContext,
     workload: bench.Workload,
 ) -> Optional[str]:
-    """Time one baseline run of a test workload on native hardware."""
+    """Time one baseline run of a test workload on native hardware.
+
+    Sets ``workload.run_seconds``.
+
+    Returns:
+        None under QEMU (no run) or when the run takes at most the upper
+        bound of :data:`bench.RUN_SECONDS`, else the problem.
+    """
     if ctx.kind != "native":
         return None
     job = baseline_job(workload, ctx.tree, None, None, ctx.state.repo_path,
@@ -883,12 +915,11 @@ def check_duration(
     return None
 
 
-# ---------------------------------------------------------------------------
 # Agent replies
-# ---------------------------------------------------------------------------
 
 
 def _input_fields(data: Dict[str, Any]) -> Optional[str]:
+    """Return why an agent answer's input fields are unusable, or None."""
     kind = data.get("input_kind")
     if kind is not None and kind not in bench.INPUT_KINDS:
         return f"input_kind must be one of {list(bench.INPUT_KINDS)} or null"
@@ -905,6 +936,12 @@ def _input_fields(data: Dict[str, Any]) -> Optional[str]:
 
 
 def _source_problem(source: Any, language: str) -> Optional[str]:
+    """Return why a harness source is unusable, or None.
+
+    Enforces the harness contract: a complete file within the size
+    cap, a check line, and none of the calls that would make runs
+    differ from each other or reach outside the sandbox.
+    """
     if not isinstance(source, str) or len(source.strip()) < 80:
         return "source must be the complete file as one JSON string"
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
@@ -988,6 +1025,18 @@ _ERROR_RULE = (
     "differs between two runs.\n"
 )
 
+# A lossy codec never returns its input. A harness that asserts
+# equality fails on correct output, and the agent cannot see why from
+# the error alone, so it repeats the mistake.
+_LOSSY_RULE = (
+    "- Some libraries lose data by design (audio, image and video "
+    "codecs, and any quality or quantization setting). Decoding what "
+    "such a library encoded gives data close to the input, never equal "
+    "to it. Never compare the result with the input for equality "
+    "there. Check the status codes and the sizes the API returns, and "
+    "build the printed value from the decoded data itself.\n"
+)
+
 # Both an invalid frame size and a leftover-sized last block make a
 # library reject the call, so this rule goes in every harness prompt.
 _VALUES_RULE = (
@@ -1056,12 +1105,16 @@ def _agent_rounds(
 ) -> Tuple[Optional[bench.Workload], str]:
     """Ask the agent, try its answer on the baseline, feed back errors.
 
-    After :data:`AGENT_ROUNDS` rounds, another round runs only while the
-    error changes from round to round, up to :data:`AGENT_MAX_ROUNDS`.
+    After :data:`AGENT_ROUNDS` rounds, another round runs only while
+    each error is new, up to :data:`AGENT_MAX_ROUNDS`. An error that
+    an earlier round met stops the rounds.
     """
     if ctx.agent is None:
         return None, "no LLM is available for the optimizer agent"
-    current, problem, previous = prompt, "", None
+    current, problem = prompt, ""
+    # Every error seen so far, not only the last one: an answer that
+    # brings back the error of two rounds ago shows no progress either.
+    previous: set = set()
     earlier: List[str] = []
     round_number = 0
     while round_number < AGENT_MAX_ROUNDS:
@@ -1084,18 +1137,16 @@ def _agent_rounds(
             first = f"{first.split(':')[0]}: {detail}"
         ctx.say(f"round {round_number}: {first[:160]}")
         key = _error_key(problem)
-        if round_number >= AGENT_ROUNDS and key == previous:
+        if round_number >= AGENT_ROUNDS and key in previous:
             break
-        previous = key
+        previous.add(key)
         current = _feedback(prompt, data, problem, earlier)
         if problem not in earlier:
             earlier.append(problem)
     return None, f"{round_number} rounds failed; the last error: {problem}"
 
 
-# ---------------------------------------------------------------------------
 # Program runs
-# ---------------------------------------------------------------------------
 
 
 def _help_texts(ctx: WorkloadContext, programs: Sequence[str]) -> str:
@@ -1199,9 +1250,7 @@ def _program_workload(
     )
 
 
-# ---------------------------------------------------------------------------
 # C and C++ harness
-# ---------------------------------------------------------------------------
 
 
 def library_api(ctx: WorkloadContext) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -1232,7 +1281,7 @@ def c_harness_build(
     libraries: Sequence[str],
     language: str,
 ) -> Tuple[str, List[str]]:
-    """Return the harness file name and its build commands.
+    """Return the harness source path and its build commands.
 
     The harness links the shared libraries when the build made any,
     else the static ones. A shared link also checks with ldd that the
@@ -1297,6 +1346,10 @@ def c_harness_prompt(
         f"Library files: {', '.join(package.libraries)}\n"
         "Headers that declare the API (the build adds their include "
         f"directories):\n{headers}\n"
+        "Copy those #include lines as they stand. The library's file "
+        "name is not a header name: a library libfoo.so does not give "
+        "a header \"libfoo.h\". Include no other header of this "
+        "library, only the C standard ones you need.\n"
         "Functions that the library exports, as its headers declare "
         f"them:\n{prototypes}\n\n"
         f"Write ONE {title} source file with int main(int argc, char "
@@ -1312,6 +1365,7 @@ def c_harness_prompt(
         "should take 10-500 ms on a 1.5 GHz in-order core.\n"
         + _ERROR_RULE
         + _VALUES_RULE
+        + _LOSSY_RULE
         + f"- At the end print exactly one line: \"{CHECK_PREFIX} <value>\", "
         "where the value depends on the results of all N repetitions "
         "(for example a sum of output bytes, or a checksum the library "
@@ -1382,9 +1436,7 @@ def _c_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
     return _agent_rounds(ctx, "harness-c", prompt, check, attempt)
 
 
-# ---------------------------------------------------------------------------
 # Go
-# ---------------------------------------------------------------------------
 
 
 def go_benchmarks(
@@ -1458,6 +1510,12 @@ def _go_package_dir(
 
 
 def _go_packages(ctx: WorkloadContext) -> List[Dict[str, Any]]:
+    """Return the module's three largest non-main packages.
+
+    Sorted by Go file count so the package most worth benchmarking
+    comes first; the cap keeps the agent prompt short. Testdata and
+    vendored packages are skipped.
+    """
     listing = _sh(
         "go list -f '{{.ImportPath}}|{{.Name}}|{{.Dir}}|{{len .GoFiles}}' "
         "./...",
@@ -1514,6 +1572,7 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
         "package's main work b.N times.\n"
         + _INPUT_RULE
         + _VALUES_RULE
+        + _LOSSY_RULE
         + "- Check every result and call b.Fatal on an error.\n"
         f"- After the loop call fmt.Println(\"{CHECK_PREFIX}\", value), "
         "where the value depends on the results of all b.N iterations "
@@ -1585,12 +1644,15 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
     return _agent_rounds(ctx, "harness-go", prompt, check, attempt)
 
 
-# ---------------------------------------------------------------------------
 # Rust
-# ---------------------------------------------------------------------------
 
 
 def _rust_crate(ctx: WorkloadContext) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Return the package's library crate, or why there is none.
+
+    A workspace can hold several crates; a library target at the tree
+    root wins over one in a subdirectory.
+    """
     done = _sh("cargo metadata --no-deps --format-version 1", ctx.tree,
                timeout=600, env=ctx.env)
     try:
@@ -1660,6 +1722,7 @@ def _rust_harness(
         "number N.\n"
         + _INPUT_RULE
         + _VALUES_RULE
+        + _LOSSY_RULE
         + "- Read the input once, then do the crate's main work N times.\n"
         "- Check every result; on an error print it to stderr and call "
         "std::process::exit(1).\n"
@@ -1718,9 +1781,7 @@ def _rust_harness(
     return _agent_rounds(ctx, "harness-rust", prompt, check, attempt)
 
 
-# ---------------------------------------------------------------------------
 # Choice
-# ---------------------------------------------------------------------------
 
 
 def _test_workload(

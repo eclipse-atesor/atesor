@@ -4,6 +4,10 @@ A line-by-line git merge of data/recipe_cache.json (commit 6b50080) left
 35 packages twice, mixed fields of neighboring packages and lost 87.
 json.load() hides a duplicate key, so the first test reads every key of
 every object, and the second test looks for mixed fields.
+
+The other tests cover the guards against a repeat: the duplicate-safe
+merge in merge_data_artifacts.py, its git merge driver and setup
+script, and the .gitattributes rule.
 """
 
 import contextlib
@@ -55,10 +59,12 @@ def _recipe(built: str) -> dict:
 
 
 class TestDataFilesHaveNoDuplicateKeys(unittest.TestCase):
-    """Every JSON file under data/ is free of duplicate keys."""
+    """Every JSON file under data/ is free of duplicate keys.
+
+    Each recipe in the recipe cache also names its own package.
+    """
 
     def test_no_duplicate_keys(self) -> None:
-        """No JSON object under data/ holds the same key twice."""
         paths = sorted((_ROOT / "data").rglob("*.json"))
         self.assertTrue(paths)
         for path in paths:
@@ -88,7 +94,10 @@ class TestDataFilesHaveNoDuplicateKeys(unittest.TestCase):
 
 
 class TestRecipeCacheMerge(unittest.TestCase):
-    """Tests for the duplicate-safe merge in merge_data_artifacts.py."""
+    """Tests for the duplicate-safe merge and the JSON writer.
+
+    Both are in merge_data_artifacts.py.
+    """
 
     def setUp(self) -> None:
         """Import the script and make a scratch folder."""
@@ -208,7 +217,6 @@ class TestMergeDriver(unittest.TestCase):
         )
 
     def test_a_changed_recipe_beats_a_removal(self) -> None:
-        """One side removes a recipe that the other side changed."""
         base = self._cache(a="2026-01-01")
         ours = self._cache()
         theirs = self._cache(a="2026-02-01")
@@ -265,7 +273,11 @@ class TestMergeDriver(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
 class TestMergeDriverWithGit(unittest.TestCase):
-    """The setup script, then a real git merge with no conflict."""
+    """Tests for setup_git_merge_driver.sh and real git merges.
+
+    With the driver, the cache merges with no conflict. Without it, git
+    stops at a conflict.
+    """
 
     def _git(self, *args: str, cwd: str) -> subprocess.CompletedProcess:
         """Run git in the scratch repository, isolated from user config."""

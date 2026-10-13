@@ -92,7 +92,11 @@ def _runs(seconds, sha="s", check_lines=1, error=None, err=""):
 
 
 class TestPackageProfile(unittest.TestCase):
-    """The artifacts of the verified build give the package type."""
+    """The artifacts of the verified build give the package type.
+
+    The package type gives the order of the workload sources
+    (``strategies``).
+    """
 
     def test_library_with_test_programs(self) -> None:
         """Test programs are helpers; the libraries make a library."""
@@ -126,7 +130,6 @@ class TestPackageProfile(unittest.TestCase):
         self.assertEqual(len(package.helpers), 2)
 
     def test_purpose_without_analysis_is_empty(self) -> None:
-        """A starved analyst's text is not a purpose."""
         state = _state(_LIBRARY,
                        purpose="zlib (analysis unavailable — LLM starved)")
         self.assertEqual(profile_package(state, "c").purpose, "")
@@ -134,7 +137,6 @@ class TestPackageProfile(unittest.TestCase):
         self.assertEqual(profile_package(empty, "c").kind, "unknown")
 
     def test_strategies_follow_the_type(self) -> None:
-        """Each package type has its own order of workload sources."""
         cases = [
             (PackageProfile("c", "cmake", "library",
                             libraries=["a.so"], helpers=["t/x"]),
@@ -340,7 +342,6 @@ class TestSizing(unittest.TestCase):
                           size_by_input(_context(state), slow))
 
     def test_the_smallest_input_asks_for_less_work_per_byte(self) -> None:
-        """At the 1 MiB floor the feedback asks for a faster mode."""
         state = _state(_LIBRARY)
         program = bench.Workload(mode="program", command="{bin} -c {input}",
                                  binary="build/zpipe", input_kind="text",
@@ -361,7 +362,10 @@ class TestSizing(unittest.TestCase):
 
 
 class TestChoice(unittest.TestCase):
-    """The agent rounds and the order of the workload sources."""
+    """The agent rounds, the prompts and the order of the workload sources.
+
+    It also covers the error feedback and the report line (``describe``).
+    """
 
     def test_harness_errors_go_back_to_the_agent(self) -> None:
         """A compile error reaches the next prompt; round 2 works."""
@@ -449,7 +453,6 @@ class TestChoice(unittest.TestCase):
         self.assertEqual(job["cmd"], f"ctest --test-dir {BASE}/build")
 
     def test_no_fitting_program_skips_to_the_next_source(self) -> None:
-        """The answer that no program fits ends the program rounds."""
         state = _state([("build/cjpeg", "binary")], tests={
             "status": "passed", "framework": "ctest",
             "command": f"ctest --test-dir {REPO}/build",
@@ -499,7 +502,6 @@ class TestChoice(unittest.TestCase):
         return agent.call_count, chosen, notes
 
     def test_rounds_go_on_while_each_error_is_new(self) -> None:
-        """A harness that fixes one error per round keeps going."""
         errors = [
             f"the baseline run exited 1 in the round phase: TJPARAM_{name} "
             "must be specified"
@@ -524,7 +526,6 @@ class TestChoice(unittest.TestCase):
         self.assertEqual(calls, workload.AGENT_ROUNDS)
 
     def test_only_helpers_that_use_the_library_run(self) -> None:
-        """A test tool without the library's functions is left out."""
         state = _state(_LIBRARY + [("build/tests/md5cmp", "binary"),
                                    ("build/tests/tjbench", "binary")])
         ctx = _context(state)
@@ -612,6 +613,77 @@ class TestChoice(unittest.TestCase):
                       workload._ERROR_RULE)
         self.assertIn("Pass only values that the API accepts",
                       workload._VALUES_RULE)
+
+    def test_the_c_prompt_forbids_a_header_name_from_the_library(
+        self,
+    ) -> None:
+        """A library libwebp.so does not give a header libwebp.h."""
+        prompt = workload.c_harness_prompt(
+            PackageProfile("c", "cmake", "library",
+                           libraries=["build/libwebp.so.7"]),
+            "libwebp",
+            {"headers": ["webp/encode.h", "webp/decode.h"],
+             "prototypes": ["int WebPGetEncoderVersion(void);"]},
+            "c",
+        )
+        self.assertIn('#include "encode.h"', prompt)
+        self.assertIn("Copy those #include lines as they stand", prompt)
+        self.assertIn("a library libfoo.so does not give a header "
+                      '"libfoo.h"', prompt)
+        self.assertIn("Include no other header of this library", prompt)
+
+    def test_the_prompts_forbid_an_equality_check_on_a_lossy_api(
+        self,
+    ) -> None:
+        """A lossy codec never returns its input, so equality is wrong."""
+        prompt = workload.c_harness_prompt(
+            PackageProfile("c", "cmake", "library",
+                           libraries=["build/libopus.a"]),
+            "opus", {"headers": ["opus.h"], "prototypes": ["int f(void);"]},
+            "c",
+        )
+        self.assertEqual(prompt.count(workload._LOSSY_RULE), 1)
+        self.assertIn("never equal to it", workload._LOSSY_RULE)
+        self.assertIn("Never compare the result with the input for "
+                      "equality", workload._LOSSY_RULE)
+        prompts = []
+
+        def capture(ctx, phase, prompt, check, attempt):
+            prompts.append((phase, prompt))
+            return None, "captured"
+
+        ctx = _context(_state(_LIBRARY))
+        crate = {"crate": "x", "package": "x", "src": "src/lib.rs",
+                 "dir": ctx.tree + "/"}
+        with mock.patch.object(workload, "_agent_rounds",
+                               side_effect=capture), \
+                mock.patch.object(workload, "_go_packages", return_value=[
+                    {"import": "example.com/m/x", "name": "x",
+                     "files": 3}]), \
+                mock.patch.object(workload, "_rust_crate",
+                                  return_value=(crate, "")), \
+                mock.patch.object(workload, "_sh", return_value=CommandResult(
+                    "x", 0, "", "", 0.1)):
+            workload._go_harness(ctx)
+            workload._rust_harness(ctx)
+        for phase, text in prompts:
+            with self.subTest(phase=phase):
+                self.assertEqual(text.count(workload._LOSSY_RULE), 1)
+
+    def test_an_error_that_came_back_stops_the_rounds(self) -> None:
+        """A repeat of any earlier error is no progress, not only the last."""
+        # A, B, A: round 3 brings back round 1's error, so the loop
+        # stops there instead of paying for a fourth round.
+        calls, chosen, notes = self._harness_rounds(
+            ["Decoded PCM does not match", "too many arguments to f",
+             "Decoded PCM does not match", "x", "y", "z"])
+        self.assertEqual(calls, 3)
+        self.assertIsNone(chosen)
+        self.assertTrue(any("3 rounds failed" in note for note in notes))
+        # Before AGENT_ROUNDS a repeat still gets its round.
+        calls, _, _ = self._harness_rounds(
+            ["same error", "same error", None])
+        self.assertEqual(calls, 3)
 
     def test_every_round_sees_the_errors_of_the_rounds_before(self) -> None:
         """A later answer must not bring an earlier error back."""
@@ -813,7 +885,6 @@ class TestTreePaths(unittest.TestCase):
                               input_mb=4)
 
     def test_jobs_name_the_tree_path_and_the_input(self) -> None:
-        """The job runs the tree's file and tells the runner its input."""
         job = workload.baseline_job(self._program(), "/w/t", "/w/in.text",
                                     "/w/out", None,
                                     {self.VERIFIED: self.BASE_REL})
@@ -868,7 +939,10 @@ class TestTreePaths(unittest.TestCase):
 
 
 class TestHarnessKitOnThisHost(unittest.TestCase):
-    """The API scan and the harness build run for real on this host."""
+    """The API scan, the helper scan and the harness build run on this host.
+
+    They need gcc, ar, nm, ldd and bash on the host.
+    """
 
     def setUp(self) -> None:
         """Build a small shared and static library with a header."""
@@ -919,12 +993,10 @@ class TestHarnessKitOnThisHost(unittest.TestCase):
         return json.loads(line[len(workload._MARKER):])
 
     def test_programs_parse(self) -> None:
-        """Both sandbox programs are valid Python."""
         ast.parse(workload._API_PROGRAM)
         ast.parse(workload._WRITE_PROGRAM)
 
     def test_api_scan_finds_exports_headers_and_includes(self) -> None:
-        """Exported functions, their declarations and include dirs."""
         api = self._program(workload._API_PROGRAM, {
             "tree": self.tree,
             "libraries": ["build/libdemo.so.1.0", "build/libdemo.a"],
@@ -1009,7 +1081,11 @@ class TestHarnessKitOnThisHost(unittest.TestCase):
         self.assertEqual(found["uses"]["build/md5"], 0)
 
     def test_api_scan_skips_side_and_cxx_headers(self) -> None:
-        """Extras, C++ wrappers and minor headers are not the C API."""
+        """Extras and C++ wrappers are not the C API; minor headers rank lower.
+
+        ``internal.h`` declares one export, so it stays in the list after
+        ``include/demo.h``.
+        """
         contrib = os.path.join(self.tree, "contrib", "cxx")
         os.makedirs(contrib)
         with open(os.path.join(contrib, "demo_stream.h"), "w") as fh:
@@ -1131,7 +1207,7 @@ class TestHarnessKitOnThisHost(unittest.TestCase):
         self.assertEqual(run.stdout, "ATESOR-CHECK 1\n")
 
     def test_ldd_check_refuses_a_foreign_library(self) -> None:
-        """A harness that loads a copy outside the tree fails."""
+        """A harness that loads no library of this tree fails the check."""
         api = {"include_dirs": ["include", "build"]}
         _, commands = c_harness_build(api, ["build/libdemo.so.1.0"], "c")
         with open(os.path.join(self.tree, "x.c"), "w") as fh:

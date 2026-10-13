@@ -92,7 +92,7 @@ runs:
         notes+=$'\n\n'"Filename format: \`<owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<alpine|debian>.zip\`."
         notes+=$'\n\n'"GitHub caps each release at 1000 assets, so once a monthly release fills up the workflow rolls over to \`${month_prefix}-NN\` (\`${base_title} NN\`) — all overflow releases for the same month list the same packages, just split across releases."
 
-        # ---- helpers ---------------------------------------------------
+        # Helpers
         tag_for_suffix() {
           # 0 → base tag; N>0 → -NN suffix (zero-padded).
           local n="$1"
@@ -118,7 +118,8 @@ runs:
           gh release view "$1" --repo "$GH_REPO" >/dev/null 2>&1
         }
         asset_count() {
-          # `wc -l` on empty stdin returns 0; safe for missing releases.
+          # `grep -c` prints 0 on empty stdin (its exit 1 is masked by
+          # `|| true`), so a missing release counts as 0 assets.
           release_assets "$1" 2>/dev/null | grep -c '.' || true
         }
         ensure_release() {
@@ -161,7 +162,7 @@ runs:
         PY
         }
 
-        # ---- enumerate existing month releases (base + overflows) -----
+        # Enumerate existing month releases (base + overflows)
         # `--limit 1000` is well above any plausible per-month overflow
         # count; filter by exact-match regex for the month prefix.
         echo "::group::Discover existing month releases for $month_prefix"
@@ -194,7 +195,7 @@ runs:
           fi
         done
 
-        # ---- dedupe stale assets across ALL month releases ------------
+        # Dedupe stale assets across ALL month releases
         echo "::group::Dedupe existing assets across month releases"
         for tag in "${MONTH_TAGS[@]:-}"; do
           [[ -z "$tag" ]] && continue
@@ -217,7 +218,7 @@ runs:
             while IFS= read -r asset; do
               [[ -z "$asset" ]] && continue
               # Skip the exact filename we're about to upload — `--clobber`
-              # below handles the same-name overwrite atomically.
+              # below handles the same-name overwrite.
               [[ "$asset" == "$fname" ]] && continue
               if [[ "$asset" =~ $pattern ]] || \
                   [[ -n "$legacy_pattern" && "$asset" =~ $legacy_pattern ]]; then
@@ -231,7 +232,7 @@ runs:
         done
         echo "::endgroup::"
 
-        # ---- upload with overflow spill -------------------------------
+        # Upload with overflow spill
         echo "::group::Upload ${#zips[@]} asset(s) with overflow handling"
         zips_pending=("${zips[@]}")
         # Start at the lowest-suffix release and walk up only when full.

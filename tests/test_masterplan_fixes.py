@@ -1,6 +1,7 @@
-"""Regression tests for the MASTER-PLAN framework fixes.
+"""Regression tests for the toolchain, build-root and catalog fixes.
 
-Each class maps to one bucket in ``review/MASTER-PLAN.md``:
+Each class covers one failure bucket; the count is the number of
+packages in it:
 
   * rust-toolchain-old (23 pkgs) — Rust is baked into BOTH images and a
     runtime ``apk add rust cargo`` can never shadow it.
@@ -10,7 +11,10 @@ Each class maps to one bucket in ``review/MASTER-PLAN.md``:
   * no-makefile-wrong-cmd (7 pkgs) — ``make`` runs where the makefile
     actually is, and nested build roots are detected at all.
   * go-toolchain-old (2 pkgs) — the image pin satisfies the go.mod
-    requirements that previously failed under ``GOTOOLCHAIN=local``.
+    minimums of those packages, because ``GOTOOLCHAIN=local`` stops
+    Go from downloading a newer toolchain.
+  * DATA — full.json holds no dead or malformed upstream URL, and
+    derive_repo_name gives every package a unique, shell-safe key.
 
 Plus the drift guard that makes all of it stick: batch preflight
 minimums must never lag the Dockerfile pins, otherwise existing worker
@@ -70,9 +74,7 @@ def _mkrepo(paths) -> str:
     return root
 
 
-# ===========================================================================
 # rust-toolchain-old — 23 packages
-# ===========================================================================
 
 
 class TestRustToolchainBakedIn:
@@ -107,7 +109,6 @@ class TestRustToolchainBakedIn:
         )
 
     def test_rust_not_mapped_to_a_distro_package(self) -> None:
-        """Neither profile may resolve 'rust' to an installable package."""
         from src import platforms
 
         for profile in (platforms.ALPINE_RISCV, platforms.DEBIAN_RISCV):
@@ -116,9 +117,7 @@ class TestRustToolchainBakedIn:
             )
 
 
-# ===========================================================================
 # autotools-bootstrap — 11 packages
-# ===========================================================================
 
 
 class TestAutotoolsBootstrap:
@@ -141,13 +140,11 @@ class TestAutotoolsBootstrap:
         assert boot(_mkrepo(["buildconf", "configure.ac"])) == "sh buildconf"
 
     def test_committed_configure_is_left_alone(self) -> None:
-        """No bootstrap when upstream ships a real configure."""
         from src.graph import _autotools_bootstrap_prefix as boot
 
         assert boot(_mkrepo(["configure", "configure.ac"])) == ""
 
     def test_non_autotools_repo_is_left_alone(self) -> None:
-        """Never inject autoreconf into a non-autotools project."""
         from src.graph import _autotools_bootstrap_prefix as boot
 
         assert boot(_mkrepo(["Makefile"])) == ""
@@ -162,7 +159,6 @@ class TestAutotoolsBootstrap:
         assert "aclocal" in cmd
 
     def test_bootstrapped_commands_pass_the_validator(self) -> None:
-        """A rewritten command must survive CommandValidator."""
         from src.graph import _autotools_bootstrap_prefix as boot
         from src.tools import CommandValidator
 
@@ -177,13 +173,15 @@ class TestAutotoolsBootstrap:
             assert ok, f"validator rejected {command!r}: {reason}"
 
 
-# ===========================================================================
 # no-makefile-wrong-cmd — 7 packages
-# ===========================================================================
 
 
 class TestBuildRootThreading:
-    """`make` is steered to the directory that owns the makefile."""
+    """`make` is steered to the directory that owns the makefile.
+
+    Build-system detection also finds a nested build root, as a
+    fallback after the root.
+    """
 
     def test_finds_nested_makefile(self) -> None:
         """The exact shape behind 'no makefile found'."""
@@ -193,7 +191,6 @@ class TestBuildRootThreading:
         assert find(_mkrepo(["build/GNUmakefile"])) == "build"
 
     def test_root_makefile_is_not_redirected(self) -> None:
-        """No rewrite when the root already builds."""
         from src.graph import _find_makefile_dir as find
 
         assert find(_mkrepo(["Makefile", "src/Makefile"])) == ""
@@ -239,13 +236,11 @@ class TestBuildRootThreading:
         assert info.confidence == 0.95
 
 
-# ===========================================================================
 # go-toolchain-old — 2 packages
-# ===========================================================================
 
 
 class TestGoToolchainPin:
-    """The pin covers the go.mod minimums that previously failed."""
+    """The image Go pin satisfies the observed go.mod minimums."""
 
     def test_pin_satisfies_observed_requirements(self) -> None:
         """The berty repo needs >= 1.26.4 and witness needs >= 1.26.5."""
@@ -262,9 +257,7 @@ class TestGoToolchainPin:
         )
 
 
-# ===========================================================================
 # DATA bucket — dead upstreams, malformed URLs, repo_name collisions
-# ===========================================================================
 
 
 class TestPackageCatalogHygiene:
@@ -300,7 +293,7 @@ class TestPackageCatalogHygiene:
             assert "?" not in url, f"{pkg['name']}: query string in {url}"
 
     def test_repointed_entries(self) -> None:
-        """findutils/ncdu now point at real git remotes."""
+        """findutils/ncdu point at real git remotes."""
         by_name = {p["name"]: p["url"] for p in self._catalog()}
         assert by_name["findutils"] == (
             "https://git.savannah.gnu.org/git/findutils.git"
@@ -310,9 +303,9 @@ class TestPackageCatalogHygiene:
     def test_no_repo_name_collisions(self) -> None:
         """Colliding keys silently overwrite each other's everything.
 
-        repo_name keys the workspace dir, recipe cache, log files and
-        release asset. Five packages all deriving 'cli' meant at most
-        one of them was ever really built.
+        repo_name keys the workspace dir, recipe cache and log files.
+        Five packages all deriving 'cli' meant at most one of them was
+        ever really built.
         """
         import collections
 
@@ -329,7 +322,7 @@ class TestRepoNameDerivation:
     """derive_repo_name is the single source of truth for the key."""
 
     def test_generic_basenames_are_disambiguated(self) -> None:
-        """The five /cli upstreams get distinct keys."""
+        """Generic /cli basenames get an owner prefix (4 of the 5)."""
         from src.state import derive_repo_name
 
         assert derive_repo_name("https://github.com/smallstep/cli") == (
@@ -376,9 +369,7 @@ class TestRepoNameDerivation:
             assert re.fullmatch(r"[A-Za-z0-9._-]+", derive_repo_name(url))
 
 
-# ===========================================================================
 # Drift guard — makes every toolchain fix above actually reach CI
-# ===========================================================================
 
 
 class TestPreflightGateTracksImages:
@@ -390,7 +381,6 @@ class TestPreflightGateTracksImages:
     """
 
     def test_minimums_match_image_pins(self) -> None:
-        """Every platform's minimum is satisfied by its image."""
         batch = _load_batch_module()
         for platform, minimums in batch._MIN_TOOLCHAIN.items():
             dockerfile = (
@@ -410,7 +400,6 @@ class TestPreflightGateTracksImages:
         assert "alpine" in _load_batch_module()._MIN_TOOLCHAIN
 
     def test_stale_container_is_detected(self) -> None:
-        """The old toolchains must be reported as needing a rebuild."""
         batch = _load_batch_module()
         minimums = batch._MIN_TOOLCHAIN["debian"]
 

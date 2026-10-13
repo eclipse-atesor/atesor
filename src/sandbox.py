@@ -93,7 +93,9 @@ _INSPECT_FORMAT = (
 )
 
 # The image build: the Dockerfile arrives on stdin and goes into an
-# empty temporary directory, which is also the build context.
+# empty temporary directory, which is also the build context. The trap
+# removes the directory again, so a failed build leaves no temporary
+# file on the machine.
 _BUILD_PRELUDE = (
     "ctx=$(mktemp -d) || exit 1\n"
     'trap \'rm -f "$ctx/Containerfile"; rmdir "$ctx"\' EXIT\n'
@@ -182,8 +184,8 @@ def build_exec_argv(
         workdir: The working directory in the container.
 
     Returns:
-        The call. On qemu, its argv is the same ``docker exec`` argv
-        that Atesor used before the native target existed.
+        The call. On qemu, its argv is one ``docker exec`` argv. On
+        native, it is one ssh call that runs ``podman exec``.
 
     Raises:
         ValueError: On native, when a secret key is not a shell name,
@@ -285,8 +287,9 @@ def run_call(
         The completed process of the remote command.
 
     Raises:
-        SandboxUnavailableError: If the connection never opened and the
-            second try also failed, or if the connection dropped.
+        SandboxUnavailableError: If the connection never opened and
+            then the login check or the second try failed, or if the
+            connection dropped.
         subprocess.TimeoutExpired: If a try runs longer than timeout.
     """
     result = _run(call, timeout)
@@ -323,6 +326,8 @@ def run_raw(
 
     Raises:
         SandboxUnavailableError: On native, for a transport error.
+        subprocess.TimeoutExpired: If the command runs longer than
+            timeout.
     """
     if not target.is_native():
         return subprocess.run(
@@ -352,6 +357,8 @@ def run_in_container(
 
     Raises:
         SandboxUnavailableError: On native, for a transport error.
+        subprocess.TimeoutExpired: If the command runs longer than
+            timeout.
     """
     call = build_exec_argv(container, command)
     if call.native:
@@ -456,11 +463,11 @@ def inspect_container(name: str) -> Optional[ContainerState]:
 def create_container(name: str, image: str, workdir: str) -> None:
     """Create and start a native container.
 
-    The work directory is the only mount. ``--init`` runs an init
-    process that forwards signals and reaps processes, so the container
-    stops at once. There is no memory, CPU, DNS or network option,
-    because rootless podman often cannot apply limits and its defaults
-    work.
+    The work directory is the only mount, relabeled for SELinux with
+    ``:Z``. ``--init`` runs an init process that forwards signals and
+    reaps processes, so the container stops at once. There is no
+    memory, CPU, DNS or network option, because rootless podman often
+    cannot apply limits and its defaults work.
 
     Args:
         name: The container name.
@@ -551,18 +558,24 @@ def build_image(
     timed_out = threading.Event()
 
     def stop_build() -> None:
-        """Stop the build at the time limit."""
+        """Kill the local ssh process when the backstop timer fires."""
         timed_out.set()
         proc.kill()
 
+    # The remote ``timeout`` command stops podman at the limit; this
+    # timer is only a backstop for a hung ssh, so it fires 90 s later.
     timer = threading.Timer(remote_timeout + 90, stop_build)
     timer.start()
+    # stderr is merged into stdout; the tail keeps the last lines so a
+    # transport error can still be classified and described.
     tail: Deque[str] = collections.deque(maxlen=40)
     try:
         try:
             proc.stdin.write(dockerfile_text)
             proc.stdin.close()
         except BrokenPipeError:
+            # ssh already exited (the prelude or the connection
+            # failed); the exit status below reports it.
             pass
         for line in proc.stdout:
             line = line.rstrip("\n")
@@ -570,10 +583,14 @@ def build_image(
             on_line(line)
         code = proc.wait()
     finally:
+        # Whatever happened above, the local ssh process must not
+        # outlive this function.
         timer.cancel()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+    # 124 is the exit status of the remote ``timeout`` at its TERM
+    # limit, 137 after the KILL of --kill-after.
     if timed_out.is_set() or code in (124, 137):
         return BUILD_TIMED_OUT
     kind = transport_error(code, "\n".join(tail))
@@ -598,6 +615,8 @@ def _native_call(
                 "cannot send it on stdin."
             )
         prelude.append(f"IFS= read -r {key} && export {key} && ")
+    # The && chain stops before exec when a read fails, so a truncated
+    # stdin never runs the command with a half-set environment.
     script = "".join(prelude) + "exec " + shlex.join(podman_argv)
     stdin_text = None
     if secrets:
