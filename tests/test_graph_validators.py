@@ -1612,3 +1612,72 @@ class TestFixerSingleCommandGuidance(unittest.TestCase):
                 with self.subTest(example=example["id"], command=command):
                     ok, reason = validator.is_safe_single(command)
                     self.assertTrue(ok, reason)
+
+
+class TestBuildPlanTestCommands(unittest.TestCase):
+    """Test runs never enter a scout build plan."""
+
+    def test_detects_test_runners(self) -> None:
+        from src.graph import is_test_command
+
+        for command in (
+            "ctest --output-on-failure",
+            "cd /workspace/repos/zlib/build && ctest --output-on-failure",
+            "CTEST_OUTPUT_ON_FAILURE=1 ctest",
+            "make check",
+            "make -j$(nproc) check",
+            "make -C build test",
+            "ninja -C build test",
+            "meson test -C builddir",
+            "go test ./...",
+            "cargo test --release",
+            "cmake --build build --target test",
+            "python3 -m pytest -q",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(is_test_command(command))
+
+    def test_ignores_build_commands(self) -> None:
+        from src.graph import is_test_command
+
+        for command in (
+            "make -j$(nproc)",
+            "make -C tests",
+            "make install",
+            "cd build && make",
+            "cmake -S . -B build -DBUILD_TESTING=OFF",
+            "cmake --build build -j$(nproc)",
+            "meson setup builddir",
+            "go build -buildvcs=false -o ./bin/x ./cmd/x",
+            "cargo build --release",
+            "apt-get install -y --no-install-recommends libcunit1-dev",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(is_test_command(command))
+
+    def test_drop_keeps_build_steps_and_renumbers(self) -> None:
+        from src.graph import drop_test_commands
+        from src.state import BuildPhase
+
+        phases = [
+            BuildPhase(1, "setup", ["apt-get update"]),
+            BuildPhase(2, "test", ["cd build && ctest"]),
+            BuildPhase(
+                3,
+                "build",
+                [
+                    "cmake --build build",
+                    "cd build && ctest --output-on-failure",
+                ],
+            ),
+        ]
+        kept, dropped = drop_test_commands(phases)
+        self.assertEqual([p.name for p in kept], ["setup", "build"])
+        self.assertEqual([p.id for p in kept], [1, 2])
+        self.assertEqual(kept[1].commands, ["cmake --build build"])
+        self.assertEqual(len(dropped), 2)
+
+    def test_scout_prompt_forbids_test_commands(self) -> None:
+        from src.graph import SCOUT_PROMPT
+
+        self.assertIn("Never add a command that runs tests", SCOUT_PROMPT)

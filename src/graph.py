@@ -1176,6 +1176,9 @@ SCOUT_PROMPT = (
     "s (tests, SIMD, examples, docs).\n"
     "8. NEVER reference paths or files you can't see in the project stru"
     "cture.\n"
+    "9. Never add a command that runs tests (`ctest`, `make check`, "
+    "`make test`, `meson test`, `go test`, `cargo test`). Atesor runs "
+    "the package tests after a verified build, and they never gate it.\n"
     "\n"
     "## Self-check (do silently before responding)\n"
     "- Did I read the actual build files (or admit I couldn't)?\n"
@@ -1338,6 +1341,113 @@ def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
                     )
 
     return True, ""
+
+
+# Test runs do not belong in a build plan: a failing test then fails
+# the whole port, although finish_node runs the package tests itself
+# and they never gate the build.
+_TEST_TOOLS = {"ctest", "pytest"}
+_TEST_SUBCOMMANDS = {
+    "go": "test",
+    "cargo": "test",
+    "meson": "test",
+    "npm": "test",
+}
+_TEST_TARGETS = {"check", "test", "tests"}
+# Options whose next word is a value, not a target.
+_TARGET_VALUE_OPTIONS = {
+    "make": {"-C", "-f", "-I", "-o", "-W", "--directory", "--file"},
+    "gmake": {"-C", "-f", "-I", "-o", "-W", "--directory", "--file"},
+    "ninja": {"-C", "-f", "-j", "-k", "-l", "-d", "-t", "-w"},
+}
+_LEADING_CD_RE = re.compile(r"^\s*cd\s+\S+\s*&&\s*")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+
+
+def is_test_command(command: str) -> bool:
+    """Return True when ``command`` runs a test suite.
+
+    Leading ``cd <dir> &&`` prefixes and ``NAME=value`` assignments are
+    skipped. Matches ``ctest``, ``pytest`` (also ``python -m pytest``),
+    ``go``/``cargo``/``meson``/``npm test``, ``make``/``ninja`` with a
+    ``check``/``test``/``tests`` target, and ``cmake --build`` with
+    ``--target check|test|tests``.
+
+    Args:
+        command: One build-plan command.
+
+    Returns:
+        True if the command's first invocation runs tests.
+    """
+    rest = command
+    while True:
+        stripped = _LEADING_CD_RE.sub("", rest, count=1)
+        if stripped == rest:
+            break
+        rest = stripped
+    try:
+        words = shlex.split(rest)
+    except ValueError:
+        words = rest.split()
+    while words and _ENV_ASSIGN_RE.match(words[0]):
+        words = words[1:]
+    if not words:
+        return False
+    tool = os.path.basename(words[0])
+    args = words[1:]
+    if tool in _TEST_TOOLS:
+        return True
+    if tool.startswith("python") and args[:2] == ["-m", "pytest"]:
+        return True
+    if tool in _TEST_SUBCOMMANDS:
+        first = next((a for a in args if not a.startswith("-")), "")
+        return first == _TEST_SUBCOMMANDS[tool]
+    if tool in _TARGET_VALUE_OPTIONS:
+        value_options = _TARGET_VALUE_OPTIONS[tool]
+        skip = False
+        for arg in args:
+            if skip:
+                skip = False
+            elif arg in value_options:
+                skip = True
+            elif not arg.startswith("-") and arg in _TEST_TARGETS:
+                return True
+        return False
+    if tool == "cmake" and "--build" in args and "--target" in args:
+        target = args.index("--target") + 1
+        return target < len(args) and args[target] in _TEST_TARGETS
+    return False
+
+
+def drop_test_commands(
+    phases: List[BuildPhase],
+) -> Tuple[List[BuildPhase], List[str]]:
+    """Remove test runs from build phases; see :func:`is_test_command`.
+
+    A phase left without commands is dropped, and the kept phases are
+    numbered 1..n again (phase ids only order the phases).
+
+    Args:
+        phases: The phases of a scout plan, changed in place.
+
+    Returns:
+        ``(kept_phases, dropped_commands)``.
+    """
+    kept: List[BuildPhase] = []
+    dropped: List[str] = []
+    for phase in phases:
+        commands = []
+        for command in phase.commands:
+            if is_test_command(command):
+                dropped.append(command)
+            else:
+                commands.append(command)
+        if commands:
+            phase.commands = commands
+            kept.append(phase)
+    for number, phase in enumerate(kept, start=1):
+        phase.id = number
+    return kept, dropped
 
 
 @agent_node(AgentRole.SCOUT)
@@ -1589,6 +1699,14 @@ def scout_node(state: AgentState) -> AgentState:
             )
             for i, p in enumerate(plan_data["phases"])
         ]
+        phases, dropped = drop_test_commands(phases)
+        if dropped:
+            logger.warning(
+                "Dropped test commands from the scout plan (package "
+                f"tests run after the build): {dropped}"
+            )
+        if not phases:
+            raise ValueError("the scout plan held only test commands")
 
         state.build_plan = BuildPlan(
             build_system=plan_data.get(

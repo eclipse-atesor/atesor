@@ -71,11 +71,9 @@ RUN mkdir -p /opt/atesor-downloads \
     && /usr/local/go/bin/go version
 
 # Install a pinned Rust toolchain via rustup instead of `apk add rust cargo`.
-# Alpine's distro rust lags upstream and skews between images; a runtime
-# `apk add rust cargo` from an LLM would otherwise shadow whatever we bake
-# in. Alpine ships `rustup` (musl-native rustup-init) in the community
-# repo, so we do not need gcompat here.
-ARG RUST_TOOLCHAIN=1.90.0
+# 1.99.0 is the first stable release whose channel ships rustc and cargo
+# for the riscv64gc-unknown-linux-musl host; 
+ARG RUST_TOOLCHAIN=1.99.0
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 RUN apk add --no-cache rustup \

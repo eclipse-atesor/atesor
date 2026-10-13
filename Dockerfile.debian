@@ -56,7 +56,7 @@ RUN mkdir -p /opt/atesor-downloads \
 
 # Install a modern Rust/Cargo toolchain via rustup. Ubuntu jammy's cargo 1.75
 # cannot build crates using Edition 2024 (seen in dalfox and similar repos).
-ARG RUST_TOOLCHAIN=1.90.0
+ARG RUST_TOOLCHAIN=1.99.0
 ARG RUSTUP_VERSION=1.28.2
 ARG RUSTUP_SHA256=09e64cc1b7a3e99adaa15dd2d46a3aad9d44d71041e2a96100d165c98a8fd7a7
 # SHA256 source: https://static.rust-lang.org/rustup/archive/1.28.2/riscv64gc-unknown-linux-gnu/rustup-init.sha256
