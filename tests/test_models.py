@@ -82,13 +82,13 @@ class TestCheckApiKeys(unittest.TestCase):
     def test_unknown_provider_fails(self) -> None:
         """Unknown providers are reported without falling through."""
         with mock.patch.dict(
-            os.environ, {"LLM_PROVIDER": "anthropic"}, clear=True
+            os.environ, {"LLM_PROVIDER": "made-up"}, clear=True
         ):
             ok, message, provider = check_api_keys()
 
         self.assertFalse(ok)
-        self.assertEqual(message, "Unknown provider: anthropic")
-        self.assertEqual(provider, "anthropic")
+        self.assertEqual(message, "Unknown provider: made-up")
+        self.assertEqual(provider, "made-up")
 
 
 class TestIsFreeModel(unittest.TestCase):
