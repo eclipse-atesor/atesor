@@ -425,15 +425,22 @@ class TestMissingPkgsBuiltMatching(unittest.TestCase):
         built = {"hetznercloud-cli", "zlib", "cli"}
         cases = [
             (missing_pkgs.PackageEntry("hc", "hetznercloud-cli"), True),
-            (missing_pkgs.PackageEntry("z", "madler-zlib", "zlib", True),
-             True),
-            (missing_pkgs.PackageEntry("cli-a", "owner-a-cli", "cli",
-                                       False), False),
+            (
+                missing_pkgs.PackageEntry("z", "madler-zlib", "zlib", True),
+                True,
+            ),
+            (
+                missing_pkgs.PackageEntry(
+                    "cli-a", "owner-a-cli", "cli", False
+                ),
+                False,
+            ),
         ]
         for entry, expected in cases:
             with self.subTest(entry=entry):
-                self.assertEqual(missing_pkgs._is_built(entry, built),
-                                 expected)
+                self.assertEqual(
+                    missing_pkgs._is_built(entry, built), expected
+                )
 
     def test_built_names_extracts_new_owner_repo_stem(self) -> None:
         """Built-name parsing keeps the owner-repo stem intact."""

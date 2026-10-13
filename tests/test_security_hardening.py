@@ -159,10 +159,12 @@ class TestSecretsStayOutOfArgv:
             captured["env"] = kwargs.get("env")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with mock.patch(
-            "src.tools.subprocess.run", side_effect=fake_run
-        ), mock.patch(
-            "src.tools.DockerConfig.is_container_running", return_value=True
+        with (
+            mock.patch("src.tools.subprocess.run", side_effect=fake_run),
+            mock.patch(
+                "src.tools.DockerConfig.is_container_running",
+                return_value=True,
+            ),
         ):
             execute_command("git status", extra_env=extra_env)
         return captured

@@ -301,23 +301,37 @@ def c_ladder(profile: MachineProfile) -> List[Variant]:
     march = march_for(profile, "gcc")
     if march:
         flags.append(f"-march={march}")
-        add(MACHINE_ISA, [f"-march={march}"], f"GCC {' '.join(flags)}",
-            isa=march)
+        add(
+            MACHINE_ISA,
+            [f"-march={march}"],
+            f"GCC {' '.join(flags)}",
+            isa=march,
+        )
     vector = march_for(profile, "gcc", include_vector=True)
     if vector and vector != march:
         flags = [flag for flag in flags if not flag.startswith("-march=")]
         flags.append(f"-march={vector}")
         march = vector
-        add(VECTOR_ISA, [f"-march={vector}"], f"GCC {' '.join(flags)}",
-            isa=vector, note=f"VLEN {profile.vlen or 'unknown'}")
+        add(
+            VECTOR_ISA,
+            [f"-march={vector}"],
+            f"GCC {' '.join(flags)}",
+            isa=vector,
+            note=f"VLEN {profile.vlen or 'unknown'}",
+        )
     flags.append("-O3")
     add(OPT_LEVEL, ["-O3"], f"GCC {' '.join(flags)}", isa=march)
     gcc_flags = compilers["gcc"].get("flags") or []
     if "-flto=auto" in gcc_flags and "-ffat-lto-objects" in gcc_flags:
         lto = ["-flto=auto", "-ffat-lto-objects"]
-        add(LTO, lto, f"GCC {' '.join(flags + lto)}",
-            flags=flags + lto, isa=march,
-            note="fat LTO objects, so static archives still link")
+        add(
+            LTO,
+            lto,
+            f"GCC {' '.join(flags + lto)}",
+            flags=flags + lto,
+            isa=march,
+            note="fat LTO objects, so static archives still link",
+        )
     clang = _best_clang(profile)
     if clang:
         clang_flags = []
@@ -329,9 +343,15 @@ def c_ladder(profile: MachineProfile) -> List[Variant]:
         if clang_march:
             clang_flags.append(f"-march={clang_march}")
         clang_flags.append("-O3")
-        add(COMPILER, [clang], f"{clang} {' '.join(clang_flags)}",
-            compiler=clang, flags=clang_flags, isa=clang_march,
-            note="the same kind of flags with another compiler")
+        add(
+            COMPILER,
+            [clang],
+            f"{clang} {' '.join(clang_flags)}",
+            compiler=clang,
+            flags=clang_flags,
+            isa=clang_march,
+            note="the same kind of flags with another compiler",
+        )
     labels: Dict[str, str] = {}
     for index, variant in enumerate(variants, 1):
         variant.label = f"Tune-{index}"
@@ -379,7 +399,10 @@ def rust_ladder(profile: MachineProfile) -> List[Variant]:
         env = {"RUSTFLAGS": rustflags}
         variants.append(
             Variant(
-                "tune1", f"RUSTFLAGS={rustflags}", "rust", env=dict(env),
+                "tune1",
+                f"RUSTFLAGS={rustflags}",
+                "rust",
+                env=dict(env),
                 isa=rustflags,
                 technique=(
                     TARGET_CPU if "target-cpu" in rustflags else MACHINE_ISA
@@ -502,15 +525,19 @@ def redundant_tunes(
     """
     reasons: Dict[str, str] = {}
     for variant in ladder:
-        if variant.technique == OPT_LEVEL and flags.get("compiles") and (
-            flags.get("levels") == ["-O3"]
+        if (
+            variant.technique == OPT_LEVEL
+            and flags.get("compiles")
+            and (flags.get("levels") == ["-O3"])
         ):
             reasons[variant.vid] = (
                 f"the build compiles all {flags['compiles']} sources with "
                 "-O3 already"
             )
-        if variant.technique == LTO and variant.language == "c" and (
-            flags.get("lto")
+        if (
+            variant.technique == LTO
+            and variant.language == "c"
+            and (flags.get("lto"))
         ):
             reasons[variant.vid] = "the build uses -flto already"
     return reasons
@@ -580,7 +607,8 @@ def classify_segment(segment: str, repo_path: str) -> str:
         return "keep"
     if words[0] in _COPY_COMMANDS:
         operands = [
-            word for word in _until_operator(words)[1:]
+            word
+            for word in _until_operator(words)[1:]
             if not word.startswith("-")
         ]
         if operands and _outside(operands[-1], repo_path):
@@ -698,7 +726,7 @@ def variant_env(variant: Variant, dest: str) -> Dict[str, str]:
 # Runs in the sandbox. Argument: JSON {"src", "dest", "root",
 # "build_dirs"}. Copies the patched tree, removes compiled outputs that
 # git does not track, and writes the compiler wrappers.
-_PREPARE_PROGRAM = r'''
+_PREPARE_PROGRAM = r"""
 import json
 import os
 import shutil
@@ -795,14 +823,14 @@ for name, real in (("cc", "ATESOR_REAL_CC"), ("cxx", "ATESOR_REAL_CXX")):
         handle.write("\n".join(lines) + "\n")
     os.chmod(path, 0o755)
 sys.stdout.write("@@MARKER@@" + json.dumps(removed) + "\n")
-'''
+"""
 
 # Runs in the sandbox. Argument: JSON {"tree", "artifacts" (relative
 # paths), "log", "read_log", "go", "max_scans", "max_bytes"}. Reports
 # the compiler calls and, per artifact: existence, size, SHA-256,
 # e_machine, the RISC-V attribute tags and a count of instructions per
 # extension class.
-_INSPECT_PROGRAM = r'''
+_INSPECT_PROGRAM = r"""
 import glob
 import hashlib
 import json
@@ -1155,13 +1183,13 @@ def main():
 
 
 main()
-'''
+"""
 
 # Runs in the sandbox. Argument: JSON {"root", "reset", "keep_tree",
 # "artifacts", "remove"}. "reset" removes the whole root. Otherwise it
 # copies the accepted artifacts to <root>/accepted and removes the
 # named entries of the root.
-_FINISH_PROGRAM = r'''
+_FINISH_PROGRAM = r"""
 import json
 import os
 import shutil
@@ -1200,7 +1228,7 @@ for name in SPEC.get("remove", []):
 if os.path.isdir(root) and not os.listdir(root):
     os.rmdir(root)
 sys.stdout.write("@@MARKER@@" + json.dumps({"copied": copied}) + "\n")
-'''
+"""
 
 _MARKER = "ATESOR_OPT_JSON "
 _PREPARE_PROGRAM = _PREPARE_PROGRAM.replace("@@MARKER@@", _MARKER)
@@ -1223,7 +1251,7 @@ def _run_program(
     for line in reversed((result.stdout or "").splitlines()):
         if line.startswith(_MARKER):
             try:
-                payload = json.loads(line[len(_MARKER):])
+                payload = json.loads(line[len(_MARKER) :])
             except ValueError:
                 break
             if isinstance(payload, dict):
@@ -1243,8 +1271,12 @@ def prepare_tree(src: str, dest: str, root: str) -> Optional[str]:
     """
     payload, error = _run_program(
         _PREPARE_PROGRAM,
-        {"src": src, "dest": dest, "root": root,
-         "build_dirs": list(BUILD_DIRS)},
+        {
+            "src": src,
+            "dest": dest,
+            "root": root,
+            "build_dirs": list(BUILD_DIRS),
+        },
         timeout=1800,
     )
     if payload is None:
@@ -1334,8 +1366,7 @@ def _code_artifacts(facts: Dict[str, Any]) -> List[str]:
     return [
         rel
         for rel, info in (facts.get("artifacts") or {}).items()
-        if info.get("elf")
-        or (info.get("archive") and info.get("code_sha256"))
+        if info.get("elf") or (info.get("archive") and info.get("code_sha256"))
     ]
 
 
@@ -1384,7 +1415,8 @@ def gate_build_facts(
             return "failed", f"{rel} was not built", warnings
         machine = info.get("machine")
         if (info.get("elf") or info.get("archive")) and machine not in (
-            None, 243,
+            None,
+            243,
         ):
             return "failed", f"{rel} is not riscv64", warnings
     elf = _elf_artifacts(facts)
@@ -1480,7 +1512,7 @@ def _baseline_artifacts(state: Any) -> List[str]:
     for artifact in ordered:
         path = artifact.get("filepath") or artifact.get("path") or ""
         if path.startswith(repo):
-            rel = posixpath.normpath(path[len(repo):])
+            rel = posixpath.normpath(path[len(repo) :])
             if rel and not rel.startswith("..") and rel not in paths:
                 paths.append(rel)
     return paths
@@ -1537,10 +1569,24 @@ def _jobs_for(
     input_path = (
         _input_path(root, workload, seed) if workload.input_kind else None
     )
-    base_job = _job(workload, base_tree, input_path, f"{root}/out-B",
-                    base_env, repo_path, paths.get(base_tree))
-    variant = _job(workload, tree, input_path, f"{root}/out-V", env,
-                   repo_path, paths.get(tree))
+    base_job = _job(
+        workload,
+        base_tree,
+        input_path,
+        f"{root}/out-B",
+        base_env,
+        repo_path,
+        paths.get(base_tree),
+    )
+    variant = _job(
+        workload,
+        tree,
+        input_path,
+        f"{root}/out-V",
+        env,
+        repo_path,
+        paths.get(tree),
+    )
     return base_job, variant
 
 
@@ -1693,9 +1739,15 @@ def headline(result: Dict[str, Any]) -> str:
         )
     if status in ("no gain", "not confirmed"):
         timed = [
-            record for record in result.get("variants") or []
-            if record.get("ratio") and record.get("verdict") in (
-                "faster", "slower", "no change", "not confirmed",
+            record
+            for record in result.get("variants") or []
+            if record.get("ratio")
+            and record.get("verdict")
+            in (
+                "faster",
+                "slower",
+                "no change",
+                "not confirmed",
             )
         ]
         best = min(timed, key=lambda r: r["ratio"]) if timed else None
@@ -1730,9 +1782,7 @@ def result_text(record: Dict[str, Any]) -> str:
     )
     if verdict in ("faster", "slower", "no change") and ratio:
         noise = ", inside the noise" if verdict == "no change" else ""
-        return (
-            f"{_change(ratio)}{noise}: time ratio {ratio} ({interval})"
-        )
+        return f"{_change(ratio)}{noise}: time ratio {ratio} ({interval})"
     if verdict.startswith("same as"):
         return f"same code as {record.get('same_as_label')}: {reason}"
     words = {
@@ -1779,7 +1829,9 @@ def _keep_artifacts(tree: str, rels: Sequence[str]) -> str:
         return ""
     done = execute_command(
         ["sh", "-c", _KEEP_SCRIPT, "sh"] + list(rels),
-        cwd=tree, timeout=600, validate=False,
+        cwd=tree,
+        timeout=600,
+        validate=False,
     )
     if done.success:
         return ""
@@ -1799,7 +1851,9 @@ def _restore_artifacts(
         return [], ""
     done = execute_command(
         ["sh", "-c", _RESTORE_SCRIPT, "sh"] + list(rels),
-        cwd=tree, timeout=600, validate=False,
+        cwd=tree,
+        timeout=600,
+        validate=False,
     )
     restored = [line for line in (done.stdout or "").splitlines() if line]
     if done.success:
@@ -1858,7 +1912,10 @@ def _build_and_check(
         return record, env
     record["facts"] = facts
     outcome, reason, warnings = gate_build_facts(
-        facts, variant, context["profile"], context.get("baseline_facts"),
+        facts,
+        variant,
+        context["profile"],
+        context.get("baseline_facts"),
         context.get("required_artifacts"),
     )
     record["gate1"] = {
@@ -1907,8 +1964,10 @@ def _build_and_check(
             workload, dest, build_env, timeout, paths
         )
         if problem:
-            record.update(verdict="build failed",
-                          reason=f"the workload did not build: {problem}")
+            record.update(
+                verdict="build failed",
+                reason=f"the workload did not build: {problem}",
+            )
             return record, env
     baseline_tests = getattr(state, "package_tests", None) or {}
     run_tests = context.get("run_tests")
@@ -2183,9 +2242,7 @@ def _try_variant(
             same_as=twin_variant["vid"],
             same_as_label=twin_variant.get("label") or twin_variant["vid"],
             ratio=twin.get("ratio"),
-            reason=(
-                f"result reused ({result_text(twin)})"
-            ),
+            reason=(f"result reused ({result_text(twin)})"),
         )
     elif not record.get("verdict"):
         record = _measure(record, env, context, base=base)
@@ -2242,8 +2299,11 @@ def _second_check(
         if base is None:
             record["verdict"] = "not confirmed"
             record["reason"] = f"no second-layout baseline: {error}"
-            record["second_check"] = {"check": label, "verdict": None,
-                                      "reason": error}
+            record["second_check"] = {
+                "check": label,
+                "verdict": None,
+                "reason": error,
+            }
             report.more(f"not confirmed: no second-layout baseline: {error}")
             return record
         second.vid = f"{variant.vid}-layout2"
@@ -2293,17 +2353,27 @@ def _layout_baseline(
     if language in cache:
         return cache[language]
     if language == "rust":
-        variant = Variant("base-layout2", "baseline, second layout", "rust",
-                          env={"RUSTFLAGS": RUST_SECOND_LAYOUT})
+        variant = Variant(
+            "base-layout2",
+            "baseline, second layout",
+            "rust",
+            env={"RUSTFLAGS": RUST_SECOND_LAYOUT},
+        )
     else:
         # The verified build used the image's default compiler (CC=gcc).
-        variant = Variant("base-layout2", "baseline, second layout", "c",
-                          "gcc", flags=[SECOND_LAYOUT_FLAG])
+        variant = Variant(
+            "base-layout2",
+            "baseline, second layout",
+            "c",
+            "gcc",
+            flags=[SECOND_LAYOUT_FLAG],
+        )
     record, env = _build_and_check(variant, context, run_gate2=False)
     if record.get("verdict") == "no effect":
         # The flag changed nothing: the baseline tree is that baseline.
         result: Tuple[Optional[Tuple[str, Dict[str, str]]], str] = (
-            context["base"], ""
+            context["base"],
+            "",
         )
     elif record.get("verdict"):
         result = (None, f"{record['verdict']}: {record.get('reason')}")
@@ -2391,14 +2461,17 @@ def _pgo_variant(
         technique=PGO,
         # C/C++ trains on a second input when the workload reads one; Go
         # trains on its benchmarks with the timing input.
-        value="PGO, trained on a second input"
-        if workload.input_kind and variant.language != "go"
-        else "PGO, trained on the workload",
+        value=(
+            "PGO, trained on a second input"
+            if workload.input_kind and variant.language != "go"
+            else "PGO, trained on the workload"
+        ),
         keeps=variant.label,
         title=f"{variant.title} + PGO",
     )
-    report.line(label, f"{PGO} = {pgo_info['value']}, on top of "
-                f"{variant.label}")
+    report.line(
+        label, f"{PGO} = {pgo_info['value']}, on top of " f"{variant.label}"
+    )
     if skip:
         record = {"variant": pgo_info, "verdict": "skipped", "reason": skip}
         report.more(result_text(record))
@@ -2423,16 +2496,29 @@ def _pgo_variant(
         )
         env = bench.render_env(
             workload,
-            _input_path(root, workload, MEASURE_SEED)
-            if workload.input_kind else None,
+            (
+                _input_path(root, workload, MEASURE_SEED)
+                if workload.input_kind
+                else None
+            ),
         )
         bench_filter = (
             "^BenchmarkAtesor$" if workload.origin == "agent" else "."
         )
         trained = execute_command(
-            [f"{base_tree}/{bench.GOBENCH_BINARY}", "-test.run", "^$",
-             "-test.bench", bench_filter, "-test.benchtime", "1s",
-             "-test.count", "1", "-test.cpuprofile", profile_file],
+            [
+                f"{base_tree}/{bench.GOBENCH_BINARY}",
+                "-test.run",
+                "^$",
+                "-test.bench",
+                bench_filter,
+                "-test.benchtime",
+                "1s",
+                "-test.count",
+                "1",
+                "-test.cpuprofile",
+                profile_file,
+            ],
             cwd=workdir,
             timeout=_step_timeout(context, 1800),
             validate=False,
@@ -2480,11 +2566,16 @@ def _pgo_variant(
         if error:
             _remove(context, [train.vid])
             return fail(f"training input: {error}")
-    _, train_job = _jobs_for(workload, context, record["tree"], env,
-                             seed=TRAIN_SEED)
+    _, train_job = _jobs_for(
+        workload, context, record["tree"], env, seed=TRAIN_SEED
+    )
     trained = bench.run_jobs(
-        {"jobs": {"T": train_job}, "rounds": 3, "seed": 5,
-         "timeout": bench.RUN_TIMEOUT},
+        {
+            "jobs": {"T": train_job},
+            "rounds": 3,
+            "seed": 5,
+            "timeout": bench.RUN_TIMEOUT,
+        },
         timeout=_step_timeout(context, 3600),
         extra_env=context["qemu_env"],
     )
@@ -2549,8 +2640,16 @@ def _compact(record: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(measurement, dict):
         keep["measurement"] = {
             key: measurement[key]
-            for key in ("status", "reason", "cv", "mde", "rounds",
-                        "warnings", "comparison", "outputs_match")
+            for key in (
+                "status",
+                "reason",
+                "cv",
+                "mde",
+                "rounds",
+                "warnings",
+                "comparison",
+                "outputs_match",
+            )
             if key in measurement
         }
     return keep
@@ -2673,15 +2772,19 @@ def run_optimization(
     result["machine_label"] = profile.label
     result["warnings"] += profile.warnings
     where = (
-        "native" if kind == "native"
+        "native"
+        if kind == "native"
         else f"QEMU, CPU {profile.emulated_cpu or 'max'}"
     )
     report.line(
         "Machine",
         f"{where}, {profile.label}, core {profile.core_name or 'unknown'}, "
         f"misaligned access {profile.misaligned}"
-        + (f" ({profile.misaligned_source})"
-           if profile.misaligned_source != "none" else ""),
+        + (
+            f" ({profile.misaligned_source})"
+            if profile.misaligned_source != "none"
+            else ""
+        ),
     )
     if kind == "native":
         # Before anything is built: a machine that gives wrong data for
@@ -2761,8 +2864,7 @@ def run_optimization(
         if kind == "qemu" and profile.emulated_cpu
         else None
     )
-    _run_program(_FINISH_PROGRAM, {"root": root, "reset": True},
-                 timeout=1800)
+    _run_program(_FINISH_PROGRAM, {"root": root, "reset": True}, timeout=1800)
     verified_facts, error = inspect_tree(
         state.repo_path, artifacts, None, language == "go", kind
     )
@@ -2776,8 +2878,9 @@ def run_optimization(
         if (verified_facts.get("artifacts") or {}).get(rel, {}).get("exists")
     ]
     if not artifacts:
-        return stop("skipped",
-                    "no listed artifact exists in the verified tree")
+        return stop(
+            "skipped", "no listed artifact exists in the verified tree"
+        )
     context: Dict[str, Any] = {
         "state": state,
         "profile": profile,
@@ -2840,8 +2943,9 @@ def run_optimization(
     context["baseline_facts"] = base_facts
     redundant: Dict[str, str] = {}
     if language == "c":
-        flags = build_flags(base_facts.get("log_lines") or [],
-                            context["base"][0])
+        flags = build_flags(
+            base_facts.get("log_lines") or [], context["base"][0]
+        )
         result["build_flags"] = flags
         redundant = redundant_tunes(ladder, flags)
         _skip_redundant_bases(ladder, redundant)
@@ -2859,8 +2963,9 @@ def run_optimization(
         build_timeout=_step_timeout(context, BUILD_TIMEOUT),
         paths=(context.get("tree_paths") or {}).get(context["base"][0], {}),
     )
-    report.line("Workload",
-                "choosing one for a " + package.describe().split(" (")[0])
+    report.line(
+        "Workload", "choosing one for a " + package.describe().split(" (")[0]
+    )
     workload, notes = workloads.choose_workload(ctx)
     result["notes"] += notes
     result["workload"] = workload.to_dict() if workload else None
@@ -2911,30 +3016,42 @@ def run_optimization(
     for variant in ladder:
         if variant.vid in redundant:
             _announce(variant, context)
-            record = {"variant": variant.to_dict(), "verdict": "skipped",
-                      "reason": redundant[variant.vid]}
+            record = {
+                "variant": variant.to_dict(),
+                "verdict": "skipped",
+                "reason": redundant[variant.vid],
+            }
             report.more(result_text(record))
             records.append(record)
             continue
         if context["budget"].left() < MIN_STEP_SECONDS:
             _announce(variant, context)
-            record = {"variant": variant.to_dict(), "verdict": "skipped",
-                      "reason": "the time budget is used up"}
+            record = {
+                "variant": variant.to_dict(),
+                "verdict": "skipped",
+                "reason": "the time budget is used up",
+            }
             report.more(result_text(record))
             records.append(record)
             continue
         if _timing_stopped(context):
             _announce(variant, context)
-            record = {"variant": variant.to_dict(), "verdict": "skipped",
-                      "reason": _timing_stopped(context)}
+            record = {
+                "variant": variant.to_dict(),
+                "verdict": "skipped",
+                "reason": _timing_stopped(context),
+            }
             report.more(result_text(record))
             records.append(record)
             continue
         kept = _kept_for_second_check(context, records)
         if kept:
             _announce(variant, context)
-            record = {"variant": variant.to_dict(), "verdict": "skipped",
-                      "reason": kept}
+            record = {
+                "variant": variant.to_dict(),
+                "verdict": "skipped",
+                "reason": kept,
+            }
             report.more(result_text(record))
             records.append(record)
             continue
@@ -2945,7 +3062,9 @@ def run_optimization(
     if pgo_base is not None and context["budget"].left() >= MIN_STEP_SECONDS:
         label = f"Tune-{len(ladder) + 1}"
         pgo = _pgo_variant(
-            pgo_base, context, label,
+            pgo_base,
+            context,
+            label,
             skip=_kept_for_second_check(context, records, PGO_COST_FACTOR),
         )
         if pgo is not None:

@@ -99,9 +99,7 @@ def _is_arithmetic_substitution(text: str) -> bool:
     """Return True when a ``$((...))`` body is arithmetic-like."""
     if "$(" in text or "`" in text:
         return False
-    return bool(
-        re.match(r"^[A-Za-z0-9_$+\-*/%<>=!&|^~?:,.\s()]+$", text)
-    )
+    return bool(re.match(r"^[A-Za-z0-9_$+\-*/%<>=!&|^~?:,.\s()]+$", text))
 
 
 def _shell_words(command: str) -> list:
@@ -168,9 +166,11 @@ def _split_segments_with_ops(command: str) -> list:
                 i += 2
                 continue
             # Redirections, not operators: 2>&1, >&2, &>log, >|log.
-            if (ch == "&" and buf and buf[-1] in "<>") or two in (
-                "&>",
-            ) or (ch == "|" and buf and buf[-1] == ">"):
+            if (
+                (ch == "&" and buf and buf[-1] in "<>")
+                or two in ("&>",)
+                or (ch == "|" and buf and buf[-1] == ">")
+            ):
                 buf.append(ch)
                 i += 1
                 continue
@@ -640,9 +640,7 @@ class CommandValidator:
 
         return True, "All segments match safe command patterns"
 
-    def _validate_nested(
-        self, segment: str, depth: int
-    ) -> Tuple[bool, str]:
+    def _validate_nested(self, segment: str, depth: int) -> Tuple[bool, str]:
         """Validate commands hidden inside one shell segment.
 
         Command substitutions (``$(…)``, backticks, a non-arithmetic

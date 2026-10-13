@@ -720,5 +720,28 @@ class TestUsageAccounting(unittest.TestCase):
         self.assertEqual(outcome.output_tokens, 20)
 
 
+class TestClaudeResponses(unittest.TestCase):
+    """Tests for Claude reply shapes in the shared helpers."""
+
+    def test_extract_content_skips_thinking_blocks(self) -> None:
+        content = [
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "text", "text": '{"x": 1}'},
+        ]
+        self.assertEqual(extract_content(content), '{"x": 1}')
+
+    def test_audit_log_names_a_model_without_model_name(self) -> None:
+        invoke, _ = _make_invoke(['{"x": 1}'])
+        llm = SimpleNamespace(model="claude-haiku-5-5")
+        with mock.patch("src.llm_helpers.log_llm_call") as log:
+            llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=llm,
+                prompt="hello",
+                validator=_ok_validator,
+            )
+        self.assertEqual(log.call_args.kwargs["model"], "claude-haiku-5-5")
+
+
 if __name__ == "__main__":
     unittest.main()

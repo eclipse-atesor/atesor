@@ -295,9 +295,7 @@ class TestBatchMain(_BatchTestCase):
                 bt, "_refresh_worker_pool_if_needed", return_value=True
             ),
             mock.patch.object(bt, "run_agent", return_value=run_result),
-            mock.patch.object(
-                bt, "_install_signal_handlers", signal_handler
-            ),
+            mock.patch.object(bt, "_install_signal_handlers", signal_handler),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):

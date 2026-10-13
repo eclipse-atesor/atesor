@@ -315,9 +315,12 @@ class TestProfileCacheAndDefaults(unittest.TestCase):
         env.pop("ATESOR_PLATFORM", None)
         env.pop("ATESOR_CONTAINER", None)
         completed = SimpleNamespace(returncode=1, stdout="", stderr="")
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch(
-            "src.platforms.subprocess.run", return_value=completed
-        ) as run:
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch(
+                "src.platforms.subprocess.run", return_value=completed
+            ) as run,
+        ):
             profile = detect_platform()
         self.assertIs(profile, platforms._DEFAULT_PROFILE)
         cmd = run.call_args[0][0]

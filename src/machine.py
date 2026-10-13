@@ -1029,24 +1029,28 @@ def evaluate_probe(
             "is needed); extensions come from cpuinfo and hwprobe only."
         )
     if not sources:
-        warnings.append(
-            "No source answered; Atesor assumes plain rv64gc."
-        )
+        warnings.append("No source answered; Atesor assumes plain rv64gc.")
     if not all(letter in extensions for letter in _BASE_LETTERS):
         # The probe itself runs rv64gc code (python3), so the base is
         # present even when no source says so.
         extensions.update(_BASE_LETTERS)
 
     core = {
-        "mvendorid": pairs.get(_KEY_MVENDORID)
-        if _KEY_MVENDORID in pairs
-        else _parse_int(cpuinfo.get("mvendorid")),
-        "marchid": pairs.get(_KEY_MARCHID)
-        if _KEY_MARCHID in pairs
-        else _parse_int(cpuinfo.get("marchid")),
-        "mimpid": pairs.get(_KEY_MIMPID)
-        if _KEY_MIMPID in pairs
-        else _parse_int(cpuinfo.get("mimpid")),
+        "mvendorid": (
+            pairs.get(_KEY_MVENDORID)
+            if _KEY_MVENDORID in pairs
+            else _parse_int(cpuinfo.get("mvendorid"))
+        ),
+        "marchid": (
+            pairs.get(_KEY_MARCHID)
+            if _KEY_MARCHID in pairs
+            else _parse_int(cpuinfo.get("marchid"))
+        ),
+        "mimpid": (
+            pairs.get(_KEY_MIMPID)
+            if _KEY_MIMPID in pairs
+            else _parse_int(cpuinfo.get("mimpid"))
+        ),
         "uarch": cpuinfo.get("uarch"),
         "model": (payload.get("dt_model") or "").strip("\x00\n ") or None,
         "compatible": [
@@ -1071,9 +1075,7 @@ def evaluate_probe(
         "max_freq_khz": _parse_int(cpufreq.get("scaling_max_freq")),
         "hw_max_freq_khz": _parse_int(cpufreq.get("cpuinfo_max_freq")),
         "temperatures_mc": list(payload.get("thermal") or []),
-        "perf_event_paranoid": _parse_int(
-            payload.get("perf_event_paranoid")
-        ),
+        "perf_event_paranoid": _parse_int(payload.get("perf_event_paranoid")),
         "perf": payload.get("perf"),
         "loadavg_1m": float(loadavg[0]) if loadavg else None,
         "caches": payload.get("caches") or {},
@@ -1151,7 +1153,7 @@ def evaluate_probe(
 # that dies counts as -1. Unchanged code must always give the same
 # data; a machine that does not (an unstable clock, bad memory)
 # makes every speed number meaningless.
-_INTEGRITY_PROGRAM = r'''
+_INTEGRITY_PROGRAM = r"""
 import json
 import os
 import sys
@@ -1212,7 +1214,7 @@ sys.stdout.write("@@MARKER@@" + json.dumps({
     "size_mb": int(SPEC["size_mb"]),
     "seconds": round(time.time() - start, 1),
 }) + "\n")
-'''.replace("@@MARKER@@", _OUTPUT_MARKER)
+""".replace("@@MARKER@@", _OUTPUT_MARKER)
 
 INTEGRITY_ROUNDS = 10
 INTEGRITY_MB = 8
@@ -1283,7 +1285,7 @@ def _parse_probe_output(stdout: str) -> Optional[Dict[str, Any]]:
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_OUTPUT_MARKER):
             try:
-                payload = json.loads(line[len(_OUTPUT_MARKER):])
+                payload = json.loads(line[len(_OUTPUT_MARKER) :])
             except ValueError:
                 return None
             return payload if isinstance(payload, dict) else None
@@ -1578,8 +1580,11 @@ def describe(profile: MachineProfile) -> List[str]:
     core = profile.core_name or "unknown core"
     lines = [
         f"Machine:     {profile.kind}"
-        + (f" (QEMU_CPU={profile.emulated_cpu})" if profile.emulated_cpu
-           else ""),
+        + (
+            f" (QEMU_CPU={profile.emulated_cpu})"
+            if profile.emulated_cpu
+            else ""
+        ),
         f"ISA label:   {profile.label}",
         "Extensions:  " + " ".join(profile.extensions),
         f"Vector:      {f'VLEN {profile.vlen}' if profile.vlen else 'no'}",

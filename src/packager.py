@@ -117,10 +117,7 @@ def legacy_package_stem(repo_url: str) -> str:
     trimmed = (repo_url or "").strip().rstrip("/")
     segments = [s for s in trimmed.split("/") if s]
     basename = segments[-1].removesuffix(".git") if segments else ""
-    if (
-        basename.lower() in _LEGACY_AMBIGUOUS_BASENAMES
-        and len(segments) >= 2
-    ):
+    if basename.lower() in _LEGACY_AMBIGUOUS_BASENAMES and len(segments) >= 2:
         owner = segments[-2].removesuffix(".git")
         # Skip the scheme and host segments ("https:", "github.com").
         if owner and ":" not in owner and "." not in owner:
@@ -238,7 +235,7 @@ def _manifest_artifacts(
         if roles.get(path):
             entry["role"] = roles[path]
         if root and path.startswith(root + "/"):
-            rel = path[len(root) + 1:]
+            rel = path[len(root) + 1 :]
             host_file = os.path.join(repo_path, rel)
             entry["path_in_zip"] = rel
             if os.path.isfile(host_file) and not os.path.islink(host_file):
@@ -488,9 +485,7 @@ def package_build(
     try:
         with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(recipe_path, arcname="build_recipe.md")
-            zf.writestr(
-                "manifest.json", json.dumps(manifest, indent=2) + "\n"
-            )
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
             for host_path, arcname in logs_to_add:
                 zf.write(host_path, arcname=arcname)
             for host_path, arcname in optimized_files:

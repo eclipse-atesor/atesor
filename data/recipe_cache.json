@@ -15341,7 +15341,7 @@
         "build_system": "cmake",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64-native",
-        "last_built": "2026-09-30T12:10:34.693633",
+        "last_built": "2026-10-13T19:26:39.095775",
         "build_plan": {
           "phases": [
             {
@@ -15373,68 +15373,28 @@
             "role": "primary"
           },
           {
-            "type": "library_static",
-            "path": "/workspace/repos/cJSON/build/tests/libunity.a",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/cJSON/build/libcjson.so",
-            "role": "primary"
-          },
-          {
             "type": "library_shared",
             "path": "/workspace/repos/cJSON/build/libcjson.so.1.7.19",
             "role": "primary"
           },
           {
-            "type": "library_shared",
-            "path": "/workspace/repos/cJSON/build/libcjson.so.1",
-            "role": "primary"
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/fuzzing/fuzz_main",
+            "role": "secondary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/cJSON/build/cJSON_test",
-            "role": "primary"
+            "path": "/workspace/repos/cJSON/build/tests/cjson_add",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/compare_tests",
+            "role": "secondary"
           },
           {
             "type": "library_static",
             "path": "/workspace/repos/cJSON/build/tests/libunity.a",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/cJSON/build/libcjson.so",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/cJSON/build/libcjson.so.1.7.19",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/cJSON/build/libcjson.so.1",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/parse_hex4",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/parse_with_opts",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/misc_tests",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/print_value",
             "role": "secondary"
           },
           {
@@ -15444,7 +15404,27 @@
           },
           {
             "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/misc_tests",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_array",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
             "path": "/workspace/repos/cJSON/build/tests/parse_examples",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_hex4",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_number",
             "role": "secondary"
           },
           {
@@ -15454,23 +15434,48 @@
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/parse_value",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
             "path": "/workspace/repos/cJSON/build/tests/parse_string",
             "role": "secondary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/cJSON/build/tests/cjson_add",
+            "path": "/workspace/repos/cJSON/build/tests/parse_value",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/parse_with_opts",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/print_array",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/print_number",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/print_object",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cJSON/build/tests/print_string",
             "role": "secondary"
           }
         ],
-        "build_duration_seconds": 436.6,
+        "build_duration_seconds": 131.9,
         "recipe_file": "output/cJSON_recipe.md",
-        "recipe_markdown": "## Executive Summary\nThe RISC‑V port of cJSON completed successfully with no architecture‑specific patches required; the project built and produced functional binaries.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake build-essential make\n```\n\n## Build Instructions\n```bash\n# Setup required packages\napt-get update && apt-get install -y --no-install-recommends cmake build-essential make\n```\n\n```bash\n# Configure the build system\nmkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\n```bash\n# Compile the project\ncd build && make -j$(nproc)\n```\n\n## Architecture Notes\nNo architecture-specific adjustments were required for this project.\n\n## Verification\n```bash\nfile /workspace/repos/cJSON/build/cJSON_test\nreadelf -h /workspace/repos/cJSON/build/cJSON_test\n```\n\n## Known Issues & Recommendations\nNo known issues were observed; the build succeeded without modifications."
+        "recipe_markdown": "## Executive Summary\n\n**Status: success.** cJSON builds cleanly on RISC-V (riscv64) with the stock CMake and GCC toolchain, with no source changes, and the package's ctest suite passes (exit 0). The code is generic C with no architecture-specific paths, so portability is effectively a non-issue for this project.\n\n## Prerequisites\n\nTarget distro is Debian/Ubuntu (riscv64 userland):\n\n```bash\nsudo apt-get update && sudo apt-get install -y --no-install-recommends cmake build-essential make\n```\n\n## Build Instructions\n\nStep 1: Install build tools (only if not already present).\n\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake build-essential make\n```\n\nStep 2: Clone and configure (Release build, out-of-tree).\n\n```bash\ngit clone https://github.com/DaveGamble/cJSON.git\ncd cJSON\nmkdir -p build && cd build\ncmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\nStep 3: Build.\n\n```bash\ncd build\nmake -j$(nproc)\n```\n\nStep 4 (optional): Run the test suite.\n\n```bash\nctest --test-dir build --output-on-failure\n```\n\n## Architecture Notes\n\nNo architecture-specific handling was required. cJSON is portable C with no inline assembly, SIMD intrinsics, or arch-conditional preprocessor logic affecting the build. The default GCC riscv64 toolchain compiled it without warnings that needed addressing.\n\n## Verification\n\nConfirm the produced binaries and shared library are RISC-V 64-bit ELF files:\n\n```bash\ncd build\nfile cJSON_test libcjson.so.1.7.19\nreadelf -h cJSON_test | grep -E 'Class|Machine'\n```\n\nExpected output includes `ELF 64-bit LSB ... RISC-V` and `Machine: RISC-V`.\n\nSpot-check a test binary and the fuzzer driver:\n\n```bash\nfile tests/parse_value fuzzing/fuzz_main\n```\n\n## Known Issues & Recommendations\n\n- No outstanding portability issues were observed. 24 riscv64 ELF artifacts were produced and verified by header, and the ctest suite passed.\n- The fuzzer binary (`fuzzing/fuzz_main`) was built but fuzzing campaigns were not run; longer runs under QEMU or on hardware would be worthwhile before production use.\n- Upstream contribution: none needed for riscv64. Optionally, adding a riscv64 entry to any CI matrix would prevent future regressions.",
+        "verification": {
+          "status": "verified",
+          "reason": "24 riscv64 ELF build output(s) verified by header",
+          "source_commit": "6d9f2443ab071f86e5d9b43025a40929ec41c46c"
+        }
       }
     },
     "ogg": {
@@ -23148,25 +23153,26 @@
         "build_system": "cmake",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64-native",
-        "last_built": "2026-10-12T17:21:13.464950",
+        "last_built": "2026-10-13T19:24:12.284096",
         "build_plan": {
           "phases": [
             {
               "name": "setup",
               "commands": [
-                "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends cmake make gcc"
+                "apt-get update && apt-get install -y --no-install-recommends cmake build-essential"
               ]
             },
             {
               "name": "configure",
               "commands": [
-                "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_TESTING=OFF -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_INSTALL=ON"
+                "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_BUILD_TESTING=ON"
               ]
             },
             {
               "name": "build",
               "commands": [
-                "cd build && make -j$(nproc)"
+                "cmake --build build -j$(nproc)",
+                "cd build && ctest --output-on-failure"
               ]
             }
           ]
@@ -23183,14 +23189,104 @@
             "type": "library_shared",
             "path": "/workspace/repos/zlib/build/libz.so.1.3.2.1",
             "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/zlib/build/test/test_install/lib/libz.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/test/test_install/lib/libz.so.1.3.2.1",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_exclude_test_build/zlib/libz.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_exclude_test_build/zlib/libz.so.1.3.2.1",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_test_build/zlib/libz.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_test_build/zlib/libz.so.1.3.2.1",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/minigzip",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/infcover",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/minigzipstatic",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_example",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_example64",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_example64static",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_examplestatic",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_exclude_test_build/test_example",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_exclude_test_build/test_example_static",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_test_build/test_example",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_add_subdirectory_test_build/test_example_static",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zlib/build/test/zlib_find_package_test_build/test_example",
+            "role": "secondary"
           }
         ],
-        "build_duration_seconds": 362.2,
+        "build_duration_seconds": 196.4,
         "recipe_file": "output/zlib_recipe.md",
-        "recipe_markdown": "## Executive Summary\nBuild successful — zlib compiles and links cleanly on RISC-V using the generic C fallback paths; no source modifications were required.\n\n## Prerequisites\n```bash\nDEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends cmake make gcc\n```\n\n## Build Instructions\n```bash\nmkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_TESTING=OFF -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_INSTALL=ON\n```\n```bash\ncd build && make -j$(nproc)\n```\n\n## Architecture Notes\nThe source contains x86-specific SIMD optimizations in `crc32.c` (inline assembly at lines 530, 548–550, 569–571, 583 and an `arch_dispatch` at line 89). On RISC-V these are automatically disabled by the preprocessor guards (`#ifdef __x86_64__` / `#ifdef __i386__`), so the portable C implementations are used instead. No RISC-V vector (RVV) or Zbb/Zbp intrinsics are present in this version.\n\n## Verification\n```bash\nfile /workspace/repos/zlib/build/libz.a /workspace/repos/zlib/build/libz.so.1.3.2.1\nreadelf -h /workspace/repos/zlib/build/libz.so.1.3.2.1 | grep Machine\n```\nBoth commands should report `riscv64` / `RISC-V`.\n\n## Known Issues & Recommendations\nNo functional issues remain. For upstream: consider adding RVV-accelerated CRC32 and DEFLATE paths (similar to the existing x86 SSE/AVX code) to improve throughput on RISC-V cores that support the vector extension.",
+        "recipe_markdown": "## Executive Summary\n\n**Status: success.** zlib configures, builds, and passes its bundled ctest suite on riscv64 with no source changes. The portability verdict is straightforward: the generic C code path is used, and the architecture-specific CRC32 inline assembly that the scanner flagged is x86/ARM-specific and is not compiled into the riscv64 build.\n\n## Prerequisites\n\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake build-essential\n```\n\n## Build Instructions\n\nStep 1: Install toolchain (Debian/Ubuntu riscv64).\n\n```bash\napt-get update && apt-get install -y --no-install-recommends cmake build-essential\n```\n\nStep 2: Configure.\n\n```bash\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_STATIC=ON -DZLIB_BUILD_TESTING=ON\n```\n\nStep 3: Build.\n\n```bash\ncmake --build build -j$(nproc)\n```\n\nStep 4: Run tests (package tests are non-gating but passed).\n\n```bash\ncd build && ctest --output-on-failure\n```\n\n## Architecture Notes\n\n- **CRC32 dispatch (crc32.c:89):** The `arch_dispatch` flagged here selects accelerated CRC paths on supported architectures. On riscv64 the generic table-based implementation is used, so no RISC-V-specific code was required.\n- **Inline assembly (crc32.c:530–583):** The flagged `inline_asm` blocks are the hardware CRC implementations for other ISAs. They are excluded from the riscv64 build, so they do not affect correctness or portability here.\n- **SIMD:** No RVV (vector) or other SIMD paths are used by this build.\n- **Libc:** No libc-specific differences were encountered; the build linked against the standard glibc/toolchain without modification.\n\n## Verification\n\nConfirm the produced artifacts are riscv64 ELF binaries:\n\n```bash\nfile build/libz.a build/libz.so.1.3.2.1 build/test/minigzip\n```\n\n```bash\nreadelf -h build/test/minigzip | grep -E 'Class|Machine'\n```\n\nExpected: `Machine: RISC-V`. A total of 34 riscv64 ELF outputs were verified by header during the build.\n\n## Known Issues & Recommendations\n\n- **Unverified CRC acceleration:** Because the generic CRC path is used, the RISC-V build does not exercise any hardware CRC acceleration. Performance-sensitive users may want to evaluate a Zbc (carry-less multiply) based CRC32 implementation.\n- **Upstream contribution idea:** Add an explicit RISC-V branch to the CRC32 arch dispatch in `crc32.c` so that future Zbc-accelerated code can be selected at build time via a CMake option, rather than silently falling through to the generic path.\n- **Test coverage:** The ctest suite passed, but the package tests are non-gating; a full run on real riscv64 hardware (rather than emulation) is recommended before production use.",
         "verification": {
           "status": "verified",
-          "reason": "5 riscv64 ELF build output(s) verified by header",
+          "reason": "34 riscv64 ELF build output(s) verified by header",
           "source_commit": "767c4c947852e143f582c85f14cf573411df1b35"
         }
       }
@@ -26115,7 +26211,7 @@
         "build_system": "go",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64-native",
-        "last_built": "2026-09-30T16:49:34.459230",
+        "last_built": "2026-10-13T19:29:39.936343",
         "build_plan": {
           "phases": [
             {
@@ -26142,9 +26238,9 @@
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 186.4,
+        "build_duration_seconds": 166.4,
         "recipe_file": "output/gron_recipe.md",
-        "recipe_markdown": "## Executive Summary\nThe gron project builds successfully on RISC‑V64, producing a functional binary with no architecture‑specific modifications required. The port is fully successful.\n\n## Prerequisites\nInstall git using the following command:\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n## Build Instructions\nFirst, update package lists and install git:\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\nThen, prepare the Go module and build the binary:\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n## Architecture Notes\nNo architecture‑specific adjustments were needed; the code is generic and compiles cleanly on RISC‑V64.\n\n## Verification\nConfirm the generated binary is an RISC‑V64 ELF file:\n```bash\nfile /workspace/repos/gron/gron\nreadelf -h /workspace/repos/gron/gron\n```\n\n## Known Issues & Recommendations\nAll tests pass and no issues were encountered during the build. Consider adding a CI check for RISC‑V64 to ensure continued compatibility.",
+        "recipe_markdown": "## Executive Summary\n\n**Status: Success.** The gron project cross-builds to a riscv64 ELF binary with no source changes, and its package tests pass (`go test ./...`, exit 0). Portability verdict: pure Go with no architecture-specific code, so it ports cleanly to riscv64 as long as the Go toolchain supports the target.\n\n## Prerequisites\n\nInstall git on a Debian/Ubuntu host, plus a Go toolchain with riscv64 support (Go 1.14 or newer; the Go toolchain cross-compiles without a separate RISC-V C compiler):\n\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n## Build Instructions\n\nClone the repository and build from the project root:\n\n```bash\ngit clone https://github.com/tomnomnom/gron\ncd gron\n```\n\nResolve module dependencies:\n\n```bash\ngo mod tidy\n```\n\nBuild the binary (`-buildvcs=false` avoids errors when git metadata is unavailable or unusual):\n\n```bash\ngo build -buildvcs=false .\n```\n\nTo produce a riscv64 binary explicitly from a non-RISC-V host:\n\n```bash\nGOOS=linux GOARCH=riscv64 go build -buildvcs=false -o gron-riscv64 .\n```\n\nOptionally run the package tests:\n\n```bash\ngo test ./...\n```\n\n## Architecture Notes\n\nNo architecture-specific code was needed. The project contains no preprocessor macros, assembly, SIMD intrinsics, or libc-dependent C code, so no riscv64-specific handling was required.\n\n## Verification\n\nConfirm the produced binary is a riscv64 ELF:\n\n```bash\nfile gron\n```\n\n```bash\nreadelf -h gron | grep -E 'Class|Machine'\n```\n\nExpected: `Machine: RISC-V` and an ELF64 class. The verification step in this port confirmed the riscv64 ELF header on the build output at `/workspace/repos/gron/gron`.\n\n## Known Issues & Recommendations\n\n- No outstanding portability concerns were observed. The binary was verified by header only; it has not been executed on real riscv64 hardware or under QEMU in this run. Running `gron --version` or a small JSON input under `qemu-riscv64` would add runtime confidence.\n- The `go test ./...` run passed, but test coverage of riscv64-specific behavior is inherently nil, since the code has no such paths.\n- Upstream contribution: none needed for riscv64. Consider adding a riscv64 entry to any CI build matrix so future regressions are caught automatically.",
         "verification": {
           "status": "verified",
           "reason": "1 riscv64 ELF build output(s) verified by header",
@@ -39360,6 +39456,74 @@
         "build_duration_seconds": 1803.5,
         "recipe_file": "output/dura_recipe.md",
         "recipe_markdown": "## Executive Summary\nStatus: success. The `dura` project builds cleanly for RISC-V (riscv64) using the standard Cargo toolchain with no source code modifications or architecture-specific fixes required.\n\n## Prerequisites\n```bash\napt-get update && apt-get install -y --no-install-recommends pkg-config libgit2-dev\n```\n\n## Build Instructions\nInstall system dependencies:\n```bash\napt-get update && apt-get install -y --no-install-recommends pkg-config libgit2-dev\n```\n\nBuild the project in release mode:\n```bash\ncargo build --release\n```\n\n## Architecture Notes\nNo architecture-specific changes, preprocessor macros, or SIMD handling were required; the codebase and its C dependencies compiled as generic portable code for RISC-V.\n\n## Verification\nConfirm the produced Rust binary and static libraries are targeting RISC-V:\n```bash\nfile /workspace/repos/dura/target/release/deps/dura-f8440ab686785e9d\nreadelf -h /workspace/repos/dura/target/release/deps/dura-f8440ab686785e9d\nfile /workspace/repos/dura/target/release/build/libgit2-sys-35da0e9ddd6176a4/out/build/libgit2.a\n```\n\n## Known Issues & Recommendations\nNo architecture-specific issues or build failures were encountered. Since the project relies on native C libraries built via cargo (libgit2, libssh2) and works flawlessly on RISC-V, upstream should consider adding a riscv64 CI job to prevent future regressions."
+      }
+    },
+    "grep": {
+      "debian-riscv64-native": {
+        "repo_url": "https://www.gnu.org/software/grep/",
+        "build_system": "autotools",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64-native",
+        "last_built": "2026-10-13T20:38:15.024536",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends build-essential autoconf automake libtool pkg-config"
+              ]
+            },
+            {
+              "name": "configure",
+              "commands": [
+                "./configure"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "make -j$(nproc)"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/grep/src/grep",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/grep/lib/libgreputils.a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/grep/gnulib-tests/current-locale",
+            "role": "secondary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/grep/gnulib-tests/libtests.a",
+            "role": "secondary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/grep/gnulib-tests/test-localcharset",
+            "role": "secondary"
+          }
+        ],
+        "build_duration_seconds": 1256.1,
+        "recipe_file": "output/grep_recipe.md",
+        "recipe_markdown": "## Executive Summary\n\n**Status: Success (build), with package tests failing.** The GNU grep tree configures and builds on RISC-V (riscv64) with no architecture-specific source changes. The main obstacle was the repository's gnulib submodule, which had no usable revision, so bootstrap was pointed at a fresh gnulib clone. `make check` exits with status 2 and was not treated as a gating result, so the test suite should be investigated before relying on this port.\n\n## Prerequisites\n\nInstall the build toolchain and autotools on a Debian/Ubuntu riscv64 system. The run also used autotools, gettext, git, and gnulib's bootstrap requirements, so include those:\n\n```bash\nsudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential autoconf automake libtool pkg-config git gettext\n```\n\n## Build Instructions\n\nClone grep and fetch a fresh gnulib copy, since the submodule checkout in the repository is unusable:\n\n```bash\ngit clone https://git.savannah.gnu.org/git/grep.git\ncd grep\ngit clone https://git.savannah.gnu.org/git/gnulib.git /tmp/gnulib\n```\n\nRegenerate the build system using the external gnulib source:\n\n```bash\n./bootstrap --gnulib-srcdir=/tmp/gnulib\n```\n\nConfigure and build:\n\n```bash\n./configure\nmake -j$(nproc)\n```\n\n## Architecture Notes\n\nNo architecture-specific code changes were needed. The build completed on riscv64 using the generic C code paths, and no RISC-V-specific preprocessor macros, SIMD paths, or libc workarounds were required by this project in this run.\n\n## Verification\n\nConfirm the main binary and the gnulib test artifacts are RISC-V ELF files:\n\n```bash\nfile src/grep\nreadelf -h src/grep | grep -E 'Class|Machine'\n```\n\nExpected output includes `ELF 64-bit LSB executable, UCB RISC-V` for `file` and `Machine: RISC-V` for `readelf`. The same check applies to `lib/libgreputils.a` objects, `gnulib-tests/current-locale`, and `gnulib-tests/test-localcharset`:\n\n```bash\nfile gnulib-tests/current-locale gnulib-tests/test-localcharset\nreadelf -h gnulib-tests/test-localcharset | grep Machine\n```\n\n## Known Issues & Recommendations\n\n- **`make check` fails (exit 2).** The test suite was not diagnosed in this run. Run `make check` with `VERBOSE=1` or inspect `tests/*.log` to determine whether failures are riscv64-specific (for example locale or endianness assumptions) or environmental (missing locales, the gnulib submodule state).\n- **gnulib submodule is broken in the checkout.** Upstream or the packaging should pin a valid gnulib revision so `./bootstrap` works without `--gnulib-srcdir`.\n- **Locale dependence.** Several grep tests depend on installed locales; install the required locales before running tests.\n- **Upstream contribution ideas:** report the submodule pinning problem to the grep maintainers, and once `make check` results are understood, submit any riscv64-specific test fixes upstream. No source patches were produced in this port, so none are proposed.",
+        "verification": {
+          "status": "verified",
+          "reason": "5 riscv64 ELF build output(s) verified by header",
+          "source_commit": "e187ca53198c7aafb28da64da86d1bd59244c3cc"
+        }
       }
     }
   }

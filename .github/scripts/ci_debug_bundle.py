@@ -541,9 +541,7 @@ def build_report(
         t = sorted({p for p, _ in timeout_pkgs[plat]})
         u = sorted({p for p, _ in unverified_pkgs[plat]})
         md.append(f"### {plat}")
-        md.append(
-            f"- Unverified ({len(u)}): {', '.join(u) if u else '—'}"
-        )
+        md.append(f"- Unverified ({len(u)}): {', '.join(u) if u else '—'}")
         md.append(f"- Failing ({len(f)}): {', '.join(f) if f else '—'}")
         md.append(f"- Timeout ({len(t)}): {', '.join(t) if t else '—'}")
         md.append("")

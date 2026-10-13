@@ -255,9 +255,7 @@ class TestCommandValidatorSegments(unittest.TestCase):
         self.assertEqual(reason, "Unknown command pattern (not in whitelist)")
 
     def test_single_invocation_blocks_extra_chain(self) -> None:
-        ok, reason = self.validator.is_safe_single(
-            "cd build && make && ninja"
-        )
+        ok, reason = self.validator.is_safe_single("cd build && make && ninja")
         self.assertFalse(ok)
         self.assertIn("Chained commands are not allowed", reason)
 
@@ -328,9 +326,9 @@ class TestCommandOutputDecoding(unittest.TestCase):
     def test_host_command_replaces_invalid_utf8(self) -> None:
         """Invalid bytes keep the real exit code and output tail."""
         command = (
-            "python3 -c \"import sys; "
+            'python3 -c "import sys; '
             "sys.stdout.buffer.write(bytes([0xff, 0xfe])); "
-            "sys.exit(3)\""
+            'sys.exit(3)"'
         )
         result = execute_command(command, use_docker=False)
         self.assertEqual(3, result.exit_code)

@@ -220,10 +220,10 @@ def to_host_path(path: str) -> str:
     if is_native():
         refresh_mirror(path)
         if WORKSPACE_ROOT != "/workspace":
-            return WORKSPACE_ROOT + path[len("/workspace"):]
+            return WORKSPACE_ROOT + path[len("/workspace") :]
         return path
     if not os.path.exists("/workspace"):
-        return WORKSPACE_ROOT + path[len("/workspace"):]
+        return WORKSPACE_ROOT + path[len("/workspace") :]
     return path
 
 

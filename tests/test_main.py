@@ -130,9 +130,7 @@ class _MainTestCase(unittest.TestCase):
     def setUp(self) -> None:
         """Create a per-test scratch directory under tests/."""
         _SCRATCH_PARENT.mkdir(exist_ok=True)
-        self._temp_dir = tempfile.TemporaryDirectory(
-            dir=str(_SCRATCH_PARENT)
-        )
+        self._temp_dir = tempfile.TemporaryDirectory(dir=str(_SCRATCH_PARENT))
         self.temp_path = Path(self._temp_dir.name)
         self.addCleanup(self._cleanup_temp_dir)
 
@@ -333,20 +331,26 @@ class TestCheckKeys(_MainTestCase):
     """Tests for API-key validation wrappers."""
 
     def test_check_keys_reports_success_and_prints_model_info(self) -> None:
-        with mock.patch.object(
-            main,
-            "check_api_keys",
-            return_value=(True, "Gemini ready", "gemini"),
-        ), mock.patch.object(main, "print_model_info") as print_info:
+        with (
+            mock.patch.object(
+                main,
+                "check_api_keys",
+                return_value=(True, "Gemini ready", "gemini"),
+            ),
+            mock.patch.object(main, "print_model_info") as print_info,
+        ):
             self.assertTrue(main.check_keys())
             print_info.assert_called_once_with()
 
     def test_check_keys_reports_failure_without_model_info(self) -> None:
-        with mock.patch.object(
-            main,
-            "check_api_keys",
-            return_value=(False, "missing key", "gemini"),
-        ), mock.patch.object(main, "print_model_info") as print_info:
+        with (
+            mock.patch.object(
+                main,
+                "check_api_keys",
+                return_value=(False, "missing key", "gemini"),
+            ),
+            mock.patch.object(main, "print_model_info") as print_info,
+        ):
             self.assertFalse(main.check_keys())
             print_info.assert_not_called()
 
@@ -355,63 +359,82 @@ class TestBinfmtSetup(_MainTestCase):
     """Tests for qemu-riscv64 binfmt preflight."""
 
     def test_existing_enabled_binfmt_returns_true(self) -> None:
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=True,
-        ), mock.patch(
-            "builtins.open",
-            mock.mock_open(read_data="enabled\n"),
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=True,
+            ),
+            mock.patch(
+                "builtins.open",
+                mock.mock_open(read_data="enabled\n"),
+            ),
         ):
             self.assertTrue(main._ensure_riscv64_binfmt())
 
     def test_existing_binfmt_read_error_attempts_registration(self) -> None:
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            side_effect=[True, True],
-        ), mock.patch("builtins.open", side_effect=OSError), mock.patch(
-            "subprocess.run",
-            return_value=completed,
-        ) as run:
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                side_effect=[True, True],
+            ),
+            mock.patch("builtins.open", side_effect=OSError),
+            mock.patch(
+                "subprocess.run",
+                return_value=completed,
+            ) as run,
+        ):
             self.assertTrue(main._ensure_riscv64_binfmt())
             run.assert_called_once()
 
     def test_successful_registration_rechecks_binfmt_path(self) -> None:
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            side_effect=[False, True],
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                side_effect=[False, True],
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertTrue(main._ensure_riscv64_binfmt())
 
     def test_failed_registration_returns_false(self) -> None:
         completed = SimpleNamespace(returncode=1, stderr="denied")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
     def test_registration_exception_returns_false(self) -> None:
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", side_effect=FileNotFoundError),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
     def test_registration_success_without_recheck_returns_false(self) -> None:
         """Return False when the installer succeeds but the path is absent."""
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
 
@@ -428,29 +451,36 @@ class TestDockerEnvironment(_MainTestCase):
 
     def test_setup_docker_environment_closes_client(self) -> None:
         client = mock.MagicMock()
-        with mock.patch.object(
-            main.docker,
-            "from_env",
-            return_value=client,
-        ), mock.patch.object(
-            main,
-            "_provision_sandbox",
-            return_value=True,
-        ) as provision:
+        with (
+            mock.patch.object(
+                main.docker,
+                "from_env",
+                return_value=client,
+            ),
+            mock.patch.object(
+                main,
+                "_provision_sandbox",
+                return_value=True,
+            ) as provision,
+        ):
             self.assertTrue(main.setup_docker_environment())
             provision.assert_called_once()
             client.close.assert_called_once_with()
 
     def test_provision_sandbox_waits_for_existing_lock(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main.fcntl,
-            "flock",
-            side_effect=[OSError, None, None],
-        ) as flock, mock.patch.object(
-            main,
-            "_provision_sandbox_locked",
-            return_value=True,
-        ) as locked:
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main.fcntl,
+                "flock",
+                side_effect=[OSError, None, None],
+            ) as flock,
+            mock.patch.object(
+                main,
+                "_provision_sandbox_locked",
+                return_value=True,
+            ) as locked,
+        ):
             self.assertTrue(
                 main._provision_sandbox(
                     mock.MagicMock(),
@@ -482,11 +512,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.images.get.assert_not_called()
 
     def test_locked_provision_uses_existing_running_container(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -504,11 +538,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_not_called()
 
     def test_locked_provision_builds_missing_image_and_container(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             stream = _CloseableBuildStream(
                 [
                     {"stream": "Step 1/2 : FROM alpine\n"},
@@ -540,13 +578,18 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_called_once()
 
     def test_locked_provision_force_rebuild_uses_build_stream(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"), mock.patch.dict(
-            main.os.environ,
-            {"REBUILD_IMAGE": "true"},
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+            mock.patch.dict(
+                main.os.environ,
+                {"REBUILD_IMAGE": "true"},
+            ),
         ):
             client = mock.MagicMock()
             stream = _CloseableBuildStream([{"stream": "Step 1/1\n"}])
@@ -567,10 +610,13 @@ class TestDockerEnvironment(_MainTestCase):
             client.api.build.assert_called_once()
 
     def test_locked_provision_reports_build_error_detail(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -593,10 +639,13 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertTrue(stream.closed)
 
     def test_locked_provision_reports_build_error_key(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -617,10 +666,13 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_reports_generic_build_exception(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -639,11 +691,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_recreates_stale_mount(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             stale = _FakeContainer(str(self.temp_path / "old-workspace"))
             fresh = _FakeContainer(main.WORKSPACE_ROOT)
             client = mock.MagicMock()
@@ -664,11 +720,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_called_once()
 
     def test_locked_provision_starts_stopped_container(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT, status="created")
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -686,11 +746,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(1, container.start_calls)
 
     def test_locked_provision_fails_after_non_running_retries(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             first = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
             second = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
             client = mock.MagicMock()
@@ -712,11 +776,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.run.call_count)
 
     def test_locked_provision_logs_cleanup_failure_on_retry(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             first = _FakeContainer(main.WORKSPACE_ROOT)
             first.reload = mock.MagicMock(
                 side_effect=lambda: setattr(first, "status", "exited")
@@ -739,11 +807,15 @@ class TestDockerEnvironment(_MainTestCase):
             first.stop.assert_called_once_with()
 
     def test_locked_provision_retries_when_container_disappears(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             lost = _FakeContainer(main.WORKSPACE_ROOT)
             lost.reload = mock.MagicMock(
                 side_effect=main.docker.errors.NotFound("gone")
@@ -765,11 +837,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.get.call_count)
 
     def test_locked_provision_rejects_distro_mismatch(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(
                 main.WORKSPACE_ROOT,
                 os_release=b"ID=debian\n",
@@ -789,11 +865,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_skips_failed_distro_exception(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.raise_on_os_release = True
             client = mock.MagicMock()
@@ -811,11 +891,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_allows_ubuntu_for_debian_profile(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(
                 main.WORKSPACE_ROOT,
                 os_release=b"ID=ubuntu\n",
@@ -835,11 +919,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_continues_when_os_release_fails(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.os_release_exit = 1
             client = mock.MagicMock()
@@ -857,11 +945,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_warns_on_wrong_architecture(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT, arch=b"x86_64\n")
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -878,11 +970,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_fails_when_arch_check_fails(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.arch_exit = 1
             client = mock.MagicMock()
@@ -900,11 +996,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_fails_when_health_check_fails(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.ready_exit = 1
             client = mock.MagicMock()
@@ -922,11 +1022,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_recovers_from_health_exception(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             fresh = _FakeContainer(main.WORKSPACE_ROOT)
@@ -950,11 +1054,15 @@ class TestDockerEnvironment(_MainTestCase):
     def test_locked_provision_logs_failed_initial_recreate_cleanup(
         self,
     ) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             broken.stop = mock.MagicMock(side_effect=RuntimeError("busy"))
@@ -976,11 +1084,15 @@ class TestDockerEnvironment(_MainTestCase):
             broken.stop.assert_called_once_with()
 
     def test_locked_provision_skips_non_running_recreation(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             stopped = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
@@ -1002,11 +1114,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.run.call_count)
 
     def test_locked_provision_logs_recreate_cleanup_failure(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             first = _FakeContainer(main.WORKSPACE_ROOT)
@@ -1037,11 +1153,15 @@ class TestDockerEnvironment(_MainTestCase):
             second.remove.assert_called_once_with()
 
     def test_locked_provision_fails_when_recreation_fails(self) -> None:
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             client = mock.MagicMock()
@@ -1338,9 +1458,7 @@ class TestRunAgent(_MainTestCase):
             yield {"supervisor_node": {"attempt_count": 1}}
             state.build_status = BuildStatus.SUCCESS
             state.artifact_verification = {"status": "verified"}
-            yield {
-                "build_fix_subgraph": {"build_status": state.build_status}
-            }
+            yield {"build_fix_subgraph": {"build_status": state.build_status}}
 
         fake_app = _FakeApp(stream_factory)
         output = io.StringIO()
@@ -1637,9 +1755,12 @@ class TestRunAgent(_MainTestCase):
             yield {}
 
         fake_app = _FakeApp(stream_factory)
-        with self._patched_graph(fake_app), mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=self._profile(),
+        with (
+            self._patched_graph(fake_app),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
         ):
             self.assertEqual(130, main.run_agent(_REPO_URL))
 
@@ -1649,9 +1770,12 @@ class TestRunAgent(_MainTestCase):
             yield {}
 
         fake_app = _FakeApp(stream_factory)
-        with self._patched_graph(fake_app), mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=self._profile(),
+        with (
+            self._patched_graph(fake_app),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
         ):
             self.assertEqual(1, main.run_agent(_REPO_URL))
 
@@ -1669,11 +1793,14 @@ class TestCleanupWorkspace(_MainTestCase):
         return workspace
 
     def test_cleanup_workspace_missing_directory_returns(self) -> None:
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(self.temp_path / "missing"),
-        ), mock.patch("builtins.input") as input_mock:
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(self.temp_path / "missing"),
+            ),
+            mock.patch("builtins.input") as input_mock,
+        ):
             main.cleanup_workspace()
             input_mock.assert_not_called()
 
@@ -1685,31 +1812,40 @@ class TestCleanupWorkspace(_MainTestCase):
 
     def test_cleanup_workspace_handles_eof(self) -> None:
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", side_effect=EOFError):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", side_effect=EOFError),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_invalid_choice_returns(self) -> None:
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="x"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="x"),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_quit_choice_returns(self) -> None:
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="q"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="q"),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
@@ -1723,22 +1859,28 @@ class TestCleanupWorkspace(_MainTestCase):
         for choice, dirname in choices:
             with self.subTest(choice=choice):
                 workspace = self._make_workspace()
-                with mock.patch.object(
-                    main,
-                    "WORKSPACE_ROOT",
-                    str(workspace),
-                ), mock.patch("builtins.input", return_value=choice):
+                with (
+                    mock.patch.object(
+                        main,
+                        "WORKSPACE_ROOT",
+                        str(workspace),
+                    ),
+                    mock.patch("builtins.input", return_value=choice),
+                ):
                     main.cleanup_workspace()
                 self.assertTrue((workspace / dirname).exists())
                 self.assertFalse((workspace / dirname / "file.txt").exists())
 
     def test_cleanup_workspace_cleans_all_directories(self) -> None:
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="5"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="5"),
+        ):
             main.cleanup_workspace()
         for dirname in ["repos", "output", "logs", ".cache", "patches"]:
             self.assertTrue((workspace / dirname).exists())
@@ -1812,14 +1954,17 @@ class TestRebuildSandboxes(_MainTestCase):
             calls.append(main.os.environ.get("ATESOR_PLATFORM"))
             return True
 
-        with mock.patch.dict(
-            main.os.environ,
-            {"ATESOR_PLATFORM": "original", "ATESOR_CONTAINER": "worker"},
-            clear=True,
-        ), mock.patch.object(
-            main,
-            "setup_docker_environment",
-            side_effect=fake_setup,
+        with (
+            mock.patch.dict(
+                main.os.environ,
+                {"ATESOR_PLATFORM": "original", "ATESOR_CONTAINER": "worker"},
+                clear=True,
+            ),
+            mock.patch.object(
+                main,
+                "setup_docker_environment",
+                side_effect=fake_setup,
+            ),
         ):
             self.assertTrue(main.rebuild_all_sandboxes())
             self.assertEqual(["alpine", "debian"], calls)
@@ -2330,9 +2475,7 @@ class TestMainCli(_MainTestCase):
         code, patches = self._call_cli(["--clean-image"])
 
         self.assertEqual(0, code)
-        patches["cleanup_container"].assert_called_once_with(
-            remove_image=True
-        )
+        patches["cleanup_container"].assert_called_once_with(remove_image=True)
         patches["setup"].assert_not_called()
 
     def test_cli_cleanup_with_repo_exits_before_porting(self) -> None:
@@ -2653,7 +2796,7 @@ class TestPerformanceMode(_MainTestCase):
             "status": "accepted",
             "kind": "native",
             "reason": "Tune-3 (GCC -O3) takes 10.0% less time than the "
-                      "verified build (time ratio 0.9)",
+            "verified build (time ratio 0.9)",
             "accepted": "tune3",
             "accepted_label": "Tune-3",
             "accepted_title": "GCC -O3",
@@ -2661,52 +2804,91 @@ class TestPerformanceMode(_MainTestCase):
             "accepted_dir": "/workspace/repos/project.opt/accepted",
             "duration_seconds": 1200.0,
             "budget_seconds": 3600,
-            "package": {"kind": "library", "language": "c",
-                        "build_system": "cmake",
-                        "libraries": ["build/libdemo.so.1"],
-                        "programs": []},
-            "baseline": {"build_seconds": 31.0, "same_code": 1,
-                         "artifacts": 1},
-            "workload": {"mode": "harness", "command": "{bin} {input}",
-                         "description": "sum the input", "origin": "agent",
-                         "source_language": "c", "iterations": 12,
-                         "run_seconds": 1.9,
-                         "files": {".atesor/bench/harness.c":
-                                   "int main(void) { return 0; }\n"}},
+            "package": {
+                "kind": "library",
+                "language": "c",
+                "build_system": "cmake",
+                "libraries": ["build/libdemo.so.1"],
+                "programs": [],
+            },
+            "baseline": {
+                "build_seconds": 31.0,
+                "same_code": 1,
+                "artifacts": 1,
+            },
+            "workload": {
+                "mode": "harness",
+                "command": "{bin} {input}",
+                "description": "sum the input",
+                "origin": "agent",
+                "source_language": "c",
+                "iterations": 12,
+                "run_seconds": 1.9,
+                "files": {
+                    ".atesor/bench/harness.c": "int main(void) { return 0; }\n"
+                },
+            },
             "warnings": ["cpufreq governor is ondemand"],
             "notes": ["not repeated: apt-get install -y cmake"],
             "variants": [
-                {"variant": {"vid": "tune1", "label": "Tune-1",
-                             "technique": "core tuning",
-                             "value": "-mtune=sifive-p550",
-                             "compiler": "gcc",
-                             "flags": ["-mtune=sifive-p550"], "env": {}},
-                 "verdict": "no change", "ratio": 0.99,
-                 "reason": "median time ratio 0.99"},
-                {"variant": {"vid": "tune3", "label": "Tune-3",
-                             "technique": "optimization level",
-                             "value": "-O3", "compiler": "gcc",
-                             "flags": ["-O3"], "env": {}},
-                 "verdict": "faster", "ratio": 0.9,
-                 "measurement": {"comparison": {"ci_low": 0.89,
-                                                "ci_high": 0.91}},
-                 "reason": "median time ratio 0.9 | p=0.001"},
-                {"variant": {"vid": "tune4", "label": "Tune-4",
-                             "technique": "link-time optimization",
-                             "value": "-flto=auto", "compiler": "gcc",
-                             "flags": ["-O3", "-flto=auto"], "env": {}},
-                 "verdict": "same as tune3", "same_as_label": "Tune-3",
-                 "ratio": 0.9, "reason": "result reused"},
+                {
+                    "variant": {
+                        "vid": "tune1",
+                        "label": "Tune-1",
+                        "technique": "core tuning",
+                        "value": "-mtune=sifive-p550",
+                        "compiler": "gcc",
+                        "flags": ["-mtune=sifive-p550"],
+                        "env": {},
+                    },
+                    "verdict": "no change",
+                    "ratio": 0.99,
+                    "reason": "median time ratio 0.99",
+                },
+                {
+                    "variant": {
+                        "vid": "tune3",
+                        "label": "Tune-3",
+                        "technique": "optimization level",
+                        "value": "-O3",
+                        "compiler": "gcc",
+                        "flags": ["-O3"],
+                        "env": {},
+                    },
+                    "verdict": "faster",
+                    "ratio": 0.9,
+                    "measurement": {
+                        "comparison": {"ci_low": 0.89, "ci_high": 0.91}
+                    },
+                    "reason": "median time ratio 0.9 | p=0.001",
+                },
+                {
+                    "variant": {
+                        "vid": "tune4",
+                        "label": "Tune-4",
+                        "technique": "link-time optimization",
+                        "value": "-flto=auto",
+                        "compiler": "gcc",
+                        "flags": ["-O3", "-flto=auto"],
+                        "env": {},
+                    },
+                    "verdict": "same as tune3",
+                    "same_as_label": "Tune-3",
+                    "ratio": 0.9,
+                    "reason": "result reused",
+                },
             ],
         }
 
     def test_optimize_builds_from_a_verified_cached_recipe(self) -> None:
         """--optimize skips the fast path and builds the cached recipe."""
-        cached = {"build_system": "cmake", "last_built": "2026-10-02",
-                  "verification": {"status": "verified"}}
+        cached = {
+            "build_system": "cmake",
+            "last_built": "2026-10-02",
+            "verification": {"status": "verified"},
+        }
         code, patches = self._call_cli(
-            ["--repo", _REPO_URL, "--optimize", "--emulate-cpu",
-             "rva22u64"],
+            ["--repo", _REPO_URL, "--optimize", "--emulate-cpu", "rva22u64"],
             cache=cached,
         )
         self.assertEqual(0, code)
@@ -2724,20 +2906,33 @@ class TestPerformanceMode(_MainTestCase):
     def test_optimize_plans_again_without_a_verified_recipe(self) -> None:
         """An unverified entry, or --force, means a full port."""
         for args, cache in (
-            (["--optimize"], {"build_system": "cmake",
-                              "verification": {"status": "unverified"}}),
+            (
+                ["--optimize"],
+                {
+                    "build_system": "cmake",
+                    "verification": {"status": "unverified"},
+                },
+            ),
             (["--optimize"], None),
-            (["--optimize", "--force"], {"build_system": "cmake",
-                                         "verification": {
-                                             "status": "verified"}}),
+            (
+                ["--optimize", "--force"],
+                {
+                    "build_system": "cmake",
+                    "verification": {"status": "verified"},
+                },
+            ),
         ):
             with self.subTest(args=args, cache=bool(cache)):
-                code, patches = self._call_cli(["--repo", _REPO_URL] + args,
-                                               cache=cache)
+                code, patches = self._call_cli(
+                    ["--repo", _REPO_URL] + args, cache=cache
+                )
                 self.assertEqual(0, code)
                 patches["run_agent"].assert_called_once_with(
-                    repo_url=_REPO_URL, max_attempts=5, verbose=False,
-                    package=False, optimize=True,
+                    repo_url=_REPO_URL,
+                    max_attempts=5,
+                    verbose=False,
+                    package=False,
+                    optimize=True,
                 )
                 if "--force" in args:
                     patches["get_cached"].assert_not_called()
@@ -2746,8 +2941,7 @@ class TestPerformanceMode(_MainTestCase):
         for model in ("max;reboot", "2"):
             with self.subTest(model=model):
                 code, patches = self._call_cli(
-                    ["--repo", _REPO_URL, "--optimize", "--emulate-cpu",
-                     model]
+                    ["--repo", _REPO_URL, "--optimize", "--emulate-cpu", model]
                 )
                 self.assertEqual(1, code)
                 patches["run_agent"].assert_not_called()
@@ -2768,7 +2962,9 @@ class TestPerformanceMode(_MainTestCase):
         )
         self.assertEqual(0, code)
         patches["run_agent"].assert_called_once_with(
-            repo_url=_REPO_URL, max_attempts=5, verbose=False,
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
             package=False,
         )
 
@@ -2805,8 +3001,7 @@ class TestPerformanceMode(_MainTestCase):
             code = main._run_probe(
                 argparse.Namespace(emulate_cpu="rva22u64"), native=False
             )
-            saved = os.path.join(main.OUTPUT_DIR,
-                                 "machine_profile_qemu.json")
+            saved = os.path.join(main.OUTPUT_DIR, "machine_profile_qemu.json")
             with open(saved) as handle:
                 data = json.load(handle)
         self.assertEqual(0, code)
@@ -2838,8 +3033,13 @@ class TestPerformanceMode(_MainTestCase):
 
     def test_native_run_removes_the_variant_trees(self) -> None:
         args = argparse.Namespace(
-            repo=_REPO_URL, max_attempts=5, verbose=False, package=False,
-            optimize=True, emulate_cpu=None, setup_only=False,
+            repo=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+            emulate_cpu=None,
+            setup_only=False,
             rebuild=False,
         )
         with (
@@ -2849,13 +3049,17 @@ class TestPerformanceMode(_MainTestCase):
             mock.patch.object(main, "run_agent", return_value=0) as run,
             mock.patch.object(main, "remove_native_repo") as remove,
             mock.patch.object(main, "stop_native_container"),
-            mock.patch.object(main, "_verified_cached_recipe",
-                              return_value=None),
+            mock.patch.object(
+                main, "_verified_cached_recipe", return_value=None
+            ),
         ):
             self.assertEqual(0, main._run_native(args, infra_only=False))
         run.assert_called_once_with(
-            repo_url=_REPO_URL, max_attempts=5, verbose=False,
-            package=False, optimize=True,
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
         )
         self.assertEqual(
             remove.call_args_list,
@@ -2869,11 +3073,13 @@ class TestPerformanceMode(_MainTestCase):
             "build_status": "SUCCESS",
             "artifact_verification": {"status": "verified"},
             "optimization": self._optimization(),
-            "machine_profile": {"kind": "native",
-                                "label": "rv64gc+zba+zbb",
-                                "core_name": "sifive-p550",
-                                "misaligned": "slow",
-                                "misaligned_source": "timing test"},
+            "machine_profile": {
+                "kind": "native",
+                "label": "rv64gc+zba+zbb",
+                "core_name": "sifive-p550",
+                "misaligned": "slow",
+                "misaligned_source": "timing test",
+            },
         }
         report = main.generate_detailed_report(state)
         self.assertIn("## Performance Mode (--optimize)", report)
@@ -2896,8 +3102,7 @@ class TestPerformanceMode(_MainTestCase):
             "build/libdemo.so.1; programs: none",
             report,
         )
-        self.assertIn("rebuilt in a copy in 31.0s; 1 of 1 riscv64",
-                      report)
+        self.assertIn("rebuilt in a copy in 31.0s; 1 of 1 riscv64", report)
         self.assertIn(
             "**Workload**: C harness by the optimizer agent: sum the "
             "input, N=12, 1.90 s per run",
@@ -2908,17 +3113,20 @@ class TestPerformanceMode(_MainTestCase):
             "0.9 (0.89-0.91) | median time ratio 0.9 / p=0.001 |",
             report,
         )
-        self.assertIn("| Tune-4 | link-time optimization | gcc -O3 "
-                      "-flto=auto | same code as Tune-3, 10.0% faster |",
-                      report)
-        self.assertIn("### Workload source: `.atesor/bench/harness.c`",
-                      report)
+        self.assertIn(
+            "| Tune-4 | link-time optimization | gcc -O3 "
+            "-flto=auto | same code as Tune-3, 10.0% faster |",
+            report,
+        )
+        self.assertIn("### Workload source: `.atesor/bench/harness.c`", report)
         self.assertIn("```c\nint main(void) { return 0; }\n```", report)
         self.assertIn("- not repeated: apt-get install -y cmake", report)
         self.assertIn("## Machine Profile", report)
         self.assertIn("ISA label:   rv64gc+zba+zbb", report)
-        self.assertLess(report.index("## Machine Profile"),
-                        report.index("## Performance Mode"))
+        self.assertLess(
+            report.index("## Machine Profile"),
+            report.index("## Performance Mode"),
+        )
         plain = main.generate_detailed_report(
             {"repo_name": "demo", "build_status": "SUCCESS"}
         )
@@ -2934,8 +3142,11 @@ class TestPerformanceMode(_MainTestCase):
             yield {"finish_node": state}
             if state.optimize_requested:
                 print("   Tune-1   : core tuning = -mtune=x", flush=True)
-                state.optimization = {"status": "no gain",
-                                      "reason": "nothing", "variants": []}
+                state.optimization = {
+                    "status": "no gain",
+                    "reason": "nothing",
+                    "variants": [],
+                }
                 yield {"optimize_node": state}
 
         from src.graph import route_finish_to_next
@@ -2966,8 +3177,10 @@ class TestPerformanceMode(_MainTestCase):
             if optimize:
                 header = text.index("[Step 2] optimize_node")
                 self.assertLess(header, text.index("Status: OPTIMIZING"))
-                self.assertLess(text.index("Status: OPTIMIZING"),
-                                text.index("Tune-1   : core tuning"))
+                self.assertLess(
+                    text.index("Status: OPTIMIZING"),
+                    text.index("Tune-1   : core tuning"),
+                )
                 self.assertEqual(text.count("[Step 2]"), 1)
                 self.assertNotIn("[Step 3]", text)
                 self.assertIn(
@@ -3024,16 +3237,18 @@ class TestPerformanceMode(_MainTestCase):
         )
         self.assertNotIn("Why:", text)
         self.assertRegex(
-            text, r"Tune-3 +optimization level +-O3 +10\.0% faster  "
-                  r"<- accepted"
+            text,
+            r"Tune-3 +optimization level +-O3 +10\.0% faster  " r"<- accepted",
         )
         self.assertRegex(
-            text, r"Tune-1 +core tuning +-mtune=sifive-p550 +1\.0% faster "
-                  r"\(inside the noise\)"
+            text,
+            r"Tune-1 +core tuning +-mtune=sifive-p550 +1\.0% faster "
+            r"\(inside the noise\)",
         )
         self.assertRegex(
-            text, r"Tune-4 +link-time optimization +-flto=auto +same code "
-                  r"as Tune-3, 10\.0% faster"
+            text,
+            r"Tune-4 +link-time optimization +-flto=auto +same code "
+            r"as Tune-3, 10\.0% faster",
         )
         self.assertIn(
             "Optimized files: /workspace/repos/project.opt/accepted",
@@ -3047,10 +3262,14 @@ class TestPerformanceMode(_MainTestCase):
             state.artifact_verification = {"status": "verified"}
             yield {"Finish": state}
 
-        cached = {"build_system": "cmake",
-                  "last_built": "2026-10-02T15:35:35",
-                  "verification": {"status": "verified",
-                                   "source_commit": "767c4c947852e143f58"}}
+        cached = {
+            "build_system": "cmake",
+            "last_built": "2026-10-02T15:35:35",
+            "verification": {
+                "status": "verified",
+                "source_commit": "767c4c947852e143f58",
+            },
+        }
         out = io.StringIO()
         with (
             self._patched_main_paths(),
@@ -3062,8 +3281,9 @@ class TestPerformanceMode(_MainTestCase):
             mock.patch.object(main, "save_porting_outputs"),
             contextlib.redirect_stdout(out),
         ):
-            code = main.run_agent(_REPO_URL, optimize=True,
-                                  cached_recipe=cached)
+            code = main.run_agent(
+                _REPO_URL, optimize=True, cached_recipe=cached
+            )
         self.assertEqual(0, code)
         self.assertIn(
             "Recipe:      from the cache (verified run of "

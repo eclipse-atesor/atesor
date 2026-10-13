@@ -49,8 +49,8 @@ def _guard_tracked_data_files() -> Iterator[None]:
         for path, old_digest in before.items()
         if digest(path) != old_digest
     ]
-    assert not changed, (
-        "Tests mutated git-tracked data files: " + ", ".join(changed)
+    assert not changed, "Tests mutated git-tracked data files: " + ", ".join(
+        changed
     )
 
 

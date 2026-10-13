@@ -158,7 +158,8 @@ PY
     echo "--- [8/9] bundled deps import ---"
     /opt/atesor-ai/venv/bin/python3 -c \
         "import langchain, langgraph, docker, pydantic, \
-google.generativeai; print(\"bundled deps import OK\")"
+google.generativeai, langchain_anthropic; \
+print(\"bundled deps import OK\")"
 
     echo "--- [9/9] clean removal ---"
     dpkg -r atesor-ai >/dev/null 2>&1

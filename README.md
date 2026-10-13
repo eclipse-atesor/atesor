@@ -62,7 +62,7 @@ The supervisor → executor loop is built on [LangGraph](https://github.com/lang
   docker run --privileged --rm tonistiigi/binfmt --install all
   ```
 - Python 3.10+
-- An API key for one of: Gemini, OpenAI, or OpenRouter.
+- An API key for one of: Gemini, OpenAI, OpenRouter, or Anthropic.
 
 ### Install
 
@@ -498,10 +498,11 @@ Edit `.env` (template in `.env-example`):
 
 | Variable | Required when | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | always | `gemini` (default), `openai`, `openrouter` |
+| `LLM_PROVIDER` | always | `gemini` (default), `openai`, `openrouter`, `anthropic` |
 | `GOOGLE_API_KEY` | provider = `gemini` | |
 | `OPENAI_API_KEY` | provider = `openai` | |
 | `OPENROUTER_API_KEY` | provider = `openrouter` | |
+| `ANTHROPIC_API_KEY` | provider = `anthropic` | Claude Haiku 5.5 for most roles, Claude Sonnet 5.5 for the fixer and the optimizer harness |
 | `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2` | optional | LangSmith tracing |
 | `ATESOR_PLATFORM` | optional | `alpine` / `debian` (overridden by `--platform`) |
 | `ATESOR_TARGET` | optional | `qemu` (default) / `native` (overridden by `--target`). See [Native RISC-V machine](#native-risc-v-machine) for the SSH keys. |

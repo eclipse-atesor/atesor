@@ -415,9 +415,7 @@ class TestScoutNode(unittest.TestCase):
                 validator({"phases": [{"name": "b", "commands": []}]}).ok
             )
             self.assertFalse(
-                validator(
-                    {"phases": [{"name": "b", "commands": ["   "]}]}
-                ).ok
+                validator({"phases": [{"name": "b", "commands": ["   "]}]}).ok
             )
             self.assertFalse(
                 validator(
@@ -1428,22 +1426,33 @@ class TestCachedRecipeNode(unittest.TestCase):
         "build_system": "cmake",
         "last_built": "2026-10-02T15:35:35",
         "build_duration_seconds": 31.2,
-        "build_plan": {"phases": [
-            {"name": "deps", "commands": ["apt-get install -y cmake"]},
-            {"name": "empty", "commands": ["  "]},
-            {"name": "build", "commands": [
-                "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
-                "cmake --build build",
-            ]},
-        ]},
+        "build_plan": {
+            "phases": [
+                {"name": "deps", "commands": ["apt-get install -y cmake"]},
+                {"name": "empty", "commands": ["  "]},
+                {
+                    "name": "build",
+                    "commands": [
+                        "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
+                        "cmake --build build",
+                    ],
+                },
+            ]
+        },
         "dependencies": ["cmake"],
         "patches": ["--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-a\n+b\n"],
-        "artifacts": [{"type": "library_shared",
-                       "path": "/workspace/repos/b/build/libz.so.1"}],
+        "artifacts": [
+            {
+                "type": "library_shared",
+                "path": "/workspace/repos/b/build/libz.so.1",
+            }
+        ],
         "recipe_markdown": "# Recipe\n\n## Executive Summary\nThe zlib "
-                           "build succeeded on RISC-V. No patch was needed.",
-        "verification": {"status": "verified",
-                         "source_commit": "767c4c947852e143f582"},
+        "build succeeded on RISC-V. No patch was needed.",
+        "verification": {
+            "status": "verified",
+            "source_commit": "767c4c947852e143f582",
+        },
     }
 
     def test_recipe_becomes_the_plan(self) -> None:
@@ -1453,8 +1462,9 @@ class TestCachedRecipeNode(unittest.TestCase):
         state = _state(cached_recipe=dict(self._RECIPE))
         head = CommandResult("git", 0, "aaaaaaaaaaaaaaaa\n", "", 0.1)
         with (
-            mock.patch.object(graph, "apply_patch", return_value=True)
-            as patch,
+            mock.patch.object(
+                graph, "apply_patch", return_value=True
+            ) as patch,
             mock.patch.object(graph, "execute_command", return_value=head),
             mock.patch.object(graph, "invoke_llm") as llm,
         ):
@@ -1465,11 +1475,14 @@ class TestCachedRecipeNode(unittest.TestCase):
         self.assertEqual(plan.build_system, "cmake")
         self.assertEqual([p.name for p in plan.phases], ["deps", "build"])
         self.assertEqual([p.id for p in plan.phases], [1, 2])
-        self.assertEqual(plan.phases[1].commands[0],
-                         "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release")
+        self.assertEqual(
+            plan.phases[1].commands[0],
+            "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
+        )
         analysis = out.package_analysis
-        self.assertEqual(analysis.purpose,
-                         "The zlib build succeeded on RISC-V.")
+        self.assertEqual(
+            analysis.purpose, "The zlib build succeeded on RISC-V."
+        )
         self.assertFalse(analysis.llm_grounded)
         self.assertFalse(analysis.needs_custom_plan)
         self.assertEqual(analysis.expected_artifacts, ["libz.so.1"])
@@ -1478,16 +1491,18 @@ class TestCachedRecipeNode(unittest.TestCase):
         )
         self.assertEqual(out.patches_generated, self._RECIPE["patches"])
         note = out.context_cache["cached_recipe_note"]
-        self.assertIn("3 commands in 2 phases, 1 of 1 patches applied",
-                      note)
+        self.assertIn("3 commands in 2 phases, 1 of 1 patches applied", note)
         self.assertIn("verified on commit 767c4c947852", note)
 
     def test_recipe_without_commands_plans_again(self) -> None:
         """No command: the cache entry is dropped and nothing is set."""
         from src import graph
 
-        state = _state(cached_recipe={"build_plan": {"phases": [
-            {"name": "x", "commands": []}]}})
+        state = _state(
+            cached_recipe={
+                "build_plan": {"phases": [{"name": "x", "commands": []}]}
+            }
+        )
         out = graph.cached_recipe_node(state)
         self.assertIsNone(out.cached_recipe)
         self.assertIsNone(out.build_plan)
@@ -1522,10 +1537,10 @@ class TestOptimizeNode(unittest.TestCase):
             return {"status": "checked", "kind": "qemu", "variants": []}
 
         with (
-            mock.patch("src.optimize.run_optimization",
-                       side_effect=fake_run),
+            mock.patch("src.optimize.run_optimization", side_effect=fake_run),
             mock.patch.object(
-                graph, "_run_package_tests",
+                graph,
+                "_run_package_tests",
                 return_value={"status": "passed"},
             ) as run_tests,
             mock.patch.object(graph, "record_optimization") as record,
@@ -1552,8 +1567,10 @@ class TestOptimizeNode(unittest.TestCase):
 
         state = self._state()
         with (
-            mock.patch("src.optimize.run_optimization",
-                       side_effect=RuntimeError("disk full")),
+            mock.patch(
+                "src.optimize.run_optimization",
+                side_effect=RuntimeError("disk full"),
+            ),
             mock.patch.object(graph, "record_optimization"),
         ):
             out = graph.optimize_node(state)
@@ -1574,24 +1591,37 @@ class TestOptimizeNode(unittest.TestCase):
             AgentRole.PLANNER: ["planner"],
         }
         late = LLMCallOutcome(
-            data=None, used_fallback=False, attempts=1,
+            data=None,
+            used_fallback=False,
+            attempts=1,
             last_error="LLM invocation raised: LLM call timed out after 240s",
         )
-        answer = LLMCallOutcome(data={"source": "x"}, used_fallback=False,
-                                attempts=1)
-        wrong = LLMCallOutcome(data=None, used_fallback=False, attempts=3,
-                               last_error="the source calls no function")
+        answer = LLMCallOutcome(
+            data={"source": "x"}, used_fallback=False, attempts=1
+        )
+        wrong = LLMCallOutcome(
+            data=None,
+            used_fallback=False,
+            attempts=3,
+            last_error="the source calls no function",
+        )
         with (
-            mock.patch.object(graph, "get_model_pool_for_role",
-                              side_effect=lambda role: pools[role]),
-            mock.patch.object(graph, "llm_call_with_validation",
-                              side_effect=[late, answer, wrong]) as call,
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                side_effect=lambda role: pools[role],
+            ),
+            mock.patch.object(
+                graph,
+                "llm_call_with_validation",
+                side_effect=[late, answer, wrong],
+            ) as call,
         ):
             agent = graph._optimizer_agent(state)
-            data, _ = agent("harness-c", "write a harness",
-                            lambda data: None)
-            missed, error = agent("harness-c", "write a harness",
-                                  lambda data: None)
+            data, _ = agent("harness-c", "write a harness", lambda data: None)
+            missed, error = agent(
+                "harness-c", "write a harness", lambda data: None
+            )
         self.assertEqual(data, {"source": "x"})
         first, second, third = [c.kwargs for c in call.call_args_list]
         self.assertEqual(first["llm"], "coder")
@@ -1601,8 +1631,9 @@ class TestOptimizeNode(unittest.TestCase):
         self.assertEqual(second["fallback_llms"], [])
         # A wrong answer is no timeout: the other role is not asked.
         self.assertEqual(third["llm"], "coder")
-        self.assertEqual((missed, error),
-                         (None, "the source calls no function"))
+        self.assertEqual(
+            (missed, error), (None, "the source calls no function")
+        )
         self.assertEqual(call.call_count, 3)
         self.assertEqual(state.api_calls_made, 5)
 
@@ -1617,28 +1648,39 @@ class TestOptimizeNode(unittest.TestCase):
             AgentRole.PLANNER: ["planner"],
         }
         outcome = LLMCallOutcome(
-            data={"source": "x"}, used_fallback=False, attempts=2,
-            input_tokens=7, output_tokens=3, cost_usd=0.01,
+            data={"source": "x"},
+            used_fallback=False,
+            attempts=2,
+            input_tokens=7,
+            output_tokens=3,
+            cost_usd=0.01,
         )
         with (
-            mock.patch.object(graph, "get_model_pool_for_role",
-                              side_effect=lambda role: pools[role]),
-            mock.patch.object(graph, "llm_call_with_validation",
-                              return_value=outcome) as call,
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                side_effect=lambda role: pools[role],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ) as call,
         ):
             agent = graph._optimizer_agent(state)
-            data, error = agent("harness-c", "write a harness",
-                                lambda data: None)
-            agent("workload-program", "choose a run",
-                  lambda data: "bad binary")
+            data, error = agent(
+                "harness-c", "write a harness", lambda data: None
+            )
+            agent(
+                "workload-program", "choose a run", lambda data: "bad binary"
+            )
 
         self.assertEqual((data, error), ({"source": "x"}, ""))
         first = call.call_args_list[0].kwargs
         self.assertEqual(first["llm"], "coder")
         self.assertEqual(first["fallback_llms"], ["coder-2"])
         self.assertEqual(first["role"], "optimizer")
-        self.assertEqual(first["audit_metadata"]["phase"],
-                         "optimize-harness-c")
+        self.assertEqual(
+            first["audit_metadata"]["phase"], "optimize-harness-c"
+        )
         self.assertTrue(first["validator"]({}).ok)
         second = call.call_args_list[1].kwargs
         self.assertEqual(second["llm"], "planner")

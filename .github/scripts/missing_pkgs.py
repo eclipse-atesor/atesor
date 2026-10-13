@@ -60,9 +60,11 @@ def _stem_metadata(
         new_stem = raw.get("package_stem") or raw.get("stem") or name
         legacy_stem = raw.get("legacy_package_stem")
         legacy_unique = bool(raw.get("legacy_unique", False))
-        return str(new_stem), (
-            str(legacy_stem) if legacy_stem else None
-        ), legacy_unique
+        return (
+            str(new_stem),
+            (str(legacy_stem) if legacy_stem else None),
+            legacy_unique,
+        )
     if isinstance(raw, str):
         return raw, None, False
     return name, None, False
@@ -262,10 +264,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         declared_pairs = _apply_shard(declared_pairs, shard_index, shard_total)
     declared = [entry.name for entry in declared_pairs]
     built = _built_names(args.packages_dir, args.platform)
-    missing = [entry.name for entry in declared_pairs if not _is_built(
-        entry,
-        built,
-    )]
+    missing = [
+        entry.name
+        for entry in declared_pairs
+        if not _is_built(
+            entry,
+            built,
+        )
+    ]
 
     _emit(missing, args.format)
 

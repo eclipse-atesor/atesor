@@ -246,7 +246,7 @@ def profile_package(state: Any, language: str) -> PackageProfile:
         path = item.get("filepath") or item.get("path") or ""
         if not path.startswith(repo):
             continue
-        rel = posixpath.normpath(path[len(repo):])
+        rel = posixpath.normpath(path[len(repo) :])
         if not rel or rel.startswith(".."):
             continue
         kind = item.get("type")
@@ -289,7 +289,7 @@ def profile_package(state: Any, language: str) -> PackageProfile:
 # Runs in the sandbox. Argument: JSON {"tree", "files": {rel: base64}}.
 # Writes each file below the tree; a path that resolves outside the
 # tree (through ".." or a symlink) stops the program.
-_WRITE_PROGRAM = r'''
+_WRITE_PROGRAM = r"""
 import base64
 import json
 import os
@@ -305,13 +305,13 @@ for rel, encoded in SPEC["files"].items():
     with open(target, "wb") as handle:
         handle.write(base64.b64decode(encoded))
 sys.stdout.write("@@MARKER@@" + json.dumps({"written": len(SPEC["files"])}))
-'''
+"""
 
 # Runs in the sandbox. Argument: JSON {"tree", "libraries", "headers",
 # "prototypes"}. Lists the functions that the libraries export (nm),
 # finds the headers that declare most of them, and returns those
 # declarations and the include directories they need.
-_API_PROGRAM = r'''
+_API_PROGRAM = r"""
 import json
 import os
 import re
@@ -480,7 +480,7 @@ sys.stdout.write("@@MARKER@@" + json.dumps({
     "include_dirs": include_dirs[:8],
     "prototypes": prototypes,
 }))
-'''
+"""
 
 _MARKER = "ATESOR_WL_JSON "
 _WRITE_PROGRAM = _WRITE_PROGRAM.replace("@@MARKER@@", _MARKER)
@@ -490,7 +490,7 @@ _API_PROGRAM = _API_PROGRAM.replace("@@MARKER@@", _MARKER)
 # For each helper program it counts the library's exported functions
 # that the helper imports (dynamic link) or contains (static link, not
 # stripped). A helper with none does not exercise the library.
-_USES_PROGRAM = r'''
+_USES_PROGRAM = r"""
 import json
 import os
 import subprocess
@@ -537,7 +537,7 @@ for rel in SPEC["helpers"]:
 sys.stdout.write("@@MARKER@@" + json.dumps(
     {"exported": len(exported), "uses": uses}
 ) + "\n")
-'''.replace("@@MARKER@@", _MARKER)
+""".replace("@@MARKER@@", _MARKER)
 
 
 def _run_program(
@@ -562,7 +562,7 @@ def _run_program(
     for line in reversed((result.stdout or "").splitlines()):
         if line.startswith(_MARKER):
             try:
-                payload = json.loads(line[len(_MARKER):])
+                payload = json.loads(line[len(_MARKER) :])
             except ValueError:
                 break
             if isinstance(payload, dict):
@@ -631,8 +631,8 @@ def install_workload(
         done = _sh(command, tree, timeout=timeout, env=env)
         if not done.success:
             output = _tail(
-                "\n".join(part for part in (done.stdout, done.stderr)
-                          if part), 1800
+                "\n".join(part for part in (done.stdout, done.stderr) if part),
+                1800,
             )
             return f"`{command[:80]}` exited {done.exit_code}:\n{output}"
     return None
@@ -675,8 +675,7 @@ def baseline_job(
         if repo_path:
             command = rewrite_for_tree(command, repo_path, tree)
     else:
-        command = bench.render(workload, tree, input_path, output_path,
-                               paths)
+        command = bench.render(workload, tree, input_path, output_path, paths)
     cwd = f"{tree}/{workload.workdir}" if workload.workdir else tree
     job = {
         "cmd": command,
@@ -724,8 +723,14 @@ def _two_runs(
         fails, prints no check line, writes to stderr, or the two
         outputs differ.
     """
-    job = baseline_job(workload, ctx.tree, input_path or None,
-                       f"{ctx.root}/out-B", ctx.state.repo_path, ctx.paths)
+    job = baseline_job(
+        workload,
+        ctx.tree,
+        input_path or None,
+        f"{ctx.root}/out-B",
+        ctx.state.repo_path,
+        ctx.paths,
+    )
     payload = bench.run_jobs(
         {
             "jobs": {"B": job},
@@ -763,8 +768,11 @@ def _two_runs(
             return None, crash
         return None, reason
     complaint = next(
-        (_tail(run.get("err_tail"), 300) for run in runs
-         if run.get("err_tail")),
+        (
+            _tail(run.get("err_tail"), 300)
+            for run in runs
+            if run.get("err_tail")
+        ),
         "",
     )
     if complaint:
@@ -893,11 +901,16 @@ def check_duration(
     """
     if ctx.kind != "native":
         return None
-    job = baseline_job(workload, ctx.tree, None, None, ctx.state.repo_path,
-                       ctx.paths)
+    job = baseline_job(
+        workload, ctx.tree, None, None, ctx.state.repo_path, ctx.paths
+    )
     payload = bench.run_jobs(
-        {"jobs": {"B": job}, "rounds": 1, "seed": 3,
-         "timeout": bench.RUN_TIMEOUT},
+        {
+            "jobs": {"B": job},
+            "rounds": 1,
+            "seed": 3,
+            "timeout": bench.RUN_TIMEOUT,
+        },
         timeout=bench.RUN_TIMEOUT + 120,
     )
     if payload.get("error"):
@@ -967,7 +980,7 @@ def check_program_proposal(
     if "binary" in data and data["binary"] is None:
         if str(data.get("reason") or "").strip():
             return None
-        return "say why no program fits in \"reason\""
+        return 'say why no program fits in "reason"'
     binary = str(data.get("binary") or "").strip()
     command = str(data.get("command") or "").strip()
     if binary not in programs:
@@ -990,7 +1003,8 @@ def _description(data: Dict[str, Any]) -> str:
     size = data.get("input_mb")
     if isinstance(size, int) and not isinstance(size, bool):
         text = re.sub(
-            rf"\b{size}\s*(?:[KMG]i?B|megabytes?)\b(?:\s+of\b)?\s*", "",
+            rf"\b{size}\s*(?:[KMG]i?B|megabytes?)\b(?:\s+of\b)?\s*",
+            "",
             text,
             flags=re.IGNORECASE,
         )
@@ -1081,8 +1095,9 @@ def _headline(problem: str) -> str:
     """Return the most telling line of an error: a compiler error first."""
     lines = [line.strip() for line in problem.splitlines() if line.strip()]
     for line in lines:
-        if re.search(r"\berror\b|undefined reference|not found", line,
-                     re.IGNORECASE) and not line.startswith("`"):
+        if re.search(
+            r"\berror\b|undefined reference|not found", line, re.IGNORECASE
+        ) and not line.startswith("`"):
             return line
     return lines[0] if lines else ""
 
@@ -1303,14 +1318,16 @@ def c_harness_build(
     words = [bench.path_word(rel) for rel in shared or static]
     names = " ".join(words)
     if shared:
-        links = names + " " + " ".join(
-            f'-Wl,--disable-new-dtags,-rpath,"$PWD/$(dirname {word})"'
-            for word in words
+        links = (
+            names
+            + " "
+            + " ".join(
+                f'-Wl,--disable-new-dtags,-rpath,"$PWD/$(dirname {word})"'
+                for word in words
+            )
         )
     else:
-        links = (
-            f"-Wl,--start-group {names} -Wl,--end-group -lpthread -ldl"
-        )
+        links = f"-Wl,--start-group {names} -Wl,--end-group -lpthread -ldl"
     commands = [
         f"mkdir -p {HARNESS_DIR} && {compiler} -O2 -w "
         f"{includes} {source} -o {binary} {links} -lm"
@@ -1348,7 +1365,7 @@ def c_harness_prompt(
         f"directories):\n{headers}\n"
         "Copy those #include lines as they stand. The library's file "
         "name is not a header name: a library libfoo.so does not give "
-        "a header \"libfoo.h\". Include no other header of this "
+        'a header "libfoo.h". Include no other header of this '
         "library, only the C standard ones you need.\n"
         "Functions that the library exports, as its headers declare "
         f"them:\n{prototypes}\n\n"
@@ -1366,15 +1383,15 @@ def c_harness_prompt(
         + _ERROR_RULE
         + _VALUES_RULE
         + _LOSSY_RULE
-        + f"- At the end print exactly one line: \"{CHECK_PREFIX} <value>\", "
+        + f'- At the end print exactly one line: "{CHECK_PREFIX} <value>", '
         "where the value depends on the results of all N repetitions "
         "(for example a sum of output bytes, or a checksum the library "
         "computes). The same input and N must print the same line.\n"
         "- Use only the C standard library and this library's API. No "
         "threads, no clocks, no random numbers, no other files, no "
         "network.\n\n"
-        "Reply with JSON only. Put the whole file in \"source\" as one "
-        "JSON string (escape newlines as \\n and quotes as \\\"):\n"
+        'Reply with JSON only. Put the whole file in "source" as one '
+        'JSON string (escape newlines as \\n and quotes as \\"):\n'
         '{"input_kind": "binary", "input_mb": 8, '
         '"description": "<one line: what the harness does>", '
         '"source": "<the complete file>"}\n'
@@ -1393,9 +1410,7 @@ def _c_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
         f"the optimizer agent writes a {title} harness for "
         f"{len(api['prototypes'])} exported functions"
     )
-    source_path, build = c_harness_build(
-        api, ctx.package.libraries, language
-    )
+    source_path, build = c_harness_build(api, ctx.package.libraries, language)
     symbols = set(api["symbols"])
     prompt = c_harness_prompt(ctx.package, ctx.state.repo_name, api, language)
 
@@ -1426,8 +1441,9 @@ def _c_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
             source_language=language,
             origin="agent",
         )
-        error = install_workload(workload, ctx.tree, ctx.env,
-                                 ctx.build_timeout, ctx.paths)
+        error = install_workload(
+            workload, ctx.tree, ctx.env, ctx.build_timeout, ctx.paths
+        )
         if error:
             return None, f"the harness did not build: {error}"
         problem = size_by_iterations(ctx, workload)
@@ -1448,8 +1464,9 @@ def go_benchmarks(
     in every tree; the run uses a fixed iteration count, so B and V do
     the same work.
     """
-    listing = _sh("go test -list '^Benchmark' ./...", ctx.tree, timeout=900,
-                  env=ctx.env)
+    listing = _sh(
+        "go test -list '^Benchmark' ./...", ctx.tree, timeout=900, env=ctx.env
+    )
     if not listing.success:
         return None, "go test -list failed"
     package, count, names = None, 0, 0
@@ -1477,13 +1494,12 @@ def go_benchmarks(
         package=package,
         deterministic=False,
         workdir=workdir,
-        build=[
-            f"go test -c -o {bench.GOBENCH_BINARY} {shlex.quote(package)}"
-        ],
+        build=[f"go test -c -o {bench.GOBENCH_BINARY} {shlex.quote(package)}"],
         origin="upstream",
     )
-    error = install_workload(workload, ctx.tree, ctx.env, ctx.build_timeout,
-                             ctx.paths)
+    error = install_workload(
+        workload, ctx.tree, ctx.env, ctx.build_timeout, ctx.paths
+    )
     if error:
         return None, f"the benchmark binary did not build: {error}"
     problem = size_by_iterations(ctx, workload)
@@ -1497,15 +1513,18 @@ def _go_package_dir(
     ctx: WorkloadContext,
     package: str,
 ) -> Tuple[Optional[str], str]:
-    located = _sh(f"go list -f '{{{{.Dir}}}}' {shlex.quote(package)}",
-                  ctx.tree, env=ctx.env)
+    located = _sh(
+        f"go list -f '{{{{.Dir}}}}' {shlex.quote(package)}",
+        ctx.tree,
+        env=ctx.env,
+    )
     lines = (located.stdout or "").strip().splitlines()
     directory = lines[-1].strip() if located.success and lines else ""
     tree = ctx.tree.rstrip("/")
     if directory == tree:
         return None, ""
     if directory.startswith(tree + "/"):
-        return directory[len(tree) + 1:], ""
+        return directory[len(tree) + 1 :], ""
     return None, f"the package {package} is not in the tree"
 
 
@@ -1534,8 +1553,14 @@ def _go_packages(ctx: WorkloadContext) -> List[Dict[str, Any]]:
             files = int(parts[3])
         except ValueError:
             continue
-        packages.append({"import": parts[0], "name": parts[1],
-                         "dir": parts[2], "files": files})
+        packages.append(
+            {
+                "import": parts[0],
+                "name": parts[1],
+                "dir": parts[2],
+                "files": files,
+            }
+        )
     packages.sort(key=lambda item: (-item["files"], item["import"]))
     return packages[:3]
 
@@ -1546,12 +1571,16 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
         return None, "the module has no library package"
     docs = []
     for item in packages:
-        done = _sh(f"go doc -short {shlex.quote(item['import'])} | head -n 40",
-                   ctx.tree, env=ctx.env)
+        done = _sh(
+            f"go doc -short {shlex.quote(item['import'])} | head -n 40",
+            ctx.tree,
+            env=ctx.env,
+        )
         docs.append(
             f"package {item['name']} (import \"{item['import']}\"):\n"
-            + "\n".join("  " + line for line in
-                        (done.stdout or "").splitlines())
+            + "\n".join(
+                "  " + line for line in (done.stdout or "").splitlines()
+            )
         )
     ctx.say("the optimizer agent writes a Go benchmark for the package API")
     prompt = (
@@ -1574,12 +1603,12 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
         + _VALUES_RULE
         + _LOSSY_RULE
         + "- Check every result and call b.Fatal on an error.\n"
-        f"- After the loop call fmt.Println(\"{CHECK_PREFIX}\", value), "
+        f'- After the loop call fmt.Println("{CHECK_PREFIX}", value), '
         "where the value depends on the results of all b.N iterations "
         "and on nothing else.\n"
         "- No network, no other files, no time.Now, no math/rand, no "
         "goroutines that outlive the benchmark.\n\n"
-        "Reply with JSON only. Put the whole file in \"source\" as one "
+        'Reply with JSON only. Put the whole file in "source" as one '
         "JSON string:\n"
         '{"package": "<import path>", "input_kind": "json", '
         '"input_mb": 8, "description": "<one line>", "source": "<file>"}\n'
@@ -1600,8 +1629,9 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
         ):
             return f"the source has no func {GO_BENCHMARK}(b *testing.B)"
         name = by_import[data["package"]]["name"]
-        if not re.search(rf"^package\s+{re.escape(name)}(_test)?\s*$",
-                         source, re.MULTILINE):
+        if not re.search(
+            rf"^package\s+{re.escape(name)}(_test)?\s*$", source, re.MULTILINE
+        ):
             return f"the package clause must be {name}_test"
         return None
 
@@ -1634,8 +1664,9 @@ def _go_harness(ctx: WorkloadContext) -> Tuple[Optional[bench.Workload], str]:
             source_language="go",
             origin="agent",
         )
-        error = install_workload(workload, ctx.tree, ctx.env,
-                                 ctx.build_timeout, ctx.paths)
+        error = install_workload(
+            workload, ctx.tree, ctx.env, ctx.build_timeout, ctx.paths
+        )
         if error:
             return None, f"the benchmark did not build: {error}"
         problem = size_by_iterations(ctx, workload)
@@ -1653,8 +1684,12 @@ def _rust_crate(ctx: WorkloadContext) -> Tuple[Optional[Dict[str, Any]], str]:
     A workspace can hold several crates; a library target at the tree
     root wins over one in a subdirectory.
     """
-    done = _sh("cargo metadata --no-deps --format-version 1", ctx.tree,
-               timeout=600, env=ctx.env)
+    done = _sh(
+        "cargo metadata --no-deps --format-version 1",
+        ctx.tree,
+        timeout=600,
+        env=ctx.env,
+    )
     try:
         metadata = json.loads(done.stdout or "")
     except ValueError:
@@ -1726,19 +1761,19 @@ def _rust_harness(
         + "- Read the input once, then do the crate's main work N times.\n"
         "- Check every result; on an error print it to stderr and call "
         "std::process::exit(1).\n"
-        f"- At the end print one line: println!(\"{CHECK_PREFIX} {{}}\", "
+        f'- At the end print one line: println!("{CHECK_PREFIX} {{}}", '
         "value), where the value depends on the results of all N "
         "repetitions.\n"
         "- Use only std and this crate. No threads, no time, no random "
         "numbers, no network.\n\n"
-        "Reply with JSON only. Put the whole file in \"source\" as one "
+        'Reply with JSON only. Put the whole file in "source" as one '
         "JSON string:\n"
         '{"input_kind": "text", "input_mb": 8, "description": "<one '
         'line>", "source": "<file>"}\n'
         f"input_kind is one of {list(bench.INPUT_KINDS)} or null."
     )
     tree = ctx.tree.rstrip("/")
-    rel_dir = crate["dir"][len(tree):].lstrip("/")
+    rel_dir = crate["dir"][len(tree) :].lstrip("/")
     source_rel = posixpath.join(rel_dir, "examples", f"{RUST_EXAMPLE}.rs")
 
     def check(data: Dict[str, Any]) -> Optional[str]:
@@ -1771,8 +1806,9 @@ def _rust_harness(
             source_language="rust",
             origin="agent",
         )
-        error = install_workload(workload, ctx.tree, ctx.env,
-                                 ctx.build_timeout, ctx.paths)
+        error = install_workload(
+            workload, ctx.tree, ctx.env, ctx.build_timeout, ctx.paths
+        )
         if error:
             return None, f"the example did not build: {error}"
         problem = size_by_iterations(ctx, workload)
@@ -1900,7 +1936,9 @@ def choose_workload(
         "harness": lambda: {
             "go": _go_harness,
             "rust": _rust_harness,
-        }.get(ctx.package.language, _c_harness)(ctx),
+        }.get(
+            ctx.package.language, _c_harness
+        )(ctx),
         "helper-program": lambda: _helper_workload(ctx),
         "tests": lambda: _test_workload(ctx),
     }
@@ -1932,9 +1970,11 @@ def describe(workload: bench.Workload) -> str:
         "gobench": "Go benchmark",
         "tests": "package tests (weak signal)",
     }.get(workload.mode, workload.mode)
-    size = f", {workload.input_mb} MiB {workload.input_kind} input" if (
-        workload.input_kind
-    ) else ""
+    size = (
+        f", {workload.input_mb} MiB {workload.input_kind} input"
+        if (workload.input_kind)
+        else ""
+    )
     count = f", N={workload.iterations}" if workload.iterations else ""
     seconds = (
         f", {workload.run_seconds:.2f} s per run"

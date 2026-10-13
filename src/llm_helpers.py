@@ -90,6 +90,10 @@ class LLMCallOutcome:
 def extract_content(content: Any) -> str:
     """Turn an LLM message body into a plain string.
 
+    A part with a ``type`` other than ``text`` (for example a Claude
+    ``thinking`` block) holds no answer text and is skipped: its dict
+    would corrupt the JSON slice of the reply.
+
     Args:
         content: A message body (``str``, ``list[dict]``, or other).
 
@@ -106,6 +110,9 @@ def extract_content(content: Any) -> str:
                 else str(item)
             )
             for item in content
+            if not (
+                isinstance(item, dict) and item.get("type", "text") != "text"
+            )
         )
     return str(content)
 
@@ -202,9 +209,7 @@ def llm_call_with_validation(
     max_retries: int = 2,
     critique_template: str = _DEFAULT_CRITIQUE,
     timeout: int = LLM_WALL_TIMEOUT,
-    fallback_llms: Optional[
-        list
-    ] = None,
+    fallback_llms: Optional[list] = None,
     rotate_on_timeout: bool = False,
 ) -> LLMCallOutcome:
     """Call ``llm`` with ``prompt``, parse, validate, retry, fall back.
@@ -358,9 +363,8 @@ def llm_call_with_validation(
             # Provider-side error → try next model in the pool (if any).
             # Free rotation: does not consume critique-retry budget.
             timed_out = rotate_on_timeout and isinstance(exc, TimeoutError)
-            if (
-                (_is_provider_error(exc) or timed_out)
-                and pool_idx + 1 < len(llm_pool)
+            if (_is_provider_error(exc) or timed_out) and pool_idx + 1 < len(
+                llm_pool
             ):
                 pool_idx += 1
                 active_llm = llm_pool[pool_idx]
@@ -397,7 +401,7 @@ def llm_call_with_validation(
             agent_role=role,
             prompt=_format_messages_for_log(messages),
             response=raw,
-            model=getattr(active_llm, "model_name", "unknown"),
+            model=_model_id(active_llm),
             cost_usd=call_cost,
             tokens_in=tokens_in,
             tokens_out=tokens_out,

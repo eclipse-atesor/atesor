@@ -376,9 +376,7 @@ class TestAutoLearning:
             # A command of its own: the fixture example already holds
             # "go build .", and scout dedupe matches on commands.
             "plan": {
-                "phases": [
-                    {"name": "build", "commands": ["go build ./cmd/x"]}
-                ]
+                "phases": [{"name": "build", "commands": ["go build ./cmd/x"]}]
             },
             "reasoning": "same payload",
         }
@@ -614,14 +612,20 @@ class TestRecipeCache:
             build_duration_seconds=1.0,
         )
 
-        assert get_cached_recipe(
-            "cli",
-            repo_url="https://github.com/cli/cli",
-        ) is None
-        assert get_cached_recipe(
-            "cli",
-            repo_url="https://GITHUB.com/hetznercloud/CLI/",
-        ) is not None
+        assert (
+            get_cached_recipe(
+                "cli",
+                repo_url="https://github.com/cli/cli",
+            )
+            is None
+        )
+        assert (
+            get_cached_recipe(
+                "cli",
+                repo_url="https://GITHUB.com/hetznercloud/CLI/",
+            )
+            is not None
+        )
         assert get_cached_recipe("cli") is not None
 
     def test_recipe_write_error_keeps_original_cache(self) -> None:
@@ -780,8 +784,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
             with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
-                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
-                                       target_cache):
+                with mock.patch.object(
+                    memory, "RECIPE_CACHE_PATH", target_cache
+                ):
                     memory._seed_bundled_data()
 
         self.assertTrue((target_examples / "scout_examples.json").exists())
@@ -801,8 +806,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
             with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
-                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
-                                       target_cache):
+                with mock.patch.object(
+                    memory, "RECIPE_CACHE_PATH", target_cache
+                ):
                     memory._seed_bundled_data()
 
         self.assertEqual(
@@ -913,8 +919,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
     def test_empty_memory_has_no_relevant_examples_or_prompt(self) -> None:
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
 
-        self.assertEqual(memory.get_relevant_examples({"build_system": "go"}),
-                         [])
+        self.assertEqual(
+            memory.get_relevant_examples({"build_system": "go"}), []
+        )
         self.assertEqual(memory.format_examples_for_prompt([]), "")
 
     def test_profile_failure_still_scores_examples(self) -> None:
@@ -1103,9 +1110,7 @@ class TestMemoryEdgeCases(unittest.TestCase):
             builder._is_duplicate(
                 {
                     "build_system": "go",
-                    "phases": [
-                        {"name": "build", "commands": ["go build"]}
-                    ],
+                    "phases": [{"name": "build", "commands": ["go build"]}],
                     "sandbox": "alpine-riscv64",
                 }
             )
@@ -1275,8 +1280,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(memory, "load_recipe_cache",
-                               return_value=cache):
+        with mock.patch.object(
+            memory, "load_recipe_cache", return_value=cache
+        ):
             recipe = memory.get_cached_recipe(
                 "pkg", architecture="riscv64", sandbox="alpine-riscv64"
             )
@@ -1304,8 +1310,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
         }
 
         with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
-            with mock.patch.object(memory, "load_recipe_cache",
-                                   return_value=legacy_cache):
+            with mock.patch.object(
+                memory, "load_recipe_cache", return_value=legacy_cache
+            ):
                 saved = memory.save_to_recipe_cache(
                     repo_name="pkg",
                     repo_url="https://github.com/test/pkg",
@@ -1328,8 +1335,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         fake_memory = object()
         memory.MEMORY_INSTANCES.clear()
-        with mock.patch.object(memory, "AgentMemory",
-                               return_value=fake_memory) as mock_agent:
+        with mock.patch.object(
+            memory, "AgentMemory", return_value=fake_memory
+        ) as mock_agent:
             memory.reload_agent_memory("fresh")
 
         self.assertIs(memory.MEMORY_INSTANCES["fresh"], fake_memory)
@@ -1364,8 +1372,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         output_dir = self.test_dir / "output"
         recipe = {"build_system": "go", "build_plan": {"phases": []}}
-        with mock.patch.object(memory, "get_cached_recipe",
-                               return_value=recipe):
+        with mock.patch.object(
+            memory, "get_cached_recipe", return_value=recipe
+        ):
             path = memory.materialize_cached_recipe("pkg", str(output_dir))
 
         self.assertIsNotNone(path)
@@ -1374,8 +1383,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
     def test_materialize_returns_none_on_write_error(self) -> None:
         import src.memory as memory
 
-        with mock.patch.object(memory.os, "makedirs",
-                               side_effect=OSError("denied")):
+        with mock.patch.object(
+            memory.os, "makedirs", side_effect=OSError("denied")
+        ):
             path = memory.materialize_cached_recipe(
                 "pkg", str(self.test_dir / "blocked"), {"build_system": "go"}
             )
@@ -1412,12 +1422,15 @@ class TestRecordOptimization(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp_dir, True)
         self.cache_path = self.tmp_dir / "recipe_cache.json"
         entry = {"build_plan": {"phases": []}, "build_system": "cmake"}
-        self.cache_path.write_text(json.dumps({
-            "version": "2.0",
-            "packages": {"zlib": {"debian-riscv64": entry}},
-        }))
-        patch = mock.patch.object(memory, "RECIPE_CACHE_PATH",
-                                  self.cache_path)
+        self.cache_path.write_text(
+            json.dumps(
+                {
+                    "version": "2.0",
+                    "packages": {"zlib": {"debian-riscv64": entry}},
+                }
+            )
+        )
+        patch = mock.patch.object(memory, "RECIPE_CACHE_PATH", self.cache_path)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -1428,17 +1441,24 @@ class TestRecordOptimization(unittest.TestCase):
             "workload": {"description": "compress"},
             "accepted": "v6-pgo",
             "accepted_ratio": 0.88,
-            "variants": [{"variant": {
-                "vid": "v6-pgo",
-                "label": "Tune-6",
-                "technique": "profile-guided optimization",
-                "title": "GCC -O3 + PGO",
-                "compiler": "gcc",
-                "flags": ["-O3", "-fprofile-use=/w/x.opt/pgo",
-                          "-fprofile-prefix-path=/w/x.opt/v6-pgo"],
-                "env": {"CCACHE_DISABLE": "1"},
-                "pgo": "use",
-            }}],
+            "variants": [
+                {
+                    "variant": {
+                        "vid": "v6-pgo",
+                        "label": "Tune-6",
+                        "technique": "profile-guided optimization",
+                        "title": "GCC -O3 + PGO",
+                        "compiler": "gcc",
+                        "flags": [
+                            "-O3",
+                            "-fprofile-use=/w/x.opt/pgo",
+                            "-fprofile-prefix-path=/w/x.opt/v6-pgo",
+                        ],
+                        "env": {"CCACHE_DISABLE": "1"},
+                        "pgo": "use",
+                    }
+                }
+            ],
         }
         result.update(overrides)
         return result
@@ -1448,9 +1468,11 @@ class TestRecordOptimization(unittest.TestCase):
         from src.memory import record_optimization
 
         machine = {"core_name": "sifive-p550", "label": "rv64gc+zba+zbb"}
-        self.assertTrue(record_optimization(
-            "zlib", self._result(), machine, sandbox="debian-riscv64"
-        ))
+        self.assertTrue(
+            record_optimization(
+                "zlib", self._result(), machine, sandbox="debian-riscv64"
+            )
+        )
         cache = json.loads(self.cache_path.read_text())
         stored = cache["packages"]["zlib"]["debian-riscv64"]
         record = stored["optimizations"]["sifive-p550"]
@@ -1458,8 +1480,9 @@ class TestRecordOptimization(unittest.TestCase):
         self.assertEqual(record["status"], "accepted")
         self.assertEqual(record["ratio"], 0.88)
         self.assertEqual(record["variant"]["label"], "Tune-6")
-        self.assertEqual(record["variant"]["technique"],
-                         "profile-guided optimization")
+        self.assertEqual(
+            record["variant"]["technique"], "profile-guided optimization"
+        )
         self.assertEqual(record["variant"]["flags"], ["-O3"])
         self.assertEqual(record["variant"]["env"], {})
         self.assertTrue(record["variant"]["pgo"])
@@ -1483,23 +1506,28 @@ class TestRecordOptimization(unittest.TestCase):
             ("zlib", None),
         )
         for name, result in cases:
-            self.assertFalse(record_optimization(
-                name, result, {}, sandbox="debian-riscv64"
-            ))
+            self.assertFalse(
+                record_optimization(name, result, {}, sandbox="debian-riscv64")
+            )
         self.assertEqual(self.cache_path.read_text(), before)
 
     def test_result_without_accepted_variant(self) -> None:
         """A measured run that accepted nothing is still recorded."""
         from src.memory import record_optimization
 
-        self.assertTrue(record_optimization(
-            "zlib",
-            self._result(status="no gain", accepted=None,
-                         accepted_ratio=None),
-            {"label": "rv64gc"}, sandbox="debian-riscv64",
-        ))
+        self.assertTrue(
+            record_optimization(
+                "zlib",
+                self._result(
+                    status="no gain", accepted=None, accepted_ratio=None
+                ),
+                {"label": "rv64gc"},
+                sandbox="debian-riscv64",
+            )
+        )
         cache = json.loads(self.cache_path.read_text())
-        record = cache["packages"]["zlib"]["debian-riscv64"][
-            "optimizations"]["rv64gc"]
+        record = cache["packages"]["zlib"]["debian-riscv64"]["optimizations"][
+            "rv64gc"
+        ]
         self.assertIsNone(record["accepted"])
         self.assertNotIn("variant", record)

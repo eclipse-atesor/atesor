@@ -165,7 +165,7 @@
         "actions": [
           {
             "type": "command",
-            "command": "grep -r 'package main' /workspace/repos/{repo_name} --include='*.go' | head -n 5"
+            "command": "grep -rl 'package main' /workspace/repos/{repo_name} --include='*.go'"
           }
         ],
         "corrected_command": "go build -buildvcs=false -o {binary} ./cmd/{name}"
@@ -189,7 +189,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apk update && apk add go"
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add go"
           }
         ]
       },
@@ -344,7 +348,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends autoconf automake libtool"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends autoconf automake libtool"
           },
           {
             "type": "command",
@@ -376,7 +384,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apk update && apk add automake autoconf libtool"
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add automake autoconf libtool"
           },
           {
             "type": "command",
@@ -423,7 +435,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "if [ -f go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' go.mod; fi; if [ -f v2/go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' v2/go.mod; fi"
+            "command": "sed -i '/github.com\\/chainreactors\\/rem.*=>/d' go.mod"
+          },
+          {
+            "type": "command",
+            "command": "cd v2 && sed -i '/github.com\\/chainreactors\\/rem.*=>/d' go.mod"
           }
         ]
       },
@@ -447,7 +463,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpcap-dev"
           }
         ]
       },
@@ -471,15 +491,31 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends wget ca-certificates"
+            "command": "apt-get update"
           },
           {
             "type": "command",
-            "command": "wget -q https://go.dev/dl/go1.26.4.linux-riscv64.tar.gz && tar -C /usr/local -xzf go1.26.4.linux-riscv64.tar.gz && rm go1.26.4.linux-riscv64.tar.gz"
+            "command": "apt-get install -y --no-install-recommends wget ca-certificates"
           },
           {
             "type": "command",
-            "command": "export PATH=/usr/local/go/bin:$PATH && go version && go mod tidy"
+            "command": "wget -q https://go.dev/dl/go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "tar -C /usr/local -xzf go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "rm go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "go version"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
           }
         ]
       },
@@ -560,7 +596,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libncurses-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libncurses-dev"
           },
           {
             "type": "command",
@@ -588,7 +628,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends git"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends git"
           }
         ]
       },
@@ -612,7 +656,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends bison flex"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends bison flex"
           }
         ]
       },
@@ -636,7 +684,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpcap-dev"
           }
         ]
       },
@@ -660,7 +712,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libyuv-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libyuv-dev"
           }
         ]
       },
@@ -684,7 +740,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends gettext"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends gettext"
           }
         ]
       },
@@ -693,6 +753,34 @@
       "source": "auto",
       "timestamp": "2026-07-07",
       "sandbox": "debian-riscv64"
+    },
+    {
+      "name": "Auto: grep - Install autotools, gettext, git and rela",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "grep",
+      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 128\\)\\ \\-\\ fatal:\\ Unable\\ to\\ find\\ current\\ rev",
+      "fix": {
+        "strategy": "Install autotools, gettext, git and related tools, then run ./bootstrap so it can fetch gnulib and generate configure, then run ./configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends git autoconf automake libtool gettext autopoint pkg-config make gcc libc6-dev perl texinfo rsync wget xz-utils bison gperf m4"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from grep.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-015",
+      "source": "auto",
+      "timestamp": "2026-10-13"
     }
   ]
 }

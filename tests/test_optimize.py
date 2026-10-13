@@ -251,12 +251,21 @@ def _state(build_system="cmake", verified=True, tests="passed"):
         "status": "verified" if verified else "unverified"
     }
     state.curated_artifacts = [
-        {"filepath": f"{REPO}/build/minigzip", "type": "binary",
-         "role": "primary"},
-        {"filepath": f"{REPO}/build/libz.so.1", "type": "library_shared",
-         "role": "primary"},
-        {"filepath": f"{REPO}/build/libz.a", "type": "library_static",
-         "role": "primary"},
+        {
+            "filepath": f"{REPO}/build/minigzip",
+            "type": "binary",
+            "role": "primary",
+        },
+        {
+            "filepath": f"{REPO}/build/libz.so.1",
+            "type": "library_shared",
+            "role": "primary",
+        },
+        {
+            "filepath": f"{REPO}/build/libz.a",
+            "type": "library_static",
+            "role": "primary",
+        },
         {"filepath": "/usr/local/bin/outside", "type": "binary"},
     ]
     state.package_tests = {
@@ -290,13 +299,37 @@ def _elf(code: bytes, arch="rv64i2p1_m2p0_zba1p0", unaligned=1) -> bytes:
     header = struct.pack(
         "<16sHHIQQQIHHHHHH",
         b"\x7fELF\x02\x01\x01" + b"\0" * 9,
-        1, 243, 1, 0, 0, shoff, 0, 64, 0, 0, 64, 3, 0,
+        1,
+        243,
+        1,
+        0,
+        0,
+        shoff,
+        0,
+        64,
+        0,
+        0,
+        64,
+        3,
+        0,
     )
     null = b"\0" * 64
-    text = struct.pack("<IIQQQQIIQQ", 0, 1, 6, 0, text_offset, len(code),
-                       0, 0, 2, 0)
-    attr = struct.pack("<IIQQQQIIQQ", 0, 0x70000003, 0, 0, attr_offset,
-                       len(attributes), 0, 0, 1, 0)
+    text = struct.pack(
+        "<IIQQQQIIQQ", 0, 1, 6, 0, text_offset, len(code), 0, 0, 2, 0
+    )
+    attr = struct.pack(
+        "<IIQQQQIIQQ",
+        0,
+        0x70000003,
+        0,
+        0,
+        attr_offset,
+        len(attributes),
+        0,
+        0,
+        1,
+        0,
+    )
     return header + code + attributes + null + text + attr
 
 
@@ -347,8 +380,9 @@ class TestLadder(unittest.TestCase):
         self.assertEqual(
             by_id["tune1"].flags, ["-mtune=sifive-p550", "-mstrict-align"]
         )
-        self.assertEqual(by_id["tune1"].value,
-                         "-mtune=sifive-p550 -mstrict-align")
+        self.assertEqual(
+            by_id["tune1"].value, "-mtune=sifive-p550 -mstrict-align"
+        )
         self.assertEqual(by_id["tune2"].flags[-1], "-march=rv64gc_zba_zbb")
         self.assertEqual(by_id["tune2"].value, "-march=rv64gc_zba_zbb")
         self.assertEqual(by_id["tune3"].flags[-1], "-O3")
@@ -357,8 +391,12 @@ class TestLadder(unittest.TestCase):
         self.assertEqual(by_id["tune5"].value, "clang-19")
         self.assertEqual(
             by_id["tune5"].flags,
-            ["-mtune=sifive-p550", "-mstrict-align",
-             "-march=rv64gc_zba_zbb", "-O3"],
+            [
+                "-mtune=sifive-p550",
+                "-mstrict-align",
+                "-march=rv64gc_zba_zbb",
+                "-O3",
+            ],
         )
         self.assertEqual(
             [v.keeps for v in ladder],
@@ -372,8 +410,9 @@ class TestLadder(unittest.TestCase):
         )
         ladder = c_ladder(profile)
         techniques = [v.technique for v in ladder]
-        self.assertEqual(techniques[:3],
-                         ["core tuning", "machine ISA", "vector ISA"])
+        self.assertEqual(
+            techniques[:3], ["core tuning", "machine ISA", "vector ISA"]
+        )
         vector = ladder[2]
         self.assertEqual(vector.value, "-march=rv64gcv_zba_zbb")
         self.assertEqual(vector.note, "VLEN 256")
@@ -381,8 +420,9 @@ class TestLadder(unittest.TestCase):
         self.assertIn("-march=rv64gcv_zba_zbb", o3.flags)
         self.assertNotIn("-march=rv64gc_zba_zbb", o3.flags)
         self.assertIn("-march=rv64gcv_zba_zbb", ladder[-1].flags)
-        self.assertLessEqual(len(build_ladder(profile, "c")),
-                             optimize.MAX_VARIANTS - 1)
+        self.assertLessEqual(
+            len(build_ladder(profile, "c")), optimize.MAX_VARIANTS - 1
+        )
 
     def test_qemu_max_and_unknown_core_drop_steps(self) -> None:
         """No tune for an unknown core; no ISA step under QEMU's max."""
@@ -404,8 +444,9 @@ class TestLadder(unittest.TestCase):
         """Go gets rva22u64 with the Zbs note; Rust gets the P550 CPU."""
         go = go_ladder(_profile())
         self.assertEqual(go[0].env, {"GORISCV64": "rva22u64"})
-        self.assertEqual((go[0].label, go[0].technique),
-                         ("Tune-1", "machine ISA"))
+        self.assertEqual(
+            (go[0].label, go[0].technique), ("Tune-1", "machine ISA")
+        )
         self.assertIn("Zbs", go[0].note)
         self.assertEqual(go_ladder(_profile(toolchains={})), [])
         rust = rust_ladder(_profile())
@@ -414,41 +455,52 @@ class TestLadder(unittest.TestCase):
         )
         self.assertEqual(rust[0].technique, "target CPU")
         self.assertEqual(rust[1].env["CARGO_PROFILE_RELEASE_LTO"], "fat")
-        self.assertEqual(
-            rust[1].env["RUSTFLAGS"], "-C target-cpu=sifive-p550"
-        )
-        self.assertEqual((rust[1].label, rust[1].keeps),
-                         ("Tune-2", "Tune-1"))
+        self.assertEqual(rust[1].env["RUSTFLAGS"], "-C target-cpu=sifive-p550")
+        self.assertEqual((rust[1].label, rust[1].keeps), ("Tune-2", "Tune-1"))
         self.assertEqual(language_of("cargo"), "rust")
         self.assertEqual(language_of("autotools"), "c")
         self.assertEqual(len(build_ladder(_profile(), "c")), 5)
 
     def test_unconfirmed_names_its_reason(self) -> None:
         """Only a second timing that disagrees "did not hold"."""
-        budget = {"variant": {"label": "Tune-6"}, "verdict": "not confirmed",
-                  "ratio": 0.5343, "unchecked": "time",
-                  "reason": "the time budget ended before the second check"}
-        held = {"variant": {"label": "Tune-3"}, "verdict": "not confirmed",
-                "ratio": 0.9, "second_check": {"verdict": "no change"},
-                "reason": "the gain did not hold in a second code layout"}
-        no_base = {"verdict": "not confirmed", "ratio": 0.9,
-                   "second_check": {"verdict": None},
-                   "reason": "no second-layout baseline: build failed"}
+        budget = {
+            "variant": {"label": "Tune-6"},
+            "verdict": "not confirmed",
+            "ratio": 0.5343,
+            "unchecked": "time",
+            "reason": "the time budget ended before the second check",
+        }
+        held = {
+            "variant": {"label": "Tune-3"},
+            "verdict": "not confirmed",
+            "ratio": 0.9,
+            "second_check": {"verdict": "no change"},
+            "reason": "the gain did not hold in a second code layout",
+        }
+        no_base = {
+            "verdict": "not confirmed",
+            "ratio": 0.9,
+            "second_check": {"verdict": None},
+            "reason": "no second-layout baseline: build failed",
+        }
         self.assertEqual(
             optimize.tune_result(budget),
             "46.6% faster (not confirmed: the time budget ended before "
             "the second check)",
         )
-        self.assertEqual(optimize.tune_result(held),
-                         "10.0% faster (did not hold in the second check)")
+        self.assertEqual(
+            optimize.tune_result(held),
+            "10.0% faster (did not hold in the second check)",
+        )
         self.assertEqual(
             optimize.tune_result(no_base),
             "10.0% faster (not confirmed: no second-layout baseline: build "
             "failed)",
         )
         self.assertEqual(
-            optimize.headline({"status": "not confirmed",
-                               "variants": [held, budget]}),
+            optimize.headline(
+                {"status": "not confirmed", "variants": [held, budget]}
+            ),
             "NO: no faster tune was confirmed (best: Tune-6, 46.6% faster "
             "(not confirmed: the time budget ended before the second "
             "check))",
@@ -459,44 +511,71 @@ class TestLadder(unittest.TestCase):
         cases = [
             ({"verdict": "faster", "ratio": 0.892}, "10.8% faster"),
             ({"verdict": "slower", "ratio": 1.05}, "5.0% slower"),
-            ({"verdict": "no change", "ratio": 0.977},
-             "2.3% faster (inside the noise)"),
-            ({"verdict": "not confirmed", "ratio": 0.9},
-             "10.0% faster (did not hold in the second check)"),
-            ({"verdict": "same as tune2", "same_as_label": "Tune-2",
-              "ratio": 0.97}, "same code as Tune-2, 3.0% faster"),
+            (
+                {"verdict": "no change", "ratio": 0.977},
+                "2.3% faster (inside the noise)",
+            ),
+            (
+                {"verdict": "not confirmed", "ratio": 0.9},
+                "10.0% faster (did not hold in the second check)",
+            ),
+            (
+                {
+                    "verdict": "same as tune2",
+                    "same_as_label": "Tune-2",
+                    "ratio": 0.97,
+                },
+                "same code as Tune-2, 3.0% faster",
+            ),
             ({"verdict": "measurement failed"}, "not timed"),
             ({"verdict": "skipped"}, "skipped"),
-            ({"verdict": "no effect"},
-             "no effect (same code as the baseline)"),
+            (
+                {"verdict": "no effect"},
+                "no effect (same code as the baseline)",
+            ),
             ({"verdict": "checked"}, "built and checked (QEMU: no time)"),
         ]
         for record, text in cases:
             with self.subTest(verdict=record["verdict"]):
                 self.assertEqual(optimize.tune_result(record), text)
-        accepted = {"status": "accepted", "accepted_label": "Tune-6",
-                    "accepted_title": "clang-19 -O3 + PGO",
-                    "accepted_ratio": 0.892}
+        accepted = {
+            "status": "accepted",
+            "accepted_label": "Tune-6",
+            "accepted_title": "clang-19 -O3 + PGO",
+            "accepted_ratio": 0.892,
+        }
         self.assertEqual(
             optimize.headline(accepted),
             "YES: Tune-6 (clang-19 -O3 + PGO) is 10.8% faster than the "
             "verified build",
         )
-        no_gain = {"status": "no gain", "variants": [
-            {"variant": {"label": "Tune-1"}, "verdict": "no change",
-             "ratio": 1.017},
-            {"variant": {"label": "Tune-2"}, "verdict": "no change",
-             "ratio": 0.988},
-        ]}
+        no_gain = {
+            "status": "no gain",
+            "variants": [
+                {
+                    "variant": {"label": "Tune-1"},
+                    "verdict": "no change",
+                    "ratio": 1.017,
+                },
+                {
+                    "variant": {"label": "Tune-2"},
+                    "verdict": "no change",
+                    "ratio": 0.988,
+                },
+            ],
+        }
         self.assertEqual(
             optimize.headline(no_gain),
             "NO: no tune was clearly faster than the verified build "
             "(best: Tune-2, 1.2% faster (inside the noise))",
         )
-        self.assertTrue(optimize.headline({"status": "checked"}).startswith(
-            "NOT TIMED:"))
-        self.assertEqual(optimize.headline({"status": "error"}),
-                         "NO: performance mode stopped with an error")
+        self.assertTrue(
+            optimize.headline({"status": "checked"}).startswith("NOT TIMED:")
+        )
+        self.assertEqual(
+            optimize.headline({"status": "error"}),
+            "NO: performance mode stopped with an error",
+        )
 
     def test_build_flags_from_the_wrapper_log(self) -> None:
         """Source compiles count; configure checks do not."""
@@ -508,10 +587,12 @@ class TestLadder(unittest.TestCase):
             "-shared -o libz.so a.o d.o",
         ]
         flags = build_flags(lines)
-        self.assertEqual(flags, {"compiles": 2, "levels": ["-O3"],
-                                 "lto": False})
-        mixed = build_flags(lines + ["-Os -flto=auto -c small.c -o s.o",
-                                     "-c plain.c -o p.o"])
+        self.assertEqual(
+            flags, {"compiles": 2, "levels": ["-O3"], "lto": False}
+        )
+        mixed = build_flags(
+            lines + ["-Os -flto=auto -c small.c -o s.o", "-c plain.c -o p.o"]
+        )
         self.assertEqual(mixed["levels"], ["-O0", "-O3", "-Os"])
         self.assertTrue(mixed["lto"])
         self.assertEqual(build_flags(['-c "odd.c'])["compiles"], 1)
@@ -524,8 +605,10 @@ class TestLadder(unittest.TestCase):
             "-O3 -c /usr/share/other/probe.c -o p.o",
             "-O3 -DNDEBUG -c /w/zlib.opt/base/adler32.c -o a.o",
         ]
-        self.assertEqual(build_flags(cmake, "/w/zlib.opt/base"),
-                         {"compiles": 1, "levels": ["-O3"], "lto": False})
+        self.assertEqual(
+            build_flags(cmake, "/w/zlib.opt/base"),
+            {"compiles": 1, "levels": ["-O3"], "lto": False},
+        )
         self.assertEqual(build_flags(cmake)["compiles"], 2)
 
     def test_redundant_tunes(self) -> None:
@@ -537,14 +620,16 @@ class TestLadder(unittest.TestCase):
         self.assertEqual(sorted(reasons), ["tune3", "tune4"])
         self.assertIn("all 15 sources with -O3", reasons["tune3"])
         self.assertEqual(
-            redundant_tunes(ladder, {"compiles": 15,
-                                     "levels": ["-O2", "-O3"],
-                                     "lto": False}),
+            redundant_tunes(
+                ladder,
+                {"compiles": 15, "levels": ["-O2", "-O3"], "lto": False},
+            ),
             {},
         )
         self.assertEqual(
-            redundant_tunes(ladder, {"compiles": 0, "levels": [],
-                                     "lto": False}),
+            redundant_tunes(
+                ladder, {"compiles": 0, "levels": [], "lto": False}
+            ),
             {},
         )
 
@@ -553,35 +638,49 @@ class TestLadder(unittest.TestCase):
         measured = {
             "verdict": "faster",
             "ratio": 0.892,
-            "measurement": {"comparison": {"ci_low": 0.89,
-                                           "ci_high": 0.894}},
+            "measurement": {"comparison": {"ci_low": 0.89, "ci_high": 0.894}},
         }
         self.assertEqual(
             optimize.result_text(measured),
             "10.8% faster: time ratio 0.892 (95% CI 0.89-0.894)",
         )
         slower = dict(measured, verdict="slower", ratio=1.05)
-        self.assertTrue(optimize.result_text(slower).startswith(
-            "5.0% slower: time ratio 1.05"))
-        same = {"verdict": "no change", "ratio": 1.017,
-                "measurement": {"comparison": {"ci_low": 1.007,
-                                               "ci_high": 1.021}}}
+        self.assertTrue(
+            optimize.result_text(slower).startswith(
+                "5.0% slower: time ratio 1.05"
+            )
+        )
+        same = {
+            "verdict": "no change",
+            "ratio": 1.017,
+            "measurement": {"comparison": {"ci_low": 1.007, "ci_high": 1.021}},
+        }
         self.assertEqual(
             optimize.result_text(same),
             "1.7% slower, inside the noise: time ratio 1.017 (95% CI "
             "1.007-1.021)",
         )
-        twin = {"verdict": "same as tune2", "same_as_label": "Tune-2",
-                "reason": "result reused (no change)"}
-        self.assertEqual(optimize.result_text(twin),
-                         "same code as Tune-2: result reused (no change)")
-        failed = {"verdict": "build failed",
-                  "reason": "`make` exited 2:\nerror one\nerror two"}
-        self.assertEqual(optimize.result_text(failed),
-                         "build failed: `make` exited 2: error one error two")
-        self.assertEqual(optimize.result_text({"verdict": "gate 2 failed",
-                                               "reason": "x"}),
-                         "package tests failed: x")
+        twin = {
+            "verdict": "same as tune2",
+            "same_as_label": "Tune-2",
+            "reason": "result reused (no change)",
+        }
+        self.assertEqual(
+            optimize.result_text(twin),
+            "same code as Tune-2: result reused (no change)",
+        )
+        failed = {
+            "verdict": "build failed",
+            "reason": "`make` exited 2:\nerror one\nerror two",
+        }
+        self.assertEqual(
+            optimize.result_text(failed),
+            "build failed: `make` exited 2: error one error two",
+        )
+        self.assertEqual(
+            optimize.result_text({"verdict": "gate 2 failed", "reason": "x"}),
+            "package tests failed: x",
+        )
 
 
 class TestReplay(unittest.TestCase):
@@ -670,7 +769,10 @@ class TestReplay(unittest.TestCase):
     def test_variant_env(self) -> None:
         """C variants get the wrappers; the tree token is filled in."""
         variant = Variant(
-            "v6-pgo", "pgo", "c", "clang-19",
+            "v6-pgo",
+            "pgo",
+            "c",
+            "clang-19",
             flags=["-O3", f"-fprofile-prefix-path={TREE_TOKEN}"],
             env={"CCACHE_DISABLE": "1"},
         )
@@ -712,7 +814,7 @@ class TestPrograms(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             line = done.stdout.strip().splitlines()[-1]
             self.assertTrue(line.startswith(optimize._MARKER))
-            return json.loads(line[len(optimize._MARKER):])
+            return json.loads(line[len(optimize._MARKER) :])
         return done
 
     def _write(self, rel, data=b"text\n"):
@@ -724,8 +826,14 @@ class TestPrograms(unittest.TestCase):
 
     def _git(self, *args):
         subprocess.run(
-            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
-             *args],
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                *args,
+            ],
             cwd=os.path.join(self.dir, "repo"),
             check=True,
             capture_output=True,
@@ -734,9 +842,11 @@ class TestPrograms(unittest.TestCase):
     def test_programs_parse(self) -> None:
         import ast
 
-        for program in (optimize._PREPARE_PROGRAM,
-                        optimize._INSPECT_PROGRAM,
-                        optimize._FINISH_PROGRAM):
+        for program in (
+            optimize._PREPARE_PROGRAM,
+            optimize._INSPECT_PROGRAM,
+            optimize._FINISH_PROGRAM,
+        ):
             ast.parse(program)
 
     def test_prepare_removes_outputs_and_keeps_sources(self) -> None:
@@ -766,14 +876,34 @@ class TestPrograms(unittest.TestCase):
         dest = os.path.join(root, "v1")
         removed = self._run(
             optimize._PREPARE_PROGRAM,
-            {"src": os.path.join(self.dir, "repo"), "dest": dest,
-             "root": root, "build_dirs": list(optimize.BUILD_DIRS)},
+            {
+                "src": os.path.join(self.dir, "repo"),
+                "dest": dest,
+                "root": root,
+                "build_dirs": list(optimize.BUILD_DIRS),
+            },
         )
-        kept = ("src.c", "Makefile", "fixtures/prebuilt.o",
-                "docs/build/index.md", "sub/a.c", "tools/build/notes.txt",
-                "notes.txt", "link.o", ".git/HEAD")
-        gone = ("build", "cmake-out", "meson-out", "sub/CMakeCache.txt",
-                "sub/CMakeFiles", "lib.lo", "app", "libx.a")
+        kept = (
+            "src.c",
+            "Makefile",
+            "fixtures/prebuilt.o",
+            "docs/build/index.md",
+            "sub/a.c",
+            "tools/build/notes.txt",
+            "notes.txt",
+            "link.o",
+            ".git/HEAD",
+        )
+        gone = (
+            "build",
+            "cmake-out",
+            "meson-out",
+            "sub/CMakeCache.txt",
+            "sub/CMakeFiles",
+            "lib.lo",
+            "app",
+            "libx.a",
+        )
         for rel in kept:
             self.assertTrue(os.path.lexists(os.path.join(dest, rel)), rel)
         for rel in gone:
@@ -790,9 +920,12 @@ class TestPrograms(unittest.TestCase):
             [wrapper, "-c", "x.c"],
             capture_output=True,
             text=True,
-            env={"PATH": os.environ["PATH"], "ATESOR_REAL_CC": "echo",
-                 "ATESOR_CC_FLAGS": "-O3 -march=rv64gc_zba",
-                 "ATESOR_CC_LOG": log},
+            env={
+                "PATH": os.environ["PATH"],
+                "ATESOR_REAL_CC": "echo",
+                "ATESOR_CC_FLAGS": "-O3 -march=rv64gc_zba",
+                "ATESOR_CC_LOG": log,
+            },
         )
         self.assertEqual(done.stdout, "-c x.c -O3 -march=rv64gc_zba\n")
         with open(log) as handle:
@@ -808,8 +941,12 @@ class TestPrograms(unittest.TestCase):
         ):
             done = self._run(
                 optimize._PREPARE_PROGRAM,
-                {"src": self.dir, "dest": dest, "root": root_value,
-                 "build_dirs": []},
+                {
+                    "src": self.dir,
+                    "dest": dest,
+                    "root": root_value,
+                    "build_dirs": [],
+                },
                 check=False,
             )
             self.assertNotEqual(done.returncode, 0)
@@ -831,9 +968,15 @@ class TestPrograms(unittest.TestCase):
         """Counts, attributes, hashes and the wrapper log come back."""
         tree = os.path.join(self.dir, "tree")
         os.makedirs(os.path.join(tree, "bin"))
-        image = _elf(_code("sh3add a0, a1, a2", "andn a0, a1, a2",
-                           "bseti a0, a1, 40", "c.zext.b a0",
-                           "add a0, a1, a2"))
+        image = _elf(
+            _code(
+                "sh3add a0, a1, a2",
+                "andn a0, a1, a2",
+                "bseti a0, a1, 40",
+                "c.zext.b a0",
+                "add a0, a1, a2",
+            )
+        )
         with open(os.path.join(tree, "bin", "tool"), "wb") as handle:
             handle.write(image)
         with open(os.path.join(tree, "README"), "w") as handle:
@@ -843,8 +986,14 @@ class TestPrograms(unittest.TestCase):
             handle.write("a\nb\nc\n")
         facts = self._run(
             optimize._INSPECT_PROGRAM,
-            {"tree": tree, "artifacts": ["bin/tool", "README", "gone"],
-             "log": log, "go": False, "max_scans": 1, "max_bytes": 1 << 20},
+            {
+                "tree": tree,
+                "artifacts": ["bin/tool", "README", "gone"],
+                "log": log,
+                "go": False,
+                "max_scans": 1,
+                "max_bytes": 1 << 20,
+            },
         )
         self.assertEqual(facts["cc_calls"], 3)
         tool = facts["artifacts"]["bin/tool"]
@@ -855,15 +1004,26 @@ class TestPrograms(unittest.TestCase):
             tool["counts"], {"zba": 1, "zbb": 1, "zbs": 1, "zcb": 1}
         )
         self.assertEqual(tool["sha256"], hashlib.sha256(image).hexdigest())
-        code = _code("sh3add a0, a1, a2", "andn a0, a1, a2",
-                     "bseti a0, a1, 40", "c.zext.b a0", "add a0, a1, a2")
+        code = _code(
+            "sh3add a0, a1, a2",
+            "andn a0, a1, a2",
+            "bseti a0, a1, 40",
+            "c.zext.b a0",
+            "add a0, a1, a2",
+        )
         self.assertEqual(tool["code_sha256"], hashlib.sha256(code).hexdigest())
         self.assertFalse(facts["artifacts"]["README"]["elf"])
         self.assertFalse(facts["artifacts"]["gone"]["exists"])
         skipped = self._run(
             optimize._INSPECT_PROGRAM,
-            {"tree": tree, "artifacts": ["bin/tool"], "log": None,
-             "go": False, "max_scans": 0, "max_bytes": 1 << 20},
+            {
+                "tree": tree,
+                "artifacts": ["bin/tool"],
+                "log": None,
+                "go": False,
+                "max_scans": 0,
+                "max_bytes": 1 << 20,
+            },
         )
         self.assertIsNone(skipped["cc_calls"])
         self.assertIsNone(skipped["artifacts"]["bin/tool"]["counts"])
@@ -878,11 +1038,13 @@ class TestPrograms(unittest.TestCase):
         x86 = bytearray(_elf(second))
         x86[18:20] = struct.pack("<H", 62)
         archives = {
-            "lib/libdemo.a": _ar([
-                ("/", b"symbol table"),
-                ("a.o/", _elf(first)),
-                ("#1/8", b"long.o\0\0" + _elf(second)),
-            ]),
+            "lib/libdemo.a": _ar(
+                [
+                    ("/", b"symbol table"),
+                    ("a.o/", _elf(first)),
+                    ("#1/8", b"long.o\0\0" + _elf(second)),
+                ]
+            ),
             "lib/libx86.a": _ar([("a.o/", bytes(x86))]),
             # LTO intermediate code only: no executable bytes.
             "lib/liblto.a": _ar([("lto.o/", _elf(b""))]),
@@ -892,8 +1054,14 @@ class TestPrograms(unittest.TestCase):
                 handle.write(data)
         facts = self._run(
             optimize._INSPECT_PROGRAM,
-            {"tree": tree, "artifacts": list(archives), "log": None,
-             "go": False, "max_scans": 3, "max_bytes": 1 << 20},
+            {
+                "tree": tree,
+                "artifacts": list(archives),
+                "log": None,
+                "go": False,
+                "max_scans": 3,
+                "max_bytes": 1 << 20,
+            },
         )
         demo = facts["artifacts"]["lib/libdemo.a"]
         self.assertTrue(demo["archive"])
@@ -902,8 +1070,9 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual(demo["machine"], 243)
         self.assertEqual(demo["arch"], "rv64i2p1_m2p0_zba1p0")
         self.assertEqual(demo["counts"], {"zba": 1, "zbb": 1})
-        self.assertEqual(demo["code_sha256"],
-                         hashlib.sha256(first + second).hexdigest())
+        self.assertEqual(
+            demo["code_sha256"], hashlib.sha256(first + second).hexdigest()
+        )
         self.assertEqual(facts["artifacts"]["lib/libx86.a"]["machine"], 62)
         lto = facts["artifacts"]["lib/liblto.a"]
         self.assertEqual(lto["members"], 1)
@@ -916,15 +1085,22 @@ class TestPrograms(unittest.TestCase):
         log = os.path.join(self.dir, "cc.log")
         with open(log, "w") as handle:
             handle.write("-O2 -c a.c -o a.o\n-O2 -c b.c -o b.o\n")
-        spec = {"tree": tree, "artifacts": [], "log": log, "go": False,
-                "max_scans": 0, "max_bytes": 0}
-        facts = self._run(optimize._INSPECT_PROGRAM,
-                          dict(spec, read_log=True))
-        self.assertEqual(facts["log_lines"],
-                         ["-O2 -c a.c -o a.o", "-O2 -c b.c -o b.o"])
+        spec = {
+            "tree": tree,
+            "artifacts": [],
+            "log": log,
+            "go": False,
+            "max_scans": 0,
+            "max_bytes": 0,
+        }
+        facts = self._run(optimize._INSPECT_PROGRAM, dict(spec, read_log=True))
+        self.assertEqual(
+            facts["log_lines"], ["-O2 -c a.c -o a.o", "-O2 -c b.c -o b.o"]
+        )
         self.assertEqual(facts["cc_calls"], 2)
-        self.assertNotIn("log_lines",
-                         self._run(optimize._INSPECT_PROGRAM, spec))
+        self.assertNotIn(
+            "log_lines", self._run(optimize._INSPECT_PROGRAM, spec)
+        )
 
     def test_inspect_finds_artifacts_in_another_hash_directory(self) -> None:
         """lz4 names its output directory after a hash of its flags."""
@@ -937,10 +1113,17 @@ class TestPrograms(unittest.TestCase):
             handle.write(b"!<arch>\n")
         facts = self._run(
             optimize._INSPECT_PROGRAM,
-            {"tree": tree,
-             "artifacts": [f"lib/cachedObjs/{'c' * 32}/liblz4.a",
-                           "lib/plain.a"],
-             "log": None, "go": False, "max_scans": 0, "max_bytes": 0},
+            {
+                "tree": tree,
+                "artifacts": [
+                    f"lib/cachedObjs/{'c' * 32}/liblz4.a",
+                    "lib/plain.a",
+                ],
+                "log": None,
+                "go": False,
+                "max_scans": 0,
+                "max_bytes": 0,
+            },
         )
         found = facts["artifacts"][f"lib/cachedObjs/{'c' * 32}/liblz4.a"]
         self.assertTrue(found["exists"])
@@ -958,8 +1141,14 @@ class TestPrograms(unittest.TestCase):
                 handle.write(_elf(code, arch=arch))
         facts = self._run(
             optimize._INSPECT_PROGRAM,
-            {"tree": tree, "artifacts": ["a", "b"], "log": None,
-             "go": False, "max_scans": 0, "max_bytes": 0},
+            {
+                "tree": tree,
+                "artifacts": ["a", "b"],
+                "log": None,
+                "go": False,
+                "max_scans": 0,
+                "max_bytes": 0,
+            },
         )
         first, second = facts["artifacts"]["a"], facts["artifacts"]["b"]
         self.assertNotEqual(first["sha256"], second["sha256"])
@@ -976,15 +1165,16 @@ class TestPrograms(unittest.TestCase):
         os.makedirs(os.path.join(self.dir, "escape"))
         result = self._run(
             optimize._FINISH_PROGRAM,
-            {"root": root, "keep_tree": os.path.join(root, "v1"),
-             "artifacts": ["bin/tool", "missing"],
-             "remove": ["v1", "v2", "inputs", "../escape", "accepted"]},
+            {
+                "root": root,
+                "keep_tree": os.path.join(root, "v1"),
+                "artifacts": ["bin/tool", "missing"],
+                "remove": ["v1", "v2", "inputs", "../escape", "accepted"],
+            },
         )
         self.assertEqual(result["copied"], ["bin/tool"])
         self.assertEqual(os.listdir(root), ["accepted"])
-        self.assertEqual(
-            os.listdir(os.path.join(root, "accepted")), ["bin"]
-        )
+        self.assertEqual(os.listdir(os.path.join(root, "accepted")), ["bin"])
         self.assertTrue(os.path.isdir(os.path.join(self.dir, "escape")))
         self._run(optimize._FINISH_PROGRAM, {"root": root, "reset": True})
         self.assertFalse(os.path.exists(root))
@@ -1000,8 +1190,13 @@ class TestPrograms(unittest.TestCase):
 
 
 def _facts(sha="new", counts=None, cc_calls=4, **extra):
-    info = {"exists": True, "elf": True, "machine": 243, "sha256": sha,
-            "counts": counts or {}}
+    info = {
+        "exists": True,
+        "elf": True,
+        "machine": 243,
+        "sha256": sha,
+        "counts": counts or {},
+    }
     info.update(extra)
     return {"cc_calls": cc_calls, "artifacts": {"bin/tool": info}}
 
@@ -1021,14 +1216,17 @@ class TestGates(unittest.TestCase):
             "failed",
         )
         foreign = _facts(machine=62)
-        self.assertIn("not riscv64", gate_build_facts(
-            foreign, self.variant, self.profile)[1])
+        self.assertIn(
+            "not riscv64",
+            gate_build_facts(foreign, self.variant, self.profile)[1],
+        )
         silent = _facts(cc_calls=0)
-        self.assertIn("did not reach", gate_build_facts(
-            silent, self.variant, self.profile)[1])
+        self.assertIn(
+            "did not reach",
+            gate_build_facts(silent, self.variant, self.profile)[1],
+        )
         self.assertEqual(
-            gate_build_facts({"artifacts": {}}, self.variant,
-                             self.profile)[0],
+            gate_build_facts({"artifacts": {}}, self.variant, self.profile)[0],
             "failed",
         )
 
@@ -1049,9 +1247,13 @@ class TestGates(unittest.TestCase):
             facts, self.variant, self.profile, None, [rel]
         )
         self.assertEqual(outcome, "passed")
-        self.assertTrue(any("simdcoverage was not built" in text
-                            and "does not fail the tune" in text
-                            for text in warnings))
+        self.assertTrue(
+            any(
+                "simdcoverage was not built" in text
+                and "does not fail the tune" in text
+                for text in warnings
+            )
+        )
         # A library the measurement does link still fails the gate.
         facts["artifacts"][rel] = {"exists": False}
         outcome, reason, _ = gate_build_facts(
@@ -1062,25 +1264,43 @@ class TestGates(unittest.TestCase):
 
     def test_archives_count_in_gate_1(self) -> None:
         """A static archive is checked for riscv64 and compared by code."""
+
         def archive(machine=243, code="c1"):
-            info = {"exists": True, "elf": False, "archive": True,
-                    "machine": machine, "sha256": "file", "counts": {}}
+            info = {
+                "exists": True,
+                "elf": False,
+                "archive": True,
+                "machine": machine,
+                "sha256": "file",
+                "counts": {},
+            }
             if code:
                 info["code_sha256"] = code
             return {"cc_calls": 3, "artifacts": {"lib/libopus.a": info}}
 
-        self.assertIn("not riscv64", gate_build_facts(
-            archive(machine=62), self.variant, self.profile)[1])
-        self.assertEqual(gate_build_facts(
-            archive(), self.variant, self.profile, archive())[0],
-            "no effect")
-        self.assertEqual(gate_build_facts(
-            archive(code="c2"), self.variant, self.profile, archive())[0],
-            "passed")
+        self.assertIn(
+            "not riscv64",
+            gate_build_facts(archive(machine=62), self.variant, self.profile)[
+                1
+            ],
+        )
+        self.assertEqual(
+            gate_build_facts(archive(), self.variant, self.profile, archive())[
+                0
+            ],
+            "no effect",
+        )
+        self.assertEqual(
+            gate_build_facts(
+                archive(code="c2"), self.variant, self.profile, archive()
+            )[0],
+            "passed",
+        )
         lto = archive(code=None)
         self.assertEqual(optimize._code_artifacts(lto), [])
-        self.assertEqual(gate_build_facts(
-            lto, self.variant, self.profile, lto)[0], "passed")
+        self.assertEqual(
+            gate_build_facts(lto, self.variant, self.profile, lto)[0], "passed"
+        )
         self.assertEqual(optimize._same_code(archive(), archive()), (1, 1))
         self.assertEqual(optimize._same_code(lto, lto), (0, 0))
 
@@ -1088,22 +1308,23 @@ class TestGates(unittest.TestCase):
         """GORISCV64 and -pgo must show in the build information."""
         go = Variant("g2-pgo", "pgo", "go", isa="rva22u64", pgo="use")
         level = _facts(goriscv64="rva20u64", cc_calls=None)
-        self.assertIn("GORISCV64=rva22u64", gate_build_facts(
-            level, go, self.profile)[1])
+        self.assertIn(
+            "GORISCV64=rva22u64", gate_build_facts(level, go, self.profile)[1]
+        )
         no_pgo = _facts(goriscv64="rva22u64", cc_calls=None)
-        self.assertIn("-pgo", gate_build_facts(
-            no_pgo, go, self.profile)[1])
-        good = _facts(goriscv64="rva22u64", pgo="/p/default.pgo",
-                      cc_calls=None)
-        self.assertEqual(gate_build_facts(good, go, self.profile)[0],
-                         "passed")
+        self.assertIn("-pgo", gate_build_facts(no_pgo, go, self.profile)[1])
+        good = _facts(
+            goriscv64="rva22u64", pgo="/p/default.pgo", cc_calls=None
+        )
+        self.assertEqual(gate_build_facts(good, go, self.profile)[0], "passed")
 
     def test_no_effect_and_warnings(self) -> None:
         """An identical artifact has no effect; new risks warn."""
         baseline = _facts(sha="same", counts={"zbs": 2})
         self.assertEqual(
-            gate_build_facts(_facts(sha="same"), self.variant,
-                             self.profile, baseline)[0],
+            gate_build_facts(
+                _facts(sha="same"), self.variant, self.profile, baseline
+            )[0],
             "no effect",
         )
         risky = _facts(counts={"zbs": 1, "v": 3, "zba": 9}, unaligned=1)
@@ -1121,14 +1342,14 @@ class TestGates(unittest.TestCase):
         baseline = _facts(sha="file-a", code_sha256="code")
         same_code = _facts(sha="file-b", code_sha256="code")
         self.assertEqual(
-            gate_build_facts(same_code, self.variant, self.profile,
-                             baseline)[0],
+            gate_build_facts(same_code, self.variant, self.profile, baseline)[
+                0
+            ],
             "no effect",
         )
         other = _facts(sha="file-b", code_sha256="other")
         self.assertEqual(
-            gate_build_facts(other, self.variant, self.profile,
-                             baseline)[0],
+            gate_build_facts(other, self.variant, self.profile, baseline)[0],
             "passed",
         )
 
@@ -1138,8 +1359,10 @@ class TestGates(unittest.TestCase):
         self.assertEqual(gate_tests({"status": "failed"}, None)[0], True)
         self.assertIn("not decisive", gate_tests(None, None)[1])
         self.assertEqual(gate_tests(passed, {"status": "passed"})[0], True)
-        self.assertEqual(gate_tests(passed, {"status": "timeout"}),
-                         (False, "the package tests timeout"))
+        self.assertEqual(
+            gate_tests(passed, {"status": "timeout"}),
+            (False, "the package tests timeout"),
+        )
         self.assertEqual(gate_tests(passed, None)[0], False)
 
 
@@ -1156,9 +1379,13 @@ def _measured(ratio, verdict):
         "mde": 0.009,
         "rounds": 20,
         "board_pre": {"governor": "performance"},
-        "comparison": {"ratio": ratio, "ci_low": round(ratio - 0.01, 4),
-                       "ci_high": round(ratio + 0.01, 4), "p_value": 0.001,
-                       "verdict": verdict},
+        "comparison": {
+            "ratio": ratio,
+            "ci_low": round(ratio - 0.01, 4),
+            "ci_high": round(ratio + 0.01, 4),
+            "p_value": 0.001,
+            "verdict": verdict,
+        },
     }
 
 
@@ -1189,7 +1416,7 @@ def _harness_workload():
         iterations=14,
         check_prefix="ATESOR-CHECK",
         files={".atesor/bench/harness.c": "int main(void) { return 0; }"},
-        build=["mkdir -p .atesor/bench && \"$CC\" -O2 harness.c"],
+        build=['mkdir -p .atesor/bench && "$CC" -O2 harness.c'],
         source_language="c",
         origin="agent",
     )
@@ -1202,13 +1429,26 @@ _BASE_LOG = ["-O2 -c /w/zlib.opt/base/adler32.c -o adler32.o"]
 class _Sandbox:
     """Fakes every sandbox call that run_optimization makes."""
 
-    def __init__(self, profile, native=True, ratios=None, failing=(),
-                 busy=(), workload="program", notes=(), log_lines=None,
-                 health=None, crashes=()):
+    def __init__(
+        self,
+        profile,
+        native=True,
+        ratios=None,
+        failing=(),
+        busy=(),
+        workload="program",
+        notes=(),
+        log_lines=None,
+        health=None,
+        crashes=(),
+    ):
         self.profile = profile
-        self.health = health or {"bad": {"0": 0, "1": 0, "2": 0, "3": 0},
-                                 "rounds": 10, "size_mb": 8,
-                                 "seconds": 6.1}
+        self.health = health or {
+            "bad": {"0": 0, "1": 0, "2": 0, "3": 0},
+            "rounds": 10,
+            "size_mb": 8,
+            "seconds": 6.1,
+        }
         self.health_calls = []
         self.native = native
         self.ratios = ratios or {}
@@ -1247,8 +1487,13 @@ class _Sandbox:
         facts = {
             "cc_calls": 7 if log else None,
             "artifacts": {
-                rel: {"exists": True, "elf": not rel.endswith(".a"),
-                      "machine": 243, "sha256": sha, "counts": {}}
+                rel: {
+                    "exists": True,
+                    "elf": not rel.endswith(".a"),
+                    "machine": 243,
+                    "sha256": sha,
+                    "counts": {},
+                }
                 for rel in artifacts
             },
         }
@@ -1264,8 +1509,10 @@ class _Sandbox:
         self.contexts.append(ctx)
         ctx.crashes.extend(self.crashes)
         workload = self.workload
-        return (bench.Workload(**workload.to_dict()) if workload else None,
-                list(self.notes))
+        return (
+            bench.Workload(**workload.to_dict()) if workload else None,
+            list(self.notes),
+        )
 
     def install(self, workload, tree, env, timeout, paths=None):
         self.installed.append(self.vid(tree))
@@ -1290,36 +1537,49 @@ class _Sandbox:
 
     def run_jobs(self, spec, timeout, extra_env=None):
         self.trained.append((spec, extra_env))
-        run = {"job": "B", "phase": "round", "round": 0,
-               "wall_ns": 1_000_000_000, "rc": 0, "sha": "x"}
+        run = {
+            "job": "B",
+            "phase": "round",
+            "round": 0,
+            "wall_ns": 1_000_000_000,
+            "rc": 0,
+            "sha": "x",
+        }
         return {"runs": [run, dict(run, round=1)], "error": None}
 
     def __enter__(self):
         patches = [
-            mock.patch.object(optimize, "is_native",
-                              return_value=self.native),
-            mock.patch.object(optimize, "probe_machine",
-                              return_value=(self.profile, None)),
+            mock.patch.object(optimize, "is_native", return_value=self.native),
+            mock.patch.object(
+                optimize, "probe_machine", return_value=(self.profile, None)
+            ),
             mock.patch.object(optimize, "prepare_tree", return_value=None),
-            mock.patch.object(optimize, "build_variant",
-                              side_effect=self.build),
-            mock.patch.object(optimize, "inspect_tree",
-                              side_effect=self.inspect),
-            mock.patch.object(optimize, "_run_program",
-                              side_effect=self.program),
-            mock.patch.object(optimize, "execute_command",
-                              return_value=_ok()),
-            mock.patch.object(optimize, "_other_containers",
-                              return_value=list(self.busy)),
-            mock.patch.object(optimize, "check_integrity",
-                              side_effect=self.integrity),
-            mock.patch.object(workload_module, "choose_workload",
-                              side_effect=self.choose),
-            mock.patch.object(workload_module, "install_workload",
-                              side_effect=self.install),
+            mock.patch.object(
+                optimize, "build_variant", side_effect=self.build
+            ),
+            mock.patch.object(
+                optimize, "inspect_tree", side_effect=self.inspect
+            ),
+            mock.patch.object(
+                optimize, "_run_program", side_effect=self.program
+            ),
+            mock.patch.object(optimize, "execute_command", return_value=_ok()),
+            mock.patch.object(
+                optimize, "_other_containers", return_value=list(self.busy)
+            ),
+            mock.patch.object(
+                optimize, "check_integrity", side_effect=self.integrity
+            ),
+            mock.patch.object(
+                workload_module, "choose_workload", side_effect=self.choose
+            ),
+            mock.patch.object(
+                workload_module, "install_workload", side_effect=self.install
+            ),
             mock.patch.object(bench, "measure", side_effect=self.measure),
-            mock.patch.object(bench, "check_once",
-                              side_effect=self.check_once),
+            mock.patch.object(
+                bench, "check_once", side_effect=self.check_once
+            ),
             mock.patch.object(bench, "run_jobs", side_effect=self.run_jobs),
             mock.patch.object(bench, "write_input", return_value=None),
         ]
@@ -1343,27 +1603,47 @@ class TestRunOptimization(unittest.TestCase):
 
     def test_a_machine_that_gives_wrong_data_stops_first(self) -> None:
         """The machine check fails: nothing is built or timed."""
-        sandbox = _Sandbox(_profile(), health={
-            "bad": {"0": 1, "1": 2, "2": 0, "3": 0},
-            "rounds": 10, "size_mb": 8, "seconds": 6.4,
-        })
+        sandbox = _Sandbox(
+            _profile(),
+            health={
+                "bad": {"0": 1, "1": 2, "2": 0, "3": 0},
+                "rounds": 10,
+                "size_mb": 8,
+                "seconds": 6.4,
+            },
+        )
         lines = []
         with sandbox:
             result = run_optimization(_state(), progress=lines.append)
         self.assertEqual(sandbox.health_calls, [[0, 1, 2, 3]])
         self.assertEqual(result["status"], "not measured")
         self.assertEqual(result["headline"], "NO: no tune could be timed")
-        self.assertTrue(result["reason"].startswith(
-            "the machine gives wrong results: 3 of 40 zlib round trips"))
+        self.assertTrue(
+            result["reason"].startswith(
+                "the machine gives wrong results: 3 of 40 zlib round trips"
+            )
+        )
         self.assertEqual(sandbox.builds, {})
         self.assertEqual(sandbox.contexts, [])
-        self.assertIn("Health   : 3 of 40 zlib round trips gave wrong data "
-                      "(CPU 0: 1, CPU 1: 2)", lines)
-        self.assertTrue(lines[-1].startswith("           fix: make the "
-                                             "machine stable first"))
-        crashed = _Sandbox(_profile(), health={
-            "bad": {"0": -1}, "rounds": 10, "size_mb": 8, "seconds": 1.0,
-        })
+        self.assertIn(
+            "Health   : 3 of 40 zlib round trips gave wrong data "
+            "(CPU 0: 1, CPU 1: 2)",
+            lines,
+        )
+        self.assertTrue(
+            lines[-1].startswith(
+                "           fix: make the " "machine stable first"
+            )
+        )
+        crashed = _Sandbox(
+            _profile(),
+            health={
+                "bad": {"0": -1},
+                "rounds": 10,
+                "size_mb": 8,
+                "seconds": 1.0,
+            },
+        )
         with crashed:
             result = run_optimization(_state())
         self.assertIn("(CPU 0: crashed)", result["reason"])
@@ -1374,34 +1654,48 @@ class TestRunOptimization(unittest.TestCase):
         lines = []
         with sandbox:
             result = run_optimization(_state(), progress=lines.append)
-        self.assertIn("Health   : 40 zlib round trips on 4 CPUs gave the "
-                      "same data (6.1 s)", lines)
+        self.assertIn(
+            "Health   : 40 zlib round trips on 4 CPUs gave the "
+            "same data (6.1 s)",
+            lines,
+        )
         self.assertEqual(result["machine_check"]["rounds"], 10)
         self.assertIn("tune1", sandbox.builds)
-        qemu = _Sandbox(_profile(kind="qemu", core_name=None,
-                                 emulated_cpu="rv64i,zba=true"),
-                        native=False)
+        qemu = _Sandbox(
+            _profile(
+                kind="qemu", core_name=None, emulated_cpu="rv64i,zba=true"
+            ),
+            native=False,
+        )
         with qemu:
             run_optimization(_state())
         self.assertEqual(qemu.health_calls, [], "QEMU has no machine check")
 
     def test_unverified_port_is_skipped(self) -> None:
         lines = []
-        result = run_optimization(_state(verified=False),
-                                  progress=lines.append)
+        result = run_optimization(
+            _state(verified=False), progress=lines.append
+        )
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(
             lines,
-            ["Result   : NO: performance mode was skipped",
-             "           why: the port is not verified, so there is no "
-             "baseline"],
+            [
+                "Result   : NO: performance mode was skipped",
+                "           why: the port is not verified, so there is no "
+                "baseline",
+            ],
         )
 
     def test_probe_failure_is_an_error(self) -> None:
         """A failed probe stops the run with its reason."""
-        with mock.patch.object(optimize, "is_native", return_value=True), \
-                mock.patch.object(optimize, "probe_machine",
-                                  return_value=(None, "exit 127: boom")):
+        with (
+            mock.patch.object(optimize, "is_native", return_value=True),
+            mock.patch.object(
+                optimize,
+                "probe_machine",
+                return_value=(None, "exit 127: boom"),
+            ),
+        ):
             result = run_optimization(_state())
         self.assertEqual(result["status"], "error")
         self.assertIn("boom", result["reason"])
@@ -1417,44 +1711,57 @@ class TestRunOptimization(unittest.TestCase):
                 return {"status": "failed"}
             return {"status": "passed"}
 
-        sandbox = _Sandbox(_profile(), ratios={
-            "tune1": (0.99, "no change"),
-            "tune3": (0.90, "faster"),
-            "tune3-layout2": (0.91, "faster"),
-            "tune4": (1.05, "slower"),
-            "tune6": (0.95, "no change"),
-        })
+        sandbox = _Sandbox(
+            _profile(),
+            ratios={
+                "tune1": (0.99, "no change"),
+                "tune3": (0.90, "faster"),
+                "tune3-layout2": (0.91, "faster"),
+                "tune4": (1.05, "slower"),
+                "tune6": (0.95, "no change"),
+            },
+        )
         lines = []
         with sandbox:
             result = run_optimization(
                 state, run_tests=run_tests, progress=lines.append
             )
         verdicts = {vid: r["verdict"] for vid, r in _by_id(result).items()}
-        self.assertEqual(verdicts, {
-            "tune1": "no change",
-            "tune2": "gate 2 failed",
-            "tune3": "faster",
-            "tune4": "slower",
-            "tune5": "no change",
-            "tune6": "no change",
-        })
+        self.assertEqual(
+            verdicts,
+            {
+                "tune1": "no change",
+                "tune2": "gate 2 failed",
+                "tune3": "faster",
+                "tune4": "slower",
+                "tune5": "no change",
+                "tune6": "no change",
+            },
+        )
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(result["accepted"], "tune3")
         self.assertEqual(result["accepted_label"], "Tune-3")
         self.assertEqual(result["accepted_ratio"], 0.90)
         self.assertEqual(result["accepted_dir"], f"{ROOT}/accepted")
-        self.assertEqual(result["accepted_artifacts"],
-                         ["build/minigzip", "build/libz.so.1", "build/libz.a"])
+        self.assertEqual(
+            result["accepted_artifacts"],
+            ["build/minigzip", "build/libz.so.1", "build/libz.a"],
+        )
         self.assertEqual(result["package"]["kind"], "library+programs")
-        self.assertEqual(result["baseline"],
-                         {"build_seconds": result["baseline"]
-                          ["build_seconds"], "same_code": 2,
-                          "artifacts": 2})
+        self.assertEqual(
+            result["baseline"],
+            {
+                "build_seconds": result["baseline"]["build_seconds"],
+                "same_code": 2,
+                "artifacts": 2,
+            },
+        )
         self.assertEqual(state.machine_profile["core_name"], "sifive-p550")
         # Every tune is compared with the rebuilt copy, not the port.
         self.assertEqual(sandbox.bases["tune1"], f"{ROOT}/base")
-        self.assertEqual(sandbox.bases["tune3-layout2"],
-                         f"{ROOT}/base-layout2")
+        self.assertEqual(
+            sandbox.bases["tune3-layout2"], f"{ROOT}/base-layout2"
+        )
         self.assertEqual(sandbox.contexts[0].tree, f"{ROOT}/base")
         # The copy gets no flag at all, so it is the verified build.
         self.assertEqual(sandbox.builds["base"]["ATESOR_CC_FLAGS"], "")
@@ -1465,30 +1772,41 @@ class TestRunOptimization(unittest.TestCase):
         flags = sandbox.builds["tune3"]["ATESOR_CC_FLAGS"].split()
         self.assertEqual(flags[-2:], ["-march=rv64gc_zba_zbb", "-O3"])
         train = sandbox.builds["tune6-train"]
-        self.assertIn(f"-fprofile-generate={ROOT}/pgo-tune6",
-                      train["ATESOR_CC_FLAGS"])
-        self.assertIn(f"-fprofile-prefix-path={ROOT}/tune6-train",
-                      train["ATESOR_CC_FLAGS"])
+        self.assertIn(
+            f"-fprofile-generate={ROOT}/pgo-tune6", train["ATESOR_CC_FLAGS"]
+        )
+        self.assertIn(
+            f"-fprofile-prefix-path={ROOT}/tune6-train",
+            train["ATESOR_CC_FLAGS"],
+        )
         self.assertEqual(train["CCACHE_DISABLE"], "1")
         use = sandbox.builds["tune6"]["ATESOR_CC_FLAGS"]
         self.assertIn(f"-fprofile-prefix-path={ROOT}/tune6", use)
         self.assertIn("-Wno-coverage-mismatch", use)
-        self.assertIn("-falign-functions=64",
-                      sandbox.builds["tune3-layout2"]["ATESOR_CC_FLAGS"])
+        self.assertIn(
+            "-falign-functions=64",
+            sandbox.builds["tune3-layout2"]["ATESOR_CC_FLAGS"],
+        )
         finish = sandbox.programs[-1]
         self.assertEqual(finish["keep_tree"], f"{ROOT}/tune3")
         # Static archives ship too, not only ELF files.
-        self.assertEqual(finish["artifacts"],
-                         ["build/minigzip", "build/libz.so.1", "build/libz.a"])
+        self.assertEqual(
+            finish["artifacts"],
+            ["build/minigzip", "build/libz.so.1", "build/libz.a"],
+        )
         for name in ("base", "tune3", "pgo-tune6", "inputs"):
             self.assertIn(name, finish["remove"])
         self.assertTrue(sandbox.programs[0].get("reset"))
         self.assertNotIn("env", result["variants"][0])
         self.assertNotIn("facts", result["variants"][0])
-        self.assertIn("is 10.0% faster than the verified build",
-                      result["reason"])
-        self.assertTrue(result["headline"].startswith(
-            "YES: Tune-3 (GCC -mtune=sifive-p550"))
+        self.assertIn(
+            "is 10.0% faster than the verified build", result["reason"]
+        )
+        self.assertTrue(
+            result["headline"].startswith(
+                "YES: Tune-3 (GCC -mtune=sifive-p550"
+            )
+        )
         expected = [
             "Machine  : native, rv64gc+zba+zbb, core sifive-p550, "
             "misaligned access slow",
@@ -1507,37 +1825,51 @@ class TestRunOptimization(unittest.TestCase):
         ]
         for line in expected:
             self.assertIn(line, lines)
-        self.assertTrue(lines[-1].startswith(
-            "Result   : YES: Tune-3 (GCC -mtune=sifive-p550"))
-        self.assertTrue(lines[-1].endswith(
-            "is 10.0% faster than the verified build"))
-        self.assertIn("           confirmed: 9.0% faster: time ratio 0.91 "
-                      "(95% CI 0.9-0.92)", lines)
-        self.assertIn("           package tests failed: the package tests "
-                      "failed", lines)
+        self.assertTrue(
+            lines[-1].startswith(
+                "Result   : YES: Tune-3 (GCC -mtune=sifive-p550"
+            )
+        )
+        self.assertTrue(
+            lines[-1].endswith("is 10.0% faster than the verified build")
+        )
+        self.assertIn(
+            "           confirmed: 9.0% faster: time ratio 0.91 "
+            "(95% CI 0.9-0.92)",
+            lines,
+        )
+        self.assertIn(
+            "           package tests failed: the package tests " "failed",
+            lines,
+        )
 
     def test_second_layout_compares_like_with_like(self) -> None:
         """Both builds get the layout flag; the baseline is built once."""
-        sandbox = _Sandbox(_profile(), ratios={
-            "tune2": (0.95, "faster"),
-            "tune3": (0.90, "faster"),
-            "tune3-layout2": (1.0, "no change"),
-            "tune2-layout2": (0.96, "faster"),
-        })
+        sandbox = _Sandbox(
+            _profile(),
+            ratios={
+                "tune2": (0.95, "faster"),
+                "tune3": (0.90, "faster"),
+                "tune3-layout2": (1.0, "no change"),
+                "tune2-layout2": (0.96, "faster"),
+            },
+        )
         with sandbox:
             result = run_optimization(_state())
         base2 = sandbox.builds["base-layout2"]
         self.assertEqual(base2["ATESOR_REAL_CC"], "gcc")
-        self.assertEqual(base2["ATESOR_CC_FLAGS"],
-                         "-falign-functions=64")
-        self.assertEqual(sandbox.bases["tune3-layout2"],
-                         f"{ROOT}/base-layout2")
-        self.assertEqual(sandbox.bases["tune2-layout2"],
-                         f"{ROOT}/base-layout2")
+        self.assertEqual(base2["ATESOR_CC_FLAGS"], "-falign-functions=64")
+        self.assertEqual(
+            sandbox.bases["tune3-layout2"], f"{ROOT}/base-layout2"
+        )
+        self.assertEqual(
+            sandbox.bases["tune2-layout2"], f"{ROOT}/base-layout2"
+        )
         self.assertEqual(sandbox.bases["tune2"], f"{ROOT}/base")
         self.assertEqual(
-            [p for p in sandbox.programs if "base-layout2" in str(p)][-1]
-            ["remove"].count("base-layout2"),
+            [p for p in sandbox.programs if "base-layout2" in str(p)][-1][
+                "remove"
+            ].count("base-layout2"),
             1,
         )
         self.assertEqual(result["accepted"], "tune2")
@@ -1551,8 +1883,7 @@ class TestRunOptimization(unittest.TestCase):
         original = sandbox.inspect
 
         def twins(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree.endswith("/tune3"):
                 for info in facts["artifacts"].values():
                     info["sha256"] = "tune2"
@@ -1571,8 +1902,11 @@ class TestRunOptimization(unittest.TestCase):
         self.assertTrue(any("same code as Tune-2" in line for line in lines))
 
     def test_failed_layout_baseline_confirms_nothing(self) -> None:
-        sandbox = _Sandbox(_profile(), ratios={"tune3": (0.9, "faster")},
-                           failing=("base-layout2",))
+        sandbox = _Sandbox(
+            _profile(),
+            ratios={"tune3": (0.9, "faster")},
+            failing=("base-layout2",),
+        )
         with sandbox:
             result = run_optimization(_state())
         record = _by_id(result)["tune3"]
@@ -1588,10 +1922,14 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(optimize._p_text(None), "p=?")
 
     def test_failed_second_check_accepts_nothing(self) -> None:
-        sandbox = _Sandbox(_profile(), ratios={
-            "tune3": (0.90, "faster"),
-            "tune3-layout2": (1.0, "no change"),
-        }, failing=("tune4",))
+        sandbox = _Sandbox(
+            _profile(),
+            ratios={
+                "tune3": (0.90, "faster"),
+                "tune3-layout2": (1.0, "no change"),
+            },
+            failing=("tune4",),
+        )
         with sandbox:
             result = run_optimization(_state())
         records = _by_id(result)
@@ -1610,26 +1948,36 @@ class TestRunOptimization(unittest.TestCase):
         """Under QEMU the tunes get gates and the QEMU_CPU model."""
         state = _state()
         state.emulate_cpu = "rv64i,zba=true"
-        profile = _profile(kind="qemu", core_name=None,
-                           emulated_cpu="rv64i,zba=true")
+        profile = _profile(
+            kind="qemu", core_name=None, emulated_cpu="rv64i,zba=true"
+        )
         sandbox = _Sandbox(profile, native=False)
         with sandbox:
             result = run_optimization(state)
         self.assertEqual(sandbox.measured, [])
         self.assertTrue(sandbox.checked)
-        self.assertTrue(all(env == {"QEMU_CPU": "rv64i,zba=true"}
-                            for _, env in sandbox.checked))
-        self.assertEqual(sandbox.builds["tune1"]["QEMU_CPU"],
-                         "rv64i,zba=true")
-        self.assertEqual(sandbox.contexts[0].qemu_env,
-                         {"QEMU_CPU": "rv64i,zba=true"})
+        self.assertTrue(
+            all(
+                env == {"QEMU_CPU": "rv64i,zba=true"}
+                for _, env in sandbox.checked
+            )
+        )
+        self.assertEqual(sandbox.builds["tune1"]["QEMU_CPU"], "rv64i,zba=true")
+        self.assertEqual(
+            sandbox.contexts[0].qemu_env, {"QEMU_CPU": "rv64i,zba=true"}
+        )
         self.assertEqual(
             {r["verdict"] for r in result["variants"]}, {"checked"}
         )
         self.assertEqual(
             [r["variant"]["technique"] for r in result["variants"]],
-            ["machine ISA", "optimization level", "link-time optimization",
-             "compiler", "profile-guided optimization"],
+            [
+                "machine ISA",
+                "optimization level",
+                "link-time optimization",
+                "compiler",
+                "profile-guided optimization",
+            ],
         )
         self.assertIsNone(result["accepted"])
         self.assertEqual(result["status"], "checked")
@@ -1637,10 +1985,14 @@ class TestRunOptimization(unittest.TestCase):
 
     def test_no_workload_on_native_builds_no_tune(self) -> None:
         """Without a workload nothing can be timed, so nothing builds."""
-        sandbox = _Sandbox(_profile(), workload=None, notes=[
-            "harness: the optimizer agent gave no usable answer (quota)",
-            "tests: the package tests did not pass in the port (skipped)",
-        ])
+        sandbox = _Sandbox(
+            _profile(),
+            workload=None,
+            notes=[
+                "harness: the optimizer agent gave no usable answer (quota)",
+                "tests: the package tests did not pass in the port (skipped)",
+            ],
+        )
         lines = []
         with sandbox:
             result = run_optimization(_state(), progress=lines.append)
@@ -1650,8 +2002,9 @@ class TestRunOptimization(unittest.TestCase):
         self.assertEqual(list(sandbox.builds), ["base"])
         self.assertEqual(result["variants"], [])
         self.assertIn("base", sandbox.programs[-1]["remove"])
-        self.assertTrue(any(line.startswith("           none: harness:")
-                            for line in lines))
+        self.assertTrue(
+            any(line.startswith("           none: harness:") for line in lines)
+        )
         self.assertFalse(any(line.startswith("Tune-") for line in lines))
 
     def test_a_gate_1_warning_reaches_the_console_and_the_result(
@@ -1665,11 +2018,15 @@ class TestRunOptimization(unittest.TestCase):
 
         lines = []
         sandbox = _Sandbox(_profile())
-        with sandbox, mock.patch.object(optimize, "gate_build_facts",
-                                        side_effect=warn):
+        with (
+            sandbox,
+            mock.patch.object(optimize, "gate_build_facts", side_effect=warn),
+        ):
             result = run_optimization(_state(), progress=lines.append)
-        self.assertTrue(any(f"note: {note}" in line for line in lines),
-                        f"no note line: {lines[-6:]}")
+        self.assertTrue(
+            any(f"note: {note}" in line for line in lines),
+            f"no note line: {lines[-6:]}",
+        )
         self.assertIn(note, result["warnings"])
         # One warning, however many tunes repeat it.
         self.assertEqual(result["warnings"].count(note), 1)
@@ -1686,15 +2043,21 @@ class TestRunOptimization(unittest.TestCase):
             return real(facts, variant, profile, baseline, required)
 
         sandbox = _Sandbox(_profile())
-        with sandbox, mock.patch.object(optimize, "gate_build_facts",
-                                        side_effect=record):
+        with (
+            sandbox,
+            mock.patch.object(
+                optimize, "gate_build_facts", side_effect=record
+            ),
+        ):
             run_optimization(_state())
         # The rebuild of the verified build runs before the workload is
         # known, so it keeps the strict check; every tune gets the list.
         self.assertIsNone(seen[0])
         wanted = ["build/libz.a", "build/libz.so.1", "build/minigzip"]
-        self.assertTrue(any(req == wanted for req in seen),
-                        f"no gate call got {wanted}: {seen}")
+        self.assertTrue(
+            any(req == wanted for req in seen),
+            f"no gate call got {wanted}: {seen}",
+        )
 
     def test_a_baseline_crash_is_reported_as_a_port_problem(self) -> None:
         """A crash of the verified build leads the reason and the warnings."""
@@ -1703,9 +2066,14 @@ class TestRunOptimization(unittest.TestCase):
             "workload on this machine: the baseline run crashed with "
             "SIGILL in the round phase: Illegal instruction"
         )
-        sandbox = _Sandbox(_profile(), workload=None, crashes=[crash], notes=[
-            "harness: 3 rounds failed; the last error: " + crash,
-        ])
+        sandbox = _Sandbox(
+            _profile(),
+            workload=None,
+            crashes=[crash],
+            notes=[
+                "harness: 3 rounds failed; the last error: " + crash,
+            ],
+        )
         lines = []
         with sandbox:
             result = run_optimization(_state(), progress=lines.append)
@@ -1726,22 +2094,25 @@ class TestRunOptimization(unittest.TestCase):
 
     def test_qemu_without_workload_still_checks_the_builds(self) -> None:
         """Under QEMU the tunes still build and pass gates 1 and 2."""
-        profile = _profile(kind="qemu", core_name=None,
-                           emulated_cpu="rv64i,zba=true")
+        profile = _profile(
+            kind="qemu", core_name=None, emulated_cpu="rv64i,zba=true"
+        )
         sandbox = _Sandbox(profile, native=False, workload=None)
         with sandbox:
             result = run_optimization(_state())
-        self.assertEqual({r["verdict"] for r in result["variants"]},
-                         {"built"})
+        self.assertEqual({r["verdict"] for r in result["variants"]}, {"built"})
         self.assertEqual(result["status"], "checked")
         self.assertEqual(sandbox.checked, [])
 
     def test_tunes_that_the_build_has_are_skipped(self) -> None:
         """A build that compiles everything with -O3 skips that tune."""
-        sandbox = _Sandbox(_profile(), log_lines=[
-            f"-O3 -DNDEBUG -c {ROOT}/base/a.c -o a.o",
-            "-O3 -DNDEBUG -c b.c -o b.o",
-        ])
+        sandbox = _Sandbox(
+            _profile(),
+            log_lines=[
+                f"-O3 -DNDEBUG -c {ROOT}/base/a.c -o a.o",
+                "-O3 -DNDEBUG -c b.c -o b.o",
+            ],
+        )
         lines = []
         with sandbox:
             result = run_optimization(_state(), progress=lines.append)
@@ -1751,13 +2122,18 @@ class TestRunOptimization(unittest.TestCase):
         self.assertNotIn("tune3", sandbox.builds)
         self.assertIn("tune4", sandbox.builds)
         self.assertEqual(result["build_flags"]["levels"], ["-O3"])
-        self.assertIn("Tune-3   : optimization level = -O3, on top of "
-                      "Tune-2", lines)
+        self.assertIn(
+            "Tune-3   : optimization level = -O3, on top of " "Tune-2", lines
+        )
         # Tune-3 adds nothing, so Tune-4 builds on Tune-2.
-        self.assertIn("Tune-4   : link-time optimization = -flto=auto "
-                      "-ffat-lto-objects, on top of Tune-2", lines)
-        self.assertIn("Tune-5   : compiler = clang-19 (the flags of Tune-3)",
-                      lines)
+        self.assertIn(
+            "Tune-4   : link-time optimization = -flto=auto "
+            "-ffat-lto-objects, on top of Tune-2",
+            lines,
+        )
+        self.assertIn(
+            "Tune-5   : compiler = clang-19 (the flags of Tune-3)", lines
+        )
 
     def test_baseline_that_does_not_rebuild_stops(self) -> None:
         sandbox = _Sandbox(_profile(), failing=("base",))
@@ -1774,8 +2150,7 @@ class TestRunOptimization(unittest.TestCase):
         original = sandbox.inspect
 
         def drift(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree == REPO:
                 for info in facts["artifacts"].values():
                     info["sha256"] = "verified"
@@ -1787,20 +2162,33 @@ class TestRunOptimization(unittest.TestCase):
         sandbox.inspect = drift
         with sandbox:
             result = run_optimization(_state())
-        self.assertIn("differs from the verified build in 2 of 2",
-                      " ".join(result["warnings"]))
+        self.assertIn(
+            "differs from the verified build in 2 of 2",
+            " ".join(result["warnings"]),
+        )
         self.assertEqual(result["baseline"]["same_code"], 0)
         self.assertEqual(_by_id(result)["tune1"]["verdict"], "no effect")
 
     def test_harness_builds_in_every_tree(self) -> None:
-        sandbox = _Sandbox(_profile(), workload=_harness_workload(),
-                           ratios={"tune3": (0.9, "faster"),
-                                   "tune3-layout2": (0.9, "faster")})
+        sandbox = _Sandbox(
+            _profile(),
+            workload=_harness_workload(),
+            ratios={
+                "tune3": (0.9, "faster"),
+                "tune3-layout2": (0.9, "faster"),
+            },
+        )
         with sandbox:
             result = run_optimization(_state())
         self.assertEqual(result["accepted"], "tune3")
-        for vid in ("tune1", "tune5", "tune6-train", "tune6",
-                    "base-layout2", "tune3-layout2"):
+        for vid in (
+            "tune1",
+            "tune5",
+            "tune6-train",
+            "tune6",
+            "base-layout2",
+            "tune3-layout2",
+        ):
             self.assertIn(vid, sandbox.installed)
         # The workload choice built it in the baseline copy already.
         self.assertNotIn("base", sandbox.installed)
@@ -1812,8 +2200,7 @@ class TestRunOptimization(unittest.TestCase):
         original = sandbox.inspect
 
         def same(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree.endswith("/tune1"):
                 for info in facts["artifacts"].values():
                     info["sha256"] = "base"
@@ -1832,8 +2219,7 @@ class TestRunOptimization(unittest.TestCase):
         asked = []
 
         def partial(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree == REPO:
                 facts["artifacts"]["build/libz.so.1"]["exists"] = False
             else:
@@ -1844,13 +2230,13 @@ class TestRunOptimization(unittest.TestCase):
         with sandbox:
             result = run_optimization(_state())
         self.assertTrue(asked)
-        self.assertTrue(all(item == ["build/minigzip", "build/libz.a"]
-                            for item in asked))
+        self.assertTrue(
+            all(item == ["build/minigzip", "build/libz.a"] for item in asked)
+        )
         self.assertEqual(result["status"], "no gain")
 
         def nothing(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             for info in facts["artifacts"].values():
                 info["exists"] = False
             return facts, error
@@ -1866,8 +2252,12 @@ class TestRunOptimization(unittest.TestCase):
         """A busy machine still measures, and the result says why."""
         with _Sandbox(_profile(), busy=("atesor-ai-sandbox-w1",)):
             result = run_optimization(_state())
-        self.assertTrue(any("atesor-ai-sandbox-w1" in warning
-                            for warning in result["warnings"]))
+        self.assertTrue(
+            any(
+                "atesor-ai-sandbox-w1" in warning
+                for warning in result["warnings"]
+            )
+        )
 
     def test_a_failing_baseline_stops_the_timing(self) -> None:
         """Two baseline failures: nothing can be trusted, so stop."""
@@ -1875,10 +2265,14 @@ class TestRunOptimization(unittest.TestCase):
 
         def flaky(base_job, variant_job, workload, pin, timeout):
             sandbox.measured.append((sandbox.vid(variant_job["cwd"]), pin))
-            return {"status": "failed", "warnings": [], "failed_job": "B",
-                    "reason": "the baseline run exited 1 in the "
-                              "calibration phase: Round-trip data "
-                              "mismatch at iteration 0"}
+            return {
+                "status": "failed",
+                "warnings": [],
+                "failed_job": "B",
+                "reason": "the baseline run exited 1 in the "
+                "calibration phase: Round-trip data "
+                "mismatch at iteration 0",
+            }
 
         sandbox.measure = flaky
         lines = []
@@ -1892,15 +2286,24 @@ class TestRunOptimization(unittest.TestCase):
             self.assertNotIn(vid, sandbox.builds)
         self.assertNotIn("tune6", verdicts, "no PGO on a failing baseline")
         self.assertEqual(result["status"], "not measured")
-        self.assertTrue(result["reason"].startswith(
-            "the unchanged baseline failed 2 timing runs"))
+        self.assertTrue(
+            result["reason"].startswith(
+                "the unchanged baseline failed 2 timing runs"
+            )
+        )
         self.assertIn("Round-trip data mismatch", result["reason"])
-        self.assertTrue(any("memory or CPU errors" in warning
-                            for warning in result["warnings"]))
+        self.assertTrue(
+            any(
+                "memory or CPU errors" in warning
+                for warning in result["warnings"]
+            )
+        )
         self.assertIn("Result   : NO: no tune could be timed", lines)
-        self.assertTrue(lines[-2].startswith(
-            "           why: the unchanged baseline failed 2 timing runs"
-        ))
+        self.assertTrue(
+            lines[-2].startswith(
+                "           why: the unchanged baseline failed 2 timing runs"
+            )
+        )
         self.assertEqual(
             lines[-1],
             "           fix: check the machine (a memory test, a lower CPU "
@@ -1916,13 +2319,12 @@ class TestRunOptimization(unittest.TestCase):
         directory of the package tests; the shell then passed two
         programs, and the tune run wrote over the input file.
         """
-        verified = (
-            "build/cachedObjs/3a297cdcdda21e64139b4c81136d85cf/minigzip"
-        )
+        verified = "build/cachedObjs/3a297cdcdda21e64139b4c81136d85cf/minigzip"
         state = _state()
         state.curated_artifacts[0]["filepath"] = f"{REPO}/{verified}"
-        sandbox = _Sandbox(_profile(),
-                           workload=_program_workload(binary=verified))
+        sandbox = _Sandbox(
+            _profile(), workload=_program_workload(binary=verified)
+        )
         original = sandbox.inspect
 
         def tree_rel(tree):
@@ -1930,8 +2332,7 @@ class TestRunOptimization(unittest.TestCase):
             return f"build/cachedObjs/{digest}/minigzip"
 
         def inspect(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree != REPO:
                 facts["artifacts"][verified]["path"] = tree_rel(tree)
             return facts, error
@@ -1939,8 +2340,9 @@ class TestRunOptimization(unittest.TestCase):
         sandbox.inspect = inspect
         with sandbox:
             run_optimization(state)
-        self.assertEqual(sandbox.contexts[0].paths,
-                         {verified: tree_rel(f"{ROOT}/base")})
+        self.assertEqual(
+            sandbox.contexts[0].paths, {verified: tree_rel(f"{ROOT}/base")}
+        )
         self.assertIn("tune1", sandbox.jobs)
         for vid, jobs in sandbox.jobs.items():
             for job in jobs:
@@ -1963,21 +2365,24 @@ class TestRunOptimization(unittest.TestCase):
         original = sandbox.inspect
 
         def inspect(tree, artifacts, log, go, kind, read_log=False):
-            facts, error = original(tree, artifacts, log, go, kind,
-                                    read_log)
+            facts, error = original(tree, artifacts, log, go, kind, read_log)
             if tree != REPO:
-                facts["artifacts"][verified]["path"] = (
-                    f"build/cachedObjs/{sandbox.vid(tree)}/libz.a"
-                )
+                facts["artifacts"][verified][
+                    "path"
+                ] = f"build/cachedObjs/{sandbox.vid(tree)}/libz.a"
             return facts, error
 
         sandbox.inspect = inspect
         with sandbox:
             run_optimization(state)
-        self.assertEqual(sandbox.install_paths["tune1"],
-                         {verified: "build/cachedObjs/tune1/libz.a"})
-        self.assertEqual(sandbox.contexts[0].paths,
-                         {verified: "build/cachedObjs/base/libz.a"})
+        self.assertEqual(
+            sandbox.install_paths["tune1"],
+            {verified: "build/cachedObjs/tune1/libz.a"},
+        )
+        self.assertEqual(
+            sandbox.contexts[0].paths,
+            {verified: "build/cachedObjs/base/libz.a"},
+        )
 
     def test_package_tests_cannot_replace_the_tune_build(self) -> None:
         """An artifact that the tests rebuild gets the tune's build back."""
@@ -1997,15 +2402,23 @@ class TestRunOptimization(unittest.TestCase):
             return {"status": "passed"}
 
         lines = []
-        with sandbox, mock.patch.object(optimize, "execute_command",
-                                        side_effect=run_command):
-            result = run_optimization(_state(), run_tests=run_tests,
-                                      progress=lines.append)
+        with (
+            sandbox,
+            mock.patch.object(
+                optimize, "execute_command", side_effect=run_command
+            ),
+        ):
+            result = run_optimization(
+                _state(), run_tests=run_tests, progress=lines.append
+            )
         tune1 = _by_id(result)["tune1"]
         self.assertTrue(tune1["gate2"]["passed"])
         self.assertEqual(tune1["gate2"]["restored"], ["build/minigzip"])
-        self.assertIn("           the package tests rebuilt build/minigzip; "
-                      "Atesor put back the tune's build", lines)
+        self.assertIn(
+            "           the package tests rebuilt build/minigzip; "
+            "Atesor put back the tune's build",
+            lines,
+        )
         self.assertIn("tune1", tested)
         artifacts = ["build/minigzip", "build/libz.so.1", "build/libz.a"]
         keep = ["sh", "-c", optimize._KEEP_SCRIPT, "sh"] + artifacts
@@ -2013,10 +2426,14 @@ class TestRunOptimization(unittest.TestCase):
         self.assertIn((keep, f"{ROOT}/tune1"), calls)
         self.assertIn((restore, f"{ROOT}/tune1"), calls)
         # Each tree keeps its artifacts before its tests run.
-        order = [command[2] for command, cwd in calls
-                 if cwd == f"{ROOT}/tune1" and command[:1] == ["sh"]]
-        self.assertEqual(order, [optimize._KEEP_SCRIPT,
-                                 optimize._RESTORE_SCRIPT])
+        order = [
+            command[2]
+            for command, cwd in calls
+            if cwd == f"{ROOT}/tune1" and command[:1] == ["sh"]
+        ]
+        self.assertEqual(
+            order, [optimize._KEEP_SCRIPT, optimize._RESTORE_SCRIPT]
+        )
 
     def test_artifacts_that_cannot_be_kept_fail_gate_2(self) -> None:
         """No copy aside, no package tests: the tree is not trusted."""
@@ -2030,12 +2447,16 @@ class TestRunOptimization(unittest.TestCase):
             return _ok()
 
         tested = []
-        with sandbox, mock.patch.object(optimize, "execute_command",
-                                        side_effect=run_command):
+        with (
+            sandbox,
+            mock.patch.object(
+                optimize, "execute_command", side_effect=run_command
+            ),
+        ):
             result = run_optimization(
                 _state(),
-                run_tests=lambda tree, env: tested.append(tree) or {
-                    "status": "passed"},
+                run_tests=lambda tree, env: tested.append(tree)
+                or {"status": "passed"},
             )
         tune1 = _by_id(result)["tune1"]
         self.assertEqual(tune1["verdict"], "gate 2 failed")
@@ -2055,23 +2476,36 @@ class TestRunOptimization(unittest.TestCase):
         def measure(base_job, variant_job, workload, pin, timeout):
             if sandbox.vid(variant_job["cwd"]) == "tune1":
                 sandbox.measured.append(("tune1", pin))
-                return {"status": "failed", "warnings": [],
-                        "failed_job": "V", "input_changed": True,
-                        "reason": "the tune run changed its input file in "
-                                  "the warmup phase (the command must only "
-                                  "read {input})"}
+                return {
+                    "status": "failed",
+                    "warnings": [],
+                    "failed_job": "V",
+                    "input_changed": True,
+                    "reason": "the tune run changed its input file in "
+                    "the warmup phase (the command must only "
+                    "read {input})",
+                }
             return original(base_job, variant_job, workload, pin, timeout)
 
         sandbox.measure = measure
-        with sandbox, mock.patch.object(bench, "write_input",
-                                        return_value=None) as writer:
+        with (
+            sandbox,
+            mock.patch.object(
+                bench, "write_input", return_value=None
+            ) as writer,
+        ):
             result = run_optimization(_state())
         verdicts = {vid: r["verdict"] for vid, r in _by_id(result).items()}
         self.assertEqual(verdicts["tune1"], "measurement failed")
-        self.assertIn("changed its input file",
-                      _by_id(result)["tune1"]["reason"])
-        writer.assert_any_call("binary", 8, "atesor-measure",
-                               f"{ROOT}/inputs/atesor-measure.binary")
+        self.assertIn(
+            "changed its input file", _by_id(result)["tune1"]["reason"]
+        )
+        writer.assert_any_call(
+            "binary",
+            8,
+            "atesor-measure",
+            f"{ROOT}/inputs/atesor-measure.binary",
+        )
         self.assertEqual(verdicts["tune2"], "no change")
 
     def test_an_input_that_cannot_be_written_again_stops(self) -> None:
@@ -2080,13 +2514,19 @@ class TestRunOptimization(unittest.TestCase):
 
         def measure(base_job, variant_job, workload, pin, timeout):
             sandbox.measured.append((sandbox.vid(variant_job["cwd"]), pin))
-            return {"status": "failed", "warnings": [], "failed_job": "V",
-                    "input_changed": True,
-                    "reason": "the tune run changed its input file"}
+            return {
+                "status": "failed",
+                "warnings": [],
+                "failed_job": "V",
+                "input_changed": True,
+                "reason": "the tune run changed its input file",
+            }
 
         sandbox.measure = measure
-        with sandbox, mock.patch.object(bench, "write_input",
-                                        return_value="disk full"):
+        with (
+            sandbox,
+            mock.patch.object(bench, "write_input", return_value="disk full"),
+        ):
             result = run_optimization(_state())
         records = _by_id(result)
         self.assertEqual(records["tune1"]["verdict"], "measurement failed")
@@ -2103,20 +2543,33 @@ class TestRunOptimization(unittest.TestCase):
 
     def test_nothing_timed_is_not_a_lack_of_gain(self) -> None:
         """Tunes that fail to build give "not measured", not "no gain"."""
-        sandbox = _Sandbox(_profile(), failing=(
-            "tune1", "tune2", "tune3", "tune4", "tune5",
-        ))
+        sandbox = _Sandbox(
+            _profile(),
+            failing=(
+                "tune1",
+                "tune2",
+                "tune3",
+                "tune4",
+                "tune5",
+            ),
+        )
         with sandbox:
             result = run_optimization(_state())
         self.assertEqual(result["status"], "not measured")
-        self.assertIn("every tune stopped before its timing: Tune-1: "
-                      "build failed", result["reason"])
+        self.assertIn(
+            "every tune stopped before its timing: Tune-1: " "build failed",
+            result["reason"],
+        )
 
     def test_measure_respects_the_budget_and_qemu(self) -> None:
         """No session starts that the budget cannot finish."""
         record = {"variant": {"vid": "tune1"}, "tree": f"{ROOT}/tune1"}
-        slow = bench.Workload(mode="tests", command="ctest",
-                              deterministic=False, run_seconds=40.0)
+        slow = bench.Workload(
+            mode="tests",
+            command="ctest",
+            deterministic=False,
+            run_seconds=40.0,
+        )
         context = {
             "workload": slow,
             "kind": "native",
@@ -2180,16 +2633,23 @@ class TestRunOptimization(unittest.TestCase):
         """
         now = [0.0]
         sandbox = self._timed_sandbox(
-            now, lambda vid: 600, 300,
-            ratios={"tune1": (0.8, "faster"),
-                    "tune1-layout2": (0.8, "faster")},
+            now,
+            lambda vid: 600,
+            300,
+            ratios={
+                "tune1": (0.8, "faster"),
+                "tune1-layout2": (0.8, "faster"),
+            },
         )
         with sandbox:
-            result = run_optimization(_state(), budget_seconds=3600,
-                                      clock=lambda: now[0])
+            result = run_optimization(
+                _state(), budget_seconds=3600, clock=lambda: now[0]
+            )
         records = _by_id(result)
-        kept = ("the rest of the time budget is kept for the second check "
-                "of Tune-1")
+        kept = (
+            "the rest of the time budget is kept for the second check "
+            "of Tune-1"
+        )
         for vid in ("tune2", "tune3", "tune4", "tune5", "tune6"):
             with self.subTest(vid=vid):
                 self.assertEqual(records[vid]["verdict"], "skipped")
@@ -2208,21 +2668,29 @@ class TestRunOptimization(unittest.TestCase):
         the fix line asks for a larger budget.
         """
         now = [0.0]
-        sandbox = self._timed_sandbox(now, lambda vid: 1200, 1000,
-                                      ratios={"tune1": (0.8, "faster")})
+        sandbox = self._timed_sandbox(
+            now, lambda vid: 1200, 1000, ratios={"tune1": (0.8, "faster")}
+        )
         lines = []
         with sandbox:
-            result = run_optimization(_state(), budget_seconds=3600,
-                                      clock=lambda: now[0],
-                                      progress=lines.append)
+            result = run_optimization(
+                _state(),
+                budget_seconds=3600,
+                clock=lambda: now[0],
+                progress=lines.append,
+            )
         record = _by_id(result)["tune1"]
         self.assertEqual(record["verdict"], "not confirmed")
         self.assertEqual(record["unchecked"], "time")
         self.assertEqual(result["status"], "not confirmed")
-        best = ("Tune-1, 20.0% faster (not confirmed: the time budget ended "
-                "before the second check)")
-        self.assertEqual(result["headline"],
-                         f"NO: no faster tune was confirmed (best: {best})")
+        best = (
+            "Tune-1, 20.0% faster (not confirmed: the time budget ended "
+            "before the second check)"
+        )
+        self.assertEqual(
+            result["headline"],
+            f"NO: no faster tune was confirmed (best: {best})",
+        )
         self.assertEqual(
             result["reason"],
             "faster in the first measurement, but the time budget ended "
@@ -2233,55 +2701,79 @@ class TestRunOptimization(unittest.TestCase):
             "run again with a larger ATESOR_OPTIMIZE_BUDGET (this run had "
             "3600 s)",
         )
-        self.assertIn(f"Result   : NO: no faster tune was confirmed (best: "
-                      f"{best})", lines)
-        self.assertIn("           fix: run again with a larger "
-                      "ATESOR_OPTIMIZE_BUDGET (this run had 3600 s)", lines)
+        self.assertIn(
+            f"Result   : NO: no faster tune was confirmed (best: " f"{best})",
+            lines,
+        )
+        self.assertIn(
+            "           fix: run again with a larger "
+            "ATESOR_OPTIMIZE_BUDGET (this run had 3600 s)",
+            lines,
+        )
         from src import memory
-        self.assertFalse(memory.record_optimization(
-            "zlib", result, machine={"core_name": "sifive-p550"}))
+
+        self.assertFalse(
+            memory.record_optimization(
+                "zlib", result, machine={"core_name": "sifive-p550"}
+            )
+        )
 
     def test_second_check_without_time_is_not_a_failed_check(self) -> None:
         """A check that starts but cannot time does not say "did not hold"."""
         now = [0.0]
         sandbox = self._timed_sandbox(
-            now, lambda vid: 1900 if vid == "base-layout2" else 600, 300,
+            now,
+            lambda vid: 1900 if vid == "base-layout2" else 600,
+            300,
             ratios={"tune1": (0.8, "faster")},
         )
         with sandbox:
-            result = run_optimization(_state(), budget_seconds=3600,
-                                      clock=lambda: now[0])
+            result = run_optimization(
+                _state(), budget_seconds=3600, clock=lambda: now[0]
+            )
         record = _by_id(result)["tune1"]
         self.assertEqual(record["verdict"], "not confirmed")
         self.assertEqual(record["unchecked"], "time")
-        self.assertTrue(record["reason"].startswith(
-            "the second check in a second code layout"))
+        self.assertTrue(
+            record["reason"].startswith(
+                "the second check in a second code layout"
+            )
+        )
         self.assertIn("gave no time: not measured", record["reason"])
-        self.assertNotIn("tune1-layout2",
-                         [vid for vid, _ in sandbox.measured])
+        self.assertNotIn("tune1-layout2", [vid for vid, _ in sandbox.measured])
         self.assertEqual(result["status"], "not confirmed")
         self.assertNotIn("did not hold", result["headline"])
 
     def test_archive_only_library_compares_its_code(self) -> None:
         """A library of static archives only: its code counts too."""
         for code, expected in (
-            (True, "its riscv64 artifact has the code of the verified "
-                   "build"),
-            (False, "it has no ELF file or static archive with code to "
-                    "compare"),
+            (
+                True,
+                "its riscv64 artifact has the code of the verified " "build",
+            ),
+            (
+                False,
+                "it has no ELF file or static archive with code to " "compare",
+            ),
         ):
             with self.subTest(code=code):
                 state = _state()
                 state.curated_artifacts = [
-                    {"filepath": f"{REPO}/build/libopus.a",
-                     "type": "library_static", "role": "primary"}]
+                    {
+                        "filepath": f"{REPO}/build/libopus.a",
+                        "type": "library_static",
+                        "role": "primary",
+                    }
+                ]
                 sandbox = _Sandbox(_profile())
                 original = sandbox.inspect
 
-                def inspect(tree, artifacts, log, go, kind, read_log=False,
-                            code=code):
-                    facts, error = original(tree, artifacts, log, go, kind,
-                                            read_log)
+                def inspect(
+                    tree, artifacts, log, go, kind, read_log=False, code=code
+                ):
+                    facts, error = original(
+                        tree, artifacts, log, go, kind, read_log
+                    )
                     for info in facts["artifacts"].values():
                         info["archive"] = True
                         if code:
@@ -2292,11 +2784,11 @@ class TestRunOptimization(unittest.TestCase):
                 lines = []
                 with sandbox:
                     result = run_optimization(state, progress=lines.append)
-                self.assertTrue(any(expected in line for line in lines),
-                                lines)
+                self.assertTrue(any(expected in line for line in lines), lines)
                 self.assertFalse(any("all 0" in line for line in lines))
-                self.assertEqual(result["baseline"]["artifacts"],
-                                 1 if code else 0)
+                self.assertEqual(
+                    result["baseline"]["artifacts"], 1 if code else 0
+                )
 
     def test_pgo_label_names_what_it_trains_on(self) -> None:
         """C/C++ trains on a second input; Go on its own benchmarks.
@@ -2315,20 +2807,28 @@ class TestRunOptimization(unittest.TestCase):
             with self.subTest(language=language, kind=kind):
                 workload = bench.Workload(
                     mode="gobench" if language == "go" else "harness",
-                    command="{bin}", input_kind=kind,
+                    command="{bin}",
+                    input_kind=kind,
                     input_mb=8 if kind else 0,
                 )
-                base = {"variant": Variant("tune1", "t", language,
-                                           label="Tune-1").to_dict()}
+                base = {
+                    "variant": Variant(
+                        "tune1", "t", language, label="Tune-1"
+                    ).to_dict()
+                }
                 record = optimize._pgo_variant(
-                    base, dict(context, workload=workload), "Tune-2",
+                    base,
+                    dict(context, workload=workload),
+                    "Tune-2",
                     skip="kept",
                 )
                 self.assertEqual(record["verdict"], "skipped")
                 self.assertEqual(record["variant"]["value"], value)
                 report.line.assert_called_with(
-                    "Tune-2", f"profile-guided optimization = {value}, on "
-                    "top of Tune-1")
+                    "Tune-2",
+                    f"profile-guided optimization = {value}, on "
+                    "top of Tune-1",
+                )
 
     def test_rust_build_with_its_own_rustflags(self) -> None:
         """A build that sets RUSTFLAGS keeps only the LTO tune."""
@@ -2354,15 +2854,22 @@ class TestKeepArtifacts(unittest.TestCase):
     """
 
     def _sh(self, script, tree, rels):
-        return subprocess.run(["sh", "-c", script, "sh"] + rels, cwd=tree,
-                              capture_output=True, text=True, timeout=60)
+        return subprocess.run(
+            ["sh", "-c", script, "sh"] + rels,
+            cwd=tree,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
 
     def test_scripts_put_back_what_the_tests_changed(self) -> None:
         """Rebuilt, re-linked and removed artifacts all come back."""
         with tempfile.TemporaryDirectory() as tree:
+
             def write(rel, text):
-                os.makedirs(os.path.dirname(os.path.join(tree, rel)),
-                            exist_ok=True)
+                os.makedirs(
+                    os.path.dirname(os.path.join(tree, rel)), exist_ok=True
+                )
                 with open(os.path.join(tree, rel), "w") as fh:
                     fh.write(text)
 
@@ -2373,8 +2880,7 @@ class TestKeepArtifacts(unittest.TestCase):
             write("programs/lz4", "tune build")
             os.chmod(os.path.join(tree, "programs/lz4"), 0o755)
             write("lib/liblz4.so.1.10.0", "tune library")
-            os.symlink("liblz4.so.1.10.0",
-                       os.path.join(tree, "lib/liblz4.so"))
+            os.symlink("liblz4.so.1.10.0", os.path.join(tree, "lib/liblz4.so"))
             write("lib/a b/liblz4.a", "tune archive")
             rels = ["programs/lz4", "lib/liblz4.so", "lib/a b/liblz4.a"]
             kept = self._sh(optimize._KEEP_SCRIPT, tree, rels)
@@ -2384,34 +2890,42 @@ class TestKeepArtifacts(unittest.TestCase):
             write("programs/lz4", "debug build")
             write("lib/tests/liblz4.so.1.10.0", "test library")
             os.remove(os.path.join(tree, "lib/liblz4.so"))
-            os.symlink("tests/liblz4.so.1.10.0",
-                       os.path.join(tree, "lib/liblz4.so"))
+            os.symlink(
+                "tests/liblz4.so.1.10.0", os.path.join(tree, "lib/liblz4.so")
+            )
             os.remove(os.path.join(tree, "lib/a b/liblz4.a"))
             os.rmdir(os.path.join(tree, "lib/a b"))
             restored = self._sh(optimize._RESTORE_SCRIPT, tree, rels)
             self.assertEqual(restored.returncode, 0, restored.stderr)
             self.assertEqual(restored.stdout.splitlines(), rels)
             self.assertEqual(read("programs/lz4"), "tune build")
-            self.assertTrue(os.access(os.path.join(tree, "programs/lz4"),
-                                      os.X_OK))
+            self.assertTrue(
+                os.access(os.path.join(tree, "programs/lz4"), os.X_OK)
+            )
             self.assertEqual(read("lib/liblz4.so"), "tune library")
-            self.assertFalse(os.path.islink(os.path.join(tree,
-                                                         "lib/liblz4.so")))
+            self.assertFalse(
+                os.path.islink(os.path.join(tree, "lib/liblz4.so"))
+            )
             self.assertEqual(read("lib/a b/liblz4.a"), "tune archive")
-            self.assertEqual(read("lib/tests/liblz4.so.1.10.0"),
-                             "test library")
+            self.assertEqual(
+                read("lib/tests/liblz4.so.1.10.0"), "test library"
+            )
             again = self._sh(optimize._RESTORE_SCRIPT, tree, rels)
             self.assertEqual((again.returncode, again.stdout), (0, ""))
 
     def test_wrappers_report_errors(self) -> None:
         """A failed copy is an error; the restore lists what came back."""
         failed = CommandResult("cmd", 1, "", "cp: cannot stat 'x'", 0.1)
-        with mock.patch.object(optimize, "execute_command",
-                               return_value=failed):
-            self.assertEqual(optimize._keep_artifacts("/t", ["x"]),
-                             "cp: cannot stat 'x'")
-            self.assertEqual(optimize._restore_artifacts("/t", ["x"]),
-                             ([], "cp: cannot stat 'x'"))
+        with mock.patch.object(
+            optimize, "execute_command", return_value=failed
+        ):
+            self.assertEqual(
+                optimize._keep_artifacts("/t", ["x"]), "cp: cannot stat 'x'"
+            )
+            self.assertEqual(
+                optimize._restore_artifacts("/t", ["x"]),
+                ([], "cp: cannot stat 'x'"),
+            )
         with mock.patch.object(optimize, "execute_command") as run:
             self.assertEqual(optimize._keep_artifacts("/t", []), "")
             self.assertEqual(optimize._restore_artifacts("/t", []), ([], ""))
@@ -2427,27 +2941,31 @@ class TestResultContract(unittest.TestCase):
         from src.packager import package_build
 
         state = _state()
-        sandbox = _Sandbox(_profile(), workload=_harness_workload(),
-                           ratios={
-                               "tune3": (0.90, "faster"),
-                               "tune3-layout2": (0.91, "faster"),
-                           })
+        sandbox = _Sandbox(
+            _profile(),
+            workload=_harness_workload(),
+            ratios={
+                "tune3": (0.90, "faster"),
+                "tune3-layout2": (0.91, "faster"),
+            },
+        )
         with sandbox:
             result = run_optimization(state)
-        report = main.generate_detailed_report({
-            "repo_name": "zlib",
-            "build_status": "SUCCESS",
-            "artifact_verification": {"status": "verified"},
-            "optimization": result,
-            "machine_profile": state.machine_profile,
-        })
+        report = main.generate_detailed_report(
+            {
+                "repo_name": "zlib",
+                "build_status": "SUCCESS",
+                "artifact_verification": {"status": "verified"},
+                "optimization": result,
+                "machine_profile": state.machine_profile,
+            }
+        )
         for record in result["variants"]:
             self.assertIn(f"| {record['variant']['label']} |", report)
         self.assertIn("**Result**: accepted: Tune-3", report)
         self.assertIn("core sifive-p550", report)
         self.assertIn("C harness by the optimizer agent", report)
-        self.assertIn("### Workload source: `.atesor/bench/harness.c`",
-                      report)
+        self.assertIn("### Workload source: `.atesor/bench/harness.c`", report)
         self.assertIn("| 0.9 (0.89-0.91) |", report)
         json.dumps(result)
 
@@ -2555,10 +3073,13 @@ class TestSandboxPath(unittest.TestCase):
                 mock.patch.object(target, "ssh_alias", return_value="-c"),
             ]
         else:
-            patches.append(mock.patch.object(
-                tools.DockerConfig, "is_container_running",
-                return_value=True,
-            ))
+            patches.append(
+                mock.patch.object(
+                    tools.DockerConfig,
+                    "is_container_running",
+                    return_value=True,
+                )
+            )
         return patches
 
     def test_programs_on_both_targets(self) -> None:
@@ -2577,44 +3098,59 @@ class TestSandboxPath(unittest.TestCase):
         root = src + ".opt"
         dest = os.path.join(root, "v1-tune")
         self.assertIsNone(optimize.prepare_tree(src, dest, root))
-        self.assertTrue(os.access(os.path.join(dest, ".atesor", "cc"),
-                                  os.X_OK))
+        self.assertTrue(
+            os.access(os.path.join(dest, ".atesor", "cc"), os.X_OK)
+        )
         image = _elf(_code("sh3add a0, a1, a2", "c.zext.b a0"))
         with open(os.path.join(dest, "bin", "tool"), "wb") as handle:
             handle.write(image)
         facts, error = optimize.inspect_tree(
-            dest, ["bin/tool"], os.path.join(dest, ".atesor", "cc.log"),
-            False, "native",
+            dest,
+            ["bin/tool"],
+            os.path.join(dest, ".atesor", "cc.log"),
+            False,
+            "native",
         )
         self.assertEqual(error, "")
         self.assertEqual(facts["cc_calls"], 0)
-        self.assertEqual(facts["artifacts"]["bin/tool"]["counts"],
-                         {"zba": 1, "zcb": 1})
+        self.assertEqual(
+            facts["artifacts"]["bin/tool"]["counts"], {"zba": 1, "zcb": 1}
+        )
         out = os.path.join(base, "out.txt")
-        value = "a'b \"c\" $d `e`"
+        value = 'a\'b "c" $d `e`'
         payload = bench.run_jobs(
-            {"jobs": {"B": {"cmd": 'printf "%s|%s" "$X" "$QEMU_CPU" > '
-                                   + out,
-                            "env": {"X": value}}},
-             "rounds": 1, "seed": 1, "hash_output": True},
+            {
+                "jobs": {
+                    "B": {
+                        "cmd": 'printf "%s|%s" "$X" "$QEMU_CPU" > ' + out,
+                        "env": {"X": value},
+                    }
+                },
+                "rounds": 1,
+                "seed": 1,
+                "hash_output": True,
+            },
             timeout=120,
             extra_env={"QEMU_CPU": "rv64i,m=true,zba=true"},
         )
         self.assertIsNone(payload["error"], payload)
         with open(out) as handle:
-            self.assertEqual(handle.read(),
-                             value + "|rv64i,m=true,zba=true")
+            self.assertEqual(handle.read(), value + "|rv64i,m=true,zba=true")
         sample = os.path.join(base, "input.txt")
         self.assertIsNone(bench.write_input("text", 1, "seed A", sample))
         self.assertGreaterEqual(os.path.getsize(sample), 1 << 20)
         source = 'printf("ATESOR-CHECK %d\\n", 1); // it\'s "quoted" $x\n'
-        self.assertIsNone(workload_module.write_files(
-            dest, {".atesor/bench/harness.c": source}
-        ))
+        self.assertIsNone(
+            workload_module.write_files(
+                dest, {".atesor/bench/harness.c": source}
+            )
+        )
         with open(os.path.join(dest, ".atesor", "bench", "harness.c")) as fh:
             self.assertEqual(fh.read(), source)
-        self.assertIn("refusing to write outside the tree",
-                      workload_module.write_files(dest, {"../x.c": "x"}))
+        self.assertIn(
+            "refusing to write outside the tree",
+            workload_module.write_files(dest, {"../x.c": "x"}),
+        )
         copied, error = optimize._run_program(
             optimize._FINISH_PROGRAM,
             {"root": root, "reset": True},

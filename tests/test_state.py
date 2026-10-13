@@ -503,7 +503,7 @@ class TestRiscvToolchainClassification(unittest.TestCase):
             ErrorCategory.DEPENDENCY,
         ),
         ("ERROR: Unable to lock database", ErrorCategory.DEPENDENCY),
-        ("#error \"Unsupported architecture\"", ErrorCategory.ARCHITECTURE),
+        ('#error "Unsupported architecture"', ErrorCategory.ARCHITECTURE),
         ("No space left on device", ErrorCategory.DISK_SPACE),
         ("Error: unrecognized opcode `rdtsc'", ErrorCategory.ARCHITECTURE),
         (
@@ -1064,9 +1064,7 @@ class TestUncoveredHelperBranches(unittest.TestCase):
     def test_default_action_is_builder(self) -> None:
         state = self._plan_state()
         state.build_status = BuildStatus.FIXING
-        self.assertEqual(
-            get_next_action_recommendation(state), Action.BUILDER
-        )
+        self.assertEqual(get_next_action_recommendation(state), Action.BUILDER)
 
 
 if __name__ == "__main__":

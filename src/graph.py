@@ -225,7 +225,9 @@ def extract_content(content: Any) -> str:
     """Return the text of an LLM response content payload.
 
     Providers return either a plain string or a list of content parts
-    (dicts with a ``text`` key); both shapes flatten to one string.
+    (dicts with a ``text`` key); both shapes flatten to one string. A
+    part with a ``type`` other than ``text`` (for example a Claude
+    ``thinking`` block) holds no answer text and is skipped.
     """
     if isinstance(content, str):
         return content
@@ -238,6 +240,10 @@ def extract_content(content: Any) -> str:
                     else str(item)
                 )
                 for item in content
+                if not (
+                    isinstance(item, dict)
+                    and item.get("type", "text") != "text"
+                )
             ]
         )
     return str(content)
@@ -269,7 +275,12 @@ def _build_platform_banner() -> str:
 
         p = get_active_profile()
         pm = p.pkg_install.split()[0]  # "apk" / "apt-get"
-        install_example = p.install_cmd(["<pkg>"])
+        # Two commands, never one `update && install` chain: the fixer
+        # validator (CommandValidator.is_safe_single) rejects chains.
+        install_example = (
+            f"`{p.pkg_update}`, then `{p.pkg_install} <pkg>` as a "
+            f"separate command"
+        )
         other_pms = (
             "apt-get / apt / dpkg" if pm == "apk" else "apk / apk-tools"
         )
@@ -290,13 +301,14 @@ def _build_platform_banner() -> str:
             canonical, distro_pkg = next(iter(p.package_map.items()))
             worked_example = (
                 f"\n- Worked example for this distro: install "
-                f"`{canonical}` via `{p.install_cmd([distro_pkg])}`."
+                f"`{canonical}` via `{p.pkg_update}`, then "
+                f"`{p.pkg_install} {distro_pkg}`."
             )
         return (
             f"- Distro: **{p.display_name}** (libc: **{p.libc}**, "
             f"triplet: `{p.target_triplet}`)\n"
             f"- Package manager: **{pm}** (full install: "
-            f"`{install_example}`)\n"
+            f"{install_example})\n"
             f"- NEVER emit {other_pms} commands — they do not exist "
             f"in this container\n"
             f"  and will fail with `command not found`. This is "
@@ -1218,9 +1230,7 @@ def _rewind_after_verify_failure(state: AgentState) -> None:
         ),
         len(plan.phases) - 1,
     )
-    state.last_successful_phase = (
-        plan.phases[start - 1].id if start > 0 else 0
-    )
+    state.last_successful_phase = plan.phases[start - 1].id if start > 0 else 0
     for phase in plan.phases[start:]:
         for command in phase.commands:
             state.forget_command_result(command)
@@ -3463,8 +3473,11 @@ FIXER_PROMPT = (
     "*\n"
     "\n"
     "## Critical rules\n"
-    "- Each command runs in a fresh shell at the repo root. Chain `cd` w"
-    "ith `&&`.\n"
+    "- Each action holds ONE command and runs in a fresh shell at the "
+    "repo root. Never join commands with `&&`, `||`, `;` or `|`: the "
+    "validator rejects the whole strategy. The one allowed prefix is "
+    "`cd <dir> && `. Put the package-index update and the install in "
+    "two separate actions.\n"
     "- Do NOT propose unrelated cleanups. Fix only what's broken.\n"
     "- For Go: `-buildvcs=false` is required; never install Go via the p"
     "ackage manager (it is preinstalled in the sandbox). Avoid `go build "
@@ -3899,9 +3912,7 @@ def fixer_node(state: AgentState) -> AgentState:
                 if full_file_path and not _is_within_repo(
                     full_file_path, state.repo_path
                 ):
-                    logger.error(
-                        f"Refusing patch outside repo: {file_path}"
-                    )
+                    logger.error(f"Refusing patch outside repo: {file_path}")
                     changes_made.append(
                         f"REJECTED patch outside repo: {file_path}"
                     )
@@ -4510,7 +4521,7 @@ def finish_node(state: AgentState) -> AgentState:
             agent_role=AgentRole.SUMMARIZER.value,
             prompt=prompt,
             response=recipe,
-            model=llm.model_name if hasattr(llm, "model_name") else "unknown",
+            model=_llm_name(llm) or "unknown",
             cost_usd=cost,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -4716,7 +4727,8 @@ def _optimizer_agent(
             # models get the question once.
             names = {_llm_name(llm) or id(llm) for llm in pool}
             spare = [
-                llm for llm in get_model_pool_for_role(other)
+                llm
+                for llm in get_model_pool_for_role(other)
                 if (_llm_name(llm) or id(llm)) not in names
             ]
             if spare:

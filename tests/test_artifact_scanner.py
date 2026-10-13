@@ -37,13 +37,37 @@ def _elf(machine: int, bits: int = 64, e_type: int = 2, flags: int = 0):
     ident = b"\x7fELF" + bytes([bits // 32, 1, 1]) + b"\0" * 9
     if bits == 64:
         body = struct.pack(
-            "<HHIQQQIHHHHHH", e_type, machine, 1, 0, 64, 0, flags,
-            64, 56, 0, 64, 0, 0,
+            "<HHIQQQIHHHHHH",
+            e_type,
+            machine,
+            1,
+            0,
+            64,
+            0,
+            flags,
+            64,
+            56,
+            0,
+            64,
+            0,
+            0,
         )
     else:
         body = struct.pack(
-            "<HHIIIIIHHHHHH", e_type, machine, 1, 0, 52, 0, flags,
-            52, 32, 0, 40, 0, 0,
+            "<HHIIIIIHHHHHH",
+            e_type,
+            machine,
+            1,
+            0,
+            52,
+            0,
+            flags,
+            52,
+            32,
+            0,
+            40,
+            0,
+            0,
         )
     return (ident + body).ljust(128, b"\0")
 
@@ -231,9 +255,7 @@ class TestArchives(_RepoCase):
     def test_one_foreign_member_fails_the_archive(self) -> None:
         riscv = _elf(EM_RISCV, e_type=1, flags=RVC_DOUBLE)
         x86 = _elf(EM_X86_64, e_type=1)
-        self.put(
-            "libmix.a", _ar([("a.o", riscv), ("z.o", x86)]), False
-        )
+        self.put("libmix.a", _ar([("a.o", riscv), ("z.o", x86)]), False)
 
         verdict = self.run_scan()
 
@@ -262,12 +284,16 @@ class TestScanIntegration(_RepoCase):
     def test_committed_foreign_blob_does_not_decide(self) -> None:
         self.put("vendor/prebuilt.so", _elf(EM_X86_64, e_type=3))
         self._git("init", "-q")
+        self._git("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
         self._git(
-            "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"
-        )
-        self._git(
-            "-c", "user.name=t", "-c", "user.email=t@t",
-            "commit", "-q", "-m", "vendored blob",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "vendored blob",
         )
         self.put("build/tool", _elf(EM_RISCV, flags=RVC_DOUBLE))
 
@@ -329,12 +355,16 @@ class TestScanIntegration(_RepoCase):
         for name in ("p1", "p2", "p3"):
             self.put(f"a/{name}", _elf(EM_RISCV, flags=RVC_DOUBLE))
         self._git("init", "-q")
+        self._git("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
         self._git(
-            "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"
-        )
-        self._git(
-            "-c", "user.name=t", "-c", "user.email=t@t",
-            "commit", "-q", "-m", "vendored riscv64 blobs",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "vendored riscv64 blobs",
         )
         self.put("b/tool", _elf(EM_RISCV, flags=RVC_DOUBLE))
 

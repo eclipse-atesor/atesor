@@ -412,8 +412,9 @@ class TestRouteCachedRecipe(unittest.TestCase):
             route_cached_recipe_to_next(_base_state(build_plan=plan)),
             "supervisor_node",
         )
-        self.assertEqual(route_cached_recipe_to_next(_base_state()),
-                         "analyst_node")
+        self.assertEqual(
+            route_cached_recipe_to_next(_base_state()), "analyst_node"
+        )
 
     def test_the_node_is_wired(self) -> None:
         """The compiled graph has the node between init and supervisor."""

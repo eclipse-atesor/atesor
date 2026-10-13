@@ -203,9 +203,7 @@ def _write_remaining(
         for name in remaining:
             if name not in stem_of:
                 continue
-            legacy_stem = (
-                legacy_stem_of.get(name) if legacy_stem_of else None
-            )
+            legacy_stem = legacy_stem_of.get(name) if legacy_stem_of else None
             unique = bool(legacy_unique and legacy_unique.get(name, False))
             stem_payload[name] = {
                 "package_stem": stem_of[name],

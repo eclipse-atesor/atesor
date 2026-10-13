@@ -102,9 +102,7 @@ class TestAtesorHomeOverride(unittest.TestCase):
         self.assertEqual(root, os.path.join(home, "workspace"))
 
     def test_docker_default_without_override(self) -> None:
-        env = {
-            k: v for k, v in os.environ.items() if k != "ATESOR_HOME"
-        }
+        env = {k: v for k, v in os.environ.items() if k != "ATESOR_HOME"}
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch.object(
                 config, "is_running_in_docker", return_value=True
@@ -201,9 +199,7 @@ class TestNativeWorkspaceInContainer(unittest.TestCase):
 
     def test_native_root_is_not_the_container_workspace(self) -> None:
         """The docker /workspace shortcut applies to qemu only."""
-        env = {
-            k: v for k, v in os.environ.items() if k != "ATESOR_HOME"
-        }
+        env = {k: v for k, v in os.environ.items() if k != "ATESOR_HOME"}
         env["ATESOR_TARGET"] = "native"
         with (
             mock.patch.dict(os.environ, env, clear=True),

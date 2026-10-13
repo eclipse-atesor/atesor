@@ -63,11 +63,6 @@ _MODELS_PY = os.path.join(
 )
 
 
-# Atesor has no Anthropic entry in MODEL_CONFIG to extract, so the probe
-# pins a cheap current model id instead.
-_ANTHROPIC_PROBE_MODEL = "claude-haiku-4-5-20251001"
-
-
 class ConfigError(RuntimeError):
     """Raised when the model configuration cannot be read from source."""
 
@@ -406,11 +401,7 @@ def check_gemini() -> Result:
 
 
 def check_anthropic() -> Result:
-    """Probe Anthropic with a minimal message on a pinned model.
-
-    Atesor has no Anthropic provider — ModelProvider in src/models.py is
-    openai|gemini|openrouter — so this only validates a key ahead of
-    wiring one up. Batch runs never depend on the result.
+    """Probe Anthropic with a minimal message on the configured model.
 
     Returns:
         The probe result. ``ok`` is True when the message succeeds.
@@ -427,7 +418,7 @@ def check_anthropic() -> Result:
                 "anthropic-version": "2023-06-01",
             },
             payload={
-                "model": _ANTHROPIC_PROBE_MODEL,
+                "model": _primary_model("anthropic"),
                 "max_tokens": 8,
                 "messages": [{"role": "user", "content": PROBE}],
             },
@@ -447,7 +438,7 @@ CHECKS: Dict[str, Callable[[], Result]] = {
 }
 
 # Providers Atesor can actually be driven by (see ModelProvider).
-WIRED = {"openrouter", "gemini", "openai"}
+WIRED = {"openrouter", "gemini", "openai", "anthropic"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

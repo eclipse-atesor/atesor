@@ -72,9 +72,7 @@ def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
     so concurrent writers in one process cannot share a temp file.
     """
     os.makedirs(path.parent, exist_ok=True)
-    temp_name = (
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temp_name = f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     temp_path = path.parent / temp_name
     try:
         with open(temp_path, "w", encoding="utf-8") as file_obj:
@@ -603,9 +601,7 @@ class AgentMemory:
                             continue
                 example_data["id"] = f"{prefix}{max_num + 1:03d}"
                 example_data["source"] = "auto"
-                example_data["timestamp"] = datetime.now().strftime(
-                    "%Y-%m-%d"
-                )
+                example_data["timestamp"] = datetime.now().strftime("%Y-%m-%d")
                 examples_list.append(example_data)
 
                 examples_list = self._prune_examples_list(examples_list)

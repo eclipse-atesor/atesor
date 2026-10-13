@@ -1119,9 +1119,7 @@ def main() -> int:
     # batch and the per-worker child commands agree with the user's
     # configuration instead of silently falling back to the default.
     if not args.platform:
-        env_platform = (
-            os.environ.get("ATESOR_PLATFORM", "").strip().lower()
-        )
+        env_platform = os.environ.get("ATESOR_PLATFORM", "").strip().lower()
         if env_platform and env_platform != PLATFORM:
             if env_platform not in _PLATFORM_CONTAINERS:
                 print(

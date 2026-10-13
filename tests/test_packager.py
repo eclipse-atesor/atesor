@@ -59,9 +59,7 @@ class TestPackageBuild(unittest.TestCase):
         import re
 
         base = os.path.basename(self._build())
-        self.assertRegex(
-            base, r"^owasp-amass-amass-\d{8}-\d{6}-debian\.zip$"
-        )
+        self.assertRegex(base, r"^owasp-amass-amass-\d{8}-\d{6}-debian\.zip$")
         # Without a URL the repository name stays the stem.
         legacy = os.path.basename(self._build(repo_url=None))
         self.assertIsNotNone(
@@ -102,8 +100,10 @@ class TestPackageBuild(unittest.TestCase):
         zp = self._build(
             verification=verification,
             curated_artifacts=[
-                {"filepath": f"{container_root}/build/amass",
-                 "role": "primary"}
+                {
+                    "filepath": f"{container_root}/build/amass",
+                    "role": "primary",
+                }
             ],
             container_repo_path=container_root,
         )
@@ -304,10 +304,16 @@ class TestOptimizedPackage(unittest.TestCase):
             "accepted_ratio": 0.9,
             "accepted_artifacts": ["build/amass", "../escape", "link"],
             "variants": [
-                {"variant": {"vid": "v1-tune", "flags": ["-mtune=x"]},
-                 "verdict": "no change", "ratio": 0.99},
-                {"variant": {"vid": "v3-o3", "flags": ["-O3"]},
-                 "verdict": "faster", "ratio": 0.9},
+                {
+                    "variant": {"vid": "v1-tune", "flags": ["-mtune=x"]},
+                    "verdict": "no change",
+                    "ratio": 0.99,
+                },
+                {
+                    "variant": {"vid": "v3-o3", "flags": ["-O3"]},
+                    "verdict": "faster",
+                    "ratio": 0.9,
+                },
             ],
         }
 
@@ -323,9 +329,14 @@ class TestOptimizedPackage(unittest.TestCase):
         with open(os.path.join(self.root, "repos", "escape"), "w") as fh:
             fh.write("outside")
         os.symlink(tool, os.path.join(accepted, "link"))
-        machine = {"kind": "native", "label": "rv64gc+zba+zbb",
-                   "core_name": "sifive-p550", "misaligned": "slow",
-                   "extensions": ["zba", "zbb"], "board": {"x": 1}}
+        machine = {
+            "kind": "native",
+            "label": "rv64gc+zba+zbb",
+            "core_name": "sifive-p550",
+            "misaligned": "slow",
+            "extensions": ["zba", "zbb"],
+            "board": {"x": 1},
+        }
         zp = self._build(
             optimization=self._optimization(),
             machine=machine,
@@ -344,8 +355,12 @@ class TestOptimizedPackage(unittest.TestCase):
         self.assertEqual(section["workload"], "compress 64 MiB")
         self.assertEqual(
             section["artifacts"],
-            [{"path_in_zip": "optimized/build/amass",
-              "sha256": hashlib.sha256(b"\x7fELF optimized").hexdigest()}],
+            [
+                {
+                    "path_in_zip": "optimized/build/amass",
+                    "sha256": hashlib.sha256(b"\x7fELF optimized").hexdigest(),
+                }
+            ],
         )
         self.assertEqual(len(section["variants"]), 2)
         self.assertEqual(payload, b"\x7fELF optimized")
@@ -354,8 +369,9 @@ class TestOptimizedPackage(unittest.TestCase):
 
     def test_optimization_without_accepted_dir(self) -> None:
         """A run that accepted nothing still records schema 3."""
-        record = dict(self._optimization(), accepted=None,
-                      accepted_artifacts=[])
+        record = dict(
+            self._optimization(), accepted=None, accepted_artifacts=[]
+        )
         zp = self._build(optimization=record, machine=None)
         with zipfile.ZipFile(zp) as zf:
             m = json.loads(zf.read("manifest.json"))

@@ -118,10 +118,10 @@ class TestBasicGraphHelpers(unittest.TestCase):
 
     def test_extract_json_block_slices_outer_object(self) -> None:
         """JSON extraction slices from the first ``{`` to the last ``}``."""
-        text = "prefix {\"ok\": true, \"nested\": {\"x\": 1}} suffix"
+        text = 'prefix {"ok": true, "nested": {"x": 1}} suffix'
         self.assertEqual(
             extract_json_block(text),
-            "{\"ok\": true, \"nested\": {\"x\": 1}}",
+            '{"ok": true, "nested": {"x": 1}}',
         )
         self.assertEqual(extract_json_block("no json here"), "no json here")
 
@@ -1436,9 +1436,7 @@ class TestPackageTestPhase(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        host = mock.patch(
-            "src.graph._to_host_path", return_value=self.root
-        )
+        host = mock.patch("src.graph._to_host_path", return_value=self.root)
         host.start()
         self.addCleanup(host.stop)
 
@@ -1539,9 +1537,7 @@ class TestPackageTestPhase(unittest.TestCase):
         self.assertEqual(
             graph._run_package_tests(self.state)["status"], "skipped"
         )
-        with mock.patch.dict(
-            os.environ, {"ATESOR_PACKAGE_TEST_TIMEOUT": "0"}
-        ):
+        with mock.patch.dict(os.environ, {"ATESOR_PACKAGE_TEST_TIMEOUT": "0"}):
             self.assertEqual(
                 graph._run_package_tests(self.state)["status"], "skipped"
             )
@@ -1573,3 +1569,46 @@ class TestPackageTestPhase(unittest.TestCase):
             timeout=graph.PACKAGE_TEST_TIMEOUT,
             extra_env={"CC": "/w/cc"},
         )
+
+
+class TestExtractContentThinking(unittest.TestCase):
+    """Tests for Claude thinking blocks in graph.extract_content."""
+
+    def test_skips_thinking_blocks(self) -> None:
+        content = [
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "text", "text": "answer"},
+        ]
+        self.assertEqual(extract_content(content), "answer")
+
+
+class TestFixerSingleCommandGuidance(unittest.TestCase):
+    """The fixer guidance must match CommandValidator.is_safe_single."""
+
+    def test_banner_shows_no_chained_install(self) -> None:
+        from src.graph import _build_platform_banner
+
+        self.assertNotIn(" && ", _build_platform_banner())
+
+    def test_fixer_rule_forbids_chains(self) -> None:
+        from src.graph import FIXER_PROMPT
+
+        self.assertIn("Never join commands", FIXER_PROMPT)
+        self.assertNotIn("Chain `cd` with `&&`", FIXER_PROMPT)
+
+    def test_seed_fixer_examples_are_single_commands(self) -> None:
+        import json
+
+        from src.tools import CommandValidator
+
+        path = Path(__file__).parent.parent / "data/examples"
+        data = json.loads((path / "fixer_examples.json").read_text())
+        validator = CommandValidator()
+        for example in data["examples"]:
+            for action in example.get("fix", {}).get("actions", []):
+                if action.get("type") != "command":
+                    continue
+                command = action["command"].replace("{repo_name}", "x")
+                with self.subTest(example=example["id"], command=command):
+                    ok, reason = validator.is_safe_single(command)
+                    self.assertTrue(ok, reason)

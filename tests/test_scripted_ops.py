@@ -377,7 +377,7 @@ class TestArchitectureScan:
             "#if defined(__x86_64__)\n#else\n#error no arch\n#endif\n",
         )
         _write(repo, "Makefile", "CFLAGS += -mavx2 -march=native\n")
-        _write(repo, "src/asm.c", "void f(){ __asm__(\"nop\"); }\n")
+        _write(repo, "src/asm.c", 'void f(){ __asm__("nop"); }\n')
         _write(repo, "asm/start.S", "nop\n")
         _write(repo, "cmd/tool/foo_amd64.go", "package main\n")
         _write(repo, "cmd/tool/tags.go", "//go:build amd64 && !riscv64\n")
@@ -446,9 +446,7 @@ class TestArchitectureScan:
         findings = ScriptedOperations(repo).find_architecture_specific_code(
             repo
         )
-        flagged = {
-            (finding.arch_type, finding.file) for finding in findings
-        }
+        flagged = {(finding.arch_type, finding.file) for finding in findings}
 
         assert ("go_build_constraints", "a/legacy.go") in flagged
         assert ("go_arch_files", "a/fast_amd64.go") in flagged
@@ -654,12 +652,13 @@ class TestCloneResetsExistingRepo:
         def fake(cmd, **kwargs):
             """Fake execute_command that records every issued command."""
             commands.append(cmd)
-            if (
-                isinstance(cmd, list)
-                and cmd[:5]
-                == ["git", "-c", "safe.directory=*", "-C",
-                    "/workspace/repos/bar"]
-            ):
+            if isinstance(cmd, list) and cmd[:5] == [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-C",
+                "/workspace/repos/bar",
+            ]:
                 return CommandResult(
                     str(cmd),
                     0,
@@ -707,12 +706,13 @@ class TestCloneResetsExistingRepo:
         def fake(cmd, **kwargs):
             """Return a different remote for the existing clone."""
             commands.append(cmd)
-            if (
-                isinstance(cmd, list)
-                and cmd[:5]
-                == ["git", "-c", "safe.directory=*", "-C",
-                    "/workspace/repos/cli"]
-            ):
+            if isinstance(cmd, list) and cmd[:5] == [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-C",
+                "/workspace/repos/cli",
+            ]:
                 return CommandResult(
                     str(cmd),
                     0,
@@ -774,10 +774,11 @@ class TestNativeRepoChecks:
             commands.append(cmd)
             if isinstance(cmd, list) and cmd[:2] == ["test", "-e"]:
                 return CommandResult(str(cmd), 0 if exists else 1, "", "", 0)
-            if (
-                isinstance(cmd, list)
-                and cmd[:3] == ["git", "-c", "safe.directory=*"]
-            ):
+            if isinstance(cmd, list) and cmd[:3] == [
+                "git",
+                "-c",
+                "safe.directory=*",
+            ]:
                 return CommandResult(
                     str(cmd),
                     0,
@@ -1024,12 +1025,15 @@ class TestScriptedOpsContainerHealth(unittest.TestCase):
                 )
             return _command_result(cmd)
 
-        with mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=profile,
-        ), mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=profile,
+            ),
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             ScriptedOperations()._ensure_container_healthy()
 
@@ -1061,12 +1065,15 @@ class TestScriptedOpsContainerHealth(unittest.TestCase):
                 )
             return _command_result(cmd)
 
-        with mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=profile,
-        ), mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=profile,
+            ),
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             ScriptedOperations()._ensure_container_healthy()
 
@@ -1126,17 +1133,21 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
                 return _command_result(cmd, exit_code=1, stderr="safe fail")
             return _command_result(cmd)
 
-        with mock.patch.object(
-            ops,
-            "_ensure_container_healthy",
-            return_value=None,
-        ), mock.patch.object(
-            ops,
-            "_init_submodules_if_present",
-            init_submodules,
-        ), mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch.object(
+                ops,
+                "_ensure_container_healthy",
+                return_value=None,
+            ),
+            mock.patch.object(
+                ops,
+                "_init_submodules_if_present",
+                init_submodules,
+            ),
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             result = ops._clone_or_update_inner(
                 "https://github.com/foo/bar.git",
@@ -1167,21 +1178,26 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
                 return _command_result(cmd)
             return _command_result(cmd)
 
-        with mock.patch.dict(
-            os.environ,
-            {"GIT_TOKEN": "secret"},
-            clear=False,
-        ), mock.patch.object(
-            ops,
-            "_ensure_container_healthy",
-            return_value=None,
-        ), mock.patch.object(
-            ops,
-            "_init_submodules_if_present",
-            return_value=None,
-        ), mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"GIT_TOKEN": "secret"},
+                clear=False,
+            ),
+            mock.patch.object(
+                ops,
+                "_ensure_container_healthy",
+                return_value=None,
+            ),
+            mock.patch.object(
+                ops,
+                "_init_submodules_if_present",
+                return_value=None,
+            ),
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             result = ops.clone_or_update_repository(
                 "https://github.com/foo/bar.git",
@@ -1203,21 +1219,26 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
                 return _command_result(cmd, exit_code=128, stderr="missing")
             return _command_result(cmd)
 
-        with mock.patch.object(
-            ops,
-            "_ensure_container_healthy",
-            return_value=None,
-        ), mock.patch.object(
-            ops,
-            "_init_submodules_if_present",
-            return_value=None,
-        ), mock.patch.object(
-            ops,
-            "_try_url_variants",
-            return_value=variant,
-        ) as try_variants, mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch.object(
+                ops,
+                "_ensure_container_healthy",
+                return_value=None,
+            ),
+            mock.patch.object(
+                ops,
+                "_init_submodules_if_present",
+                return_value=None,
+            ),
+            mock.patch.object(
+                ops,
+                "_try_url_variants",
+                return_value=variant,
+            ) as try_variants,
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             result = ops._clone_or_update_inner(
                 "https://example.com/project",
@@ -1241,17 +1262,21 @@ class TestScriptedOpsCloneFlows(_RepoBackedTestCase):
                 return _command_result(cmd, exit_code=128, stderr="missing")
             return _command_result(cmd)
 
-        with mock.patch.object(
-            ops,
-            "_ensure_container_healthy",
-            return_value=None,
-        ), mock.patch.object(
-            ops,
-            "_try_url_variants",
-            return_value=None,
-        ), mock.patch(
-            "src.scripted_ops.execute_command",
-            side_effect=fake_execute,
+        with (
+            mock.patch.object(
+                ops,
+                "_ensure_container_healthy",
+                return_value=None,
+            ),
+            mock.patch.object(
+                ops,
+                "_try_url_variants",
+                return_value=None,
+            ),
+            mock.patch(
+                "src.scripted_ops.execute_command",
+                side_effect=fake_execute,
+            ),
         ):
             result = ops._clone_or_update_inner(
                 "https://example.com/project",
@@ -1701,9 +1726,12 @@ class TestScriptedOpsArchitectureBranches(_RepoBackedTestCase):
             result = self._ops().detect_arch_specific_build_files(self.repo)
 
         self.assertTrue(result["riscv_exists"])
-        self.assertEqual(result["arch_files"]["riscv"], [
-            "/workspace/repo/build_riscv64.mk",
-        ])
+        self.assertEqual(
+            result["arch_files"]["riscv"],
+            [
+                "/workspace/repo/build_riscv64.mk",
+            ],
+        )
         self.assertEqual(result["suggested_riscv_files"], [])
 
 
@@ -1803,12 +1831,15 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
             max_lines=2,
         )
 
-        with mock.patch(
-            "src.scripted_ops.os.path.exists",
-            return_value=True,
-        ), mock.patch(
-            "builtins.open",
-            side_effect=OSError("boom"),
+        with (
+            mock.patch(
+                "src.scripted_ops.os.path.exists",
+                return_value=True,
+            ),
+            mock.patch(
+                "builtins.open",
+                side_effect=OSError("boom"),
+            ),
         ):
             errored = self._ops().read_file(os.path.join(self.repo, "bad.txt"))
 

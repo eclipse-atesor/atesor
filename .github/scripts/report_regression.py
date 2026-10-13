@@ -70,7 +70,7 @@ def collect_categories(
     pattern = os.path.join(results_dir, "results-*.xml")
     for xml_path in sorted(glob.glob(pattern)):
         base = os.path.basename(xml_path)
-        category = base[len("results-"):-len(".xml")]
+        category = base[len("results-") : -len(".xml")]
         paths_file = os.path.join(results_dir, f"paths-{category}.txt")
         claimed: List[str] = []
         if os.path.exists(paths_file):
@@ -99,9 +99,7 @@ def check_coverage(
     claims: Dict[str, List[str]] = {}
     for category, _, claimed in rows:
         for path in claimed:
-            claims.setdefault(os.path.normpath(path), []).append(
-                category
-            )
+            claims.setdefault(os.path.normpath(path), []).append(category)
     repo_files = sorted(
         os.path.normpath(p)
         for p in glob.glob(os.path.join(tests_dir, "test_*.py"))
@@ -109,9 +107,7 @@ def check_coverage(
     for path in repo_files:
         owners = claims.get(path, [])
         if not owners:
-            problems.append(
-                f"`{path}` is not part of any workflow category"
-            )
+            problems.append(f"`{path}` is not part of any workflow category")
         elif len(owners) > 1:
             problems.append(
                 f"`{path}` is claimed by multiple categories: "
@@ -120,8 +116,7 @@ def check_coverage(
     for path, owners in sorted(claims.items()):
         if path not in repo_files:
             problems.append(
-                f"category {owners[0]} references missing file "
-                f"`{path}`"
+                f"category {owners[0]} references missing file " f"`{path}`"
             )
     return problems
 
@@ -171,10 +166,7 @@ def build_summary(
             f"| {totals['time']:.1f} |"
         )
     grand_passed = (
-        grand["tests"]
-        - grand["failures"]
-        - grand["errors"]
-        - grand["skipped"]
+        grand["tests"] - grand["failures"] - grand["errors"] - grand["skipped"]
     )
     lines.append(
         f"| **Total** | **{int(grand['tests'])}** "

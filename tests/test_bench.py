@@ -148,13 +148,14 @@ class TestWorkloadGrammar(unittest.TestCase):
         # tests, and the shell would pass two programs.
         verified = "programs/cachedObjs/3a297cdcdda21e64139b4c81136d85cf/lz4"
         tree_rel = "programs/cachedObjs/040a18f2705e92c766de69f149358e8a/lz4"
-        hashed = Workload(mode="program", command="{bin} -9",
-                          binary=verified)
-        self.assertEqual(render(hashed, "/w/t", None, None,
-                                {verified: tree_rel}),
-                         f"/w/t/{tree_rel} -9")
-        self.assertEqual(render(hashed, "/w/t", None, None),
-                         f"/w/t/{verified} -9")
+        hashed = Workload(mode="program", command="{bin} -9", binary=verified)
+        self.assertEqual(
+            render(hashed, "/w/t", None, None, {verified: tree_rel}),
+            f"/w/t/{tree_rel} -9",
+        )
+        self.assertEqual(
+            render(hashed, "/w/t", None, None), f"/w/t/{verified} -9"
+        )
         self.assertNotIn("*", render(hashed, "/w/t", None, None))
         harness = Workload(
             mode="harness",
@@ -178,9 +179,11 @@ class TestWorkloadGrammar(unittest.TestCase):
         """Each {path:REL} becomes the tree's quoted path of REL."""
         verified = "lib/cachedObjs/c325c18bd8879e9a60f926c1c986eb23/a.so"
         tree_rel = "lib/cachedObjs/0b1e2c3d4f5a6b7c8d9e0f1a2b3c4d5e/a.so"
-        command = (f"cc x.c {bench.path_word(verified)} "
-                   f"{bench.path_word('my lib/b.a')} && "
-                   "{ echo kept; }")
+        command = (
+            f"cc x.c {bench.path_word(verified)} "
+            f"{bench.path_word('my lib/b.a')} && "
+            "{ echo kept; }"
+        )
         self.assertEqual(
             bench.render_paths(command, {verified: tree_rel}),
             f"cc x.c {tree_rel} 'my lib/b.a' && {{ echo kept; }}",
@@ -360,13 +363,17 @@ class TestPrograms(unittest.TestCase):
         self.assertEqual(payload["runs"][-1]["rc"], 0)
         self.assertEqual(
             bench.failure_reason(payload),
-            ("the tune run changed its input file in the round phase "
-             "(the command must only read {input})", "V"),
+            (
+                "the tune run changed its input file in the round phase "
+                "(the command must only read {input})",
+                "V",
+            ),
         )
         self.assertEqual(bench._failure(payload)["input_changed"], True)
         reading = {
-            "jobs": {"B": {"cmd": f"cat {source} > /dev/null",
-                           "input": source}},
+            "jobs": {
+                "B": {"cmd": f"cat {source} > /dev/null", "input": source}
+            },
             "rounds": 2,
             "seed": 1,
         }
@@ -410,8 +417,9 @@ class TestPrograms(unittest.TestCase):
             self._run(bench._RUNNER_PROGRAM, json.dumps(spec))
         )
         self.assertTrue(bench._outputs_match(payload))
-        self.assertTrue(all(run["check_lines"] == 1
-                            for run in payload["runs"]))
+        self.assertTrue(
+            all(run["check_lines"] == 1 for run in payload["runs"])
+        )
         self.assertEqual(payload["runs"][0]["check_tail"], "ATESOR-CHECK 42")
         spec["jobs"]["V"]["cmd"] = "echo 'ATESOR-CHECK 41'"
         payload = bench._parse_runner_output(
@@ -502,24 +510,65 @@ class TestCrashSignal(unittest.TestCase):
                 self.assertEqual(bench.crash_signal(rc), name)
 
 
-def _session(base, variant, sha_b="x", sha_v="x", pre=None, post=None,
-             calibration=None):
+def _session(
+    base, variant, sha_b="x", sha_v="x", pre=None, post=None, calibration=None
+):
     runs = []
     for value in calibration or [base[0]] * 10:
-        runs.append({"job": "B", "phase": "calibration", "round": 0,
-                     "wall_ns": int(value * 1e9), "rc": 0, "sha": sha_b})
-    runs.append({"job": "V", "phase": "warmup", "round": -1,
-                 "wall_ns": int(variant[0] * 1e9), "rc": 0, "sha": sha_v})
+        runs.append(
+            {
+                "job": "B",
+                "phase": "calibration",
+                "round": 0,
+                "wall_ns": int(value * 1e9),
+                "rc": 0,
+                "sha": sha_b,
+            }
+        )
+    runs.append(
+        {
+            "job": "V",
+            "phase": "warmup",
+            "round": -1,
+            "wall_ns": int(variant[0] * 1e9),
+            "rc": 0,
+            "sha": sha_v,
+        }
+    )
     for index, (b_time, v_time) in enumerate(zip(base, variant)):
-        runs.append({"job": "B", "phase": "round", "round": index,
-                     "wall_ns": int(b_time * 1e9), "rc": 0, "sha": sha_b})
-        runs.append({"job": "V", "phase": "round", "round": index,
-                     "wall_ns": int(v_time * 1e9), "rc": 0, "sha": sha_v})
-    board = {"governor": "performance", "cur_freq_khz": "1800000",
-             "temperatures_mc": [50000], "loadavg_1m": 0.1,
-             "busy_cpus": 0.02}
-    return {"pre": pre or board, "post": post or board, "runs": runs,
-            "error": None}
+        runs.append(
+            {
+                "job": "B",
+                "phase": "round",
+                "round": index,
+                "wall_ns": int(b_time * 1e9),
+                "rc": 0,
+                "sha": sha_b,
+            }
+        )
+        runs.append(
+            {
+                "job": "V",
+                "phase": "round",
+                "round": index,
+                "wall_ns": int(v_time * 1e9),
+                "rc": 0,
+                "sha": sha_v,
+            }
+        )
+    board = {
+        "governor": "performance",
+        "cur_freq_khz": "1800000",
+        "temperatures_mc": [50000],
+        "loadavg_1m": 0.1,
+        "busy_cpus": 0.02,
+    }
+    return {
+        "pre": pre or board,
+        "post": post or board,
+        "runs": runs,
+        "error": None,
+    }
 
 
 class TestMeasure(unittest.TestCase):
@@ -530,8 +579,7 @@ class TestMeasure(unittest.TestCase):
 
     def setUp(self) -> None:
         """Prepare a deterministic program workload and two jobs."""
-        self.workload = Workload(mode="program", command="{bin}",
-                                 binary="x")
+        self.workload = Workload(mode="program", command="{bin}", binary="x")
         self.jobs = ({"cmd": "b"}, {"cmd": "v"})
 
     def test_faster_variant(self) -> None:
@@ -558,9 +606,12 @@ class TestMeasure(unittest.TestCase):
             clock[0] += 400.0  # each session burns 400 s
             return session
 
-        with mock.patch.object(bench, "run_jobs", side_effect=run), \
-                mock.patch.object(bench.time, "monotonic",
-                                  side_effect=lambda: clock[0]):
+        with (
+            mock.patch.object(bench, "run_jobs", side_effect=run),
+            mock.patch.object(
+                bench.time, "monotonic", side_effect=lambda: clock[0]
+            ),
+        ):
             outcome = measure(*self.jobs, self.workload, timeout=1000)
         self.assertEqual(outcome["status"], "measured")
         # First session gets the budget; the second gets what is left.
@@ -576,20 +627,26 @@ class TestMeasure(unittest.TestCase):
             clock[0] += 980.0
             return session
 
-        with mock.patch.object(bench, "run_jobs",
-                               side_effect=run) as runner, \
-                mock.patch.object(bench.time, "monotonic",
-                                  side_effect=lambda: clock[0]):
+        with (
+            mock.patch.object(bench, "run_jobs", side_effect=run) as runner,
+            mock.patch.object(
+                bench.time, "monotonic", side_effect=lambda: clock[0]
+            ),
+        ):
             outcome = measure(*self.jobs, self.workload, timeout=1000)
         self.assertEqual(outcome["status"], "failed")
-        self.assertIn("budget ended before the timed rounds",
-                      outcome["reason"])
+        self.assertIn(
+            "budget ended before the timed rounds", outcome["reason"]
+        )
         self.assertEqual(runner.call_count, 1)
 
     def test_check_prefix_reaches_the_runner(self) -> None:
         """A harness compares its check lines in both sessions."""
-        harness = Workload(mode="harness", command="{bin} {input} {iters}",
-                           check_prefix="ATESOR-CHECK")
+        harness = Workload(
+            mode="harness",
+            command="{bin} {input} {iters}",
+            check_prefix="ATESOR-CHECK",
+        )
         base = [1.0 + 0.001 * (i % 4) for i in range(20)]
         session = _session(base, base)
         with mock.patch.object(
@@ -611,8 +668,12 @@ class TestMeasure(unittest.TestCase):
     def test_frequency_drift_makes_the_session_unstable(self) -> None:
         """A frequency change between sessions or 80 C voids the verdict."""
         base = [1.0 + 0.001 * (i % 4) for i in range(20)]
-        slow = {"governor": "schedutil", "cur_freq_khz": "1400000",
-                "temperatures_mc": [80000], "loadavg_1m": 2.5}
+        slow = {
+            "governor": "schedutil",
+            "cur_freq_khz": "1400000",
+            "temperatures_mc": [80000],
+            "loadavg_1m": 2.5,
+        }
         session = _session(base, base, post=slow, pre=slow)
         first = _session(base, base)
         with mock.patch.object(
@@ -625,12 +686,16 @@ class TestMeasure(unittest.TestCase):
 
     def test_board_warnings_and_noise(self) -> None:
         """A busy, non-performance board and a noisy workload warn."""
-        busy = {"governor": "ondemand", "cur_freq_khz": "1400000",
-                "temperatures_mc": [], "loadavg_1m": 3.0, "busy_cpus": 1.5}
+        busy = {
+            "governor": "ondemand",
+            "cur_freq_khz": "1400000",
+            "temperatures_mc": [],
+            "loadavg_1m": 3.0,
+            "busy_cpus": 1.5,
+        }
         noisy = [1.0, 1.3, 0.8, 1.2, 0.9, 1.1, 0.7, 1.4, 1.0, 0.95]
         base = [1.0 + 0.001 * (i % 4) for i in range(40)]
-        session = _session(base, base, pre=busy, post=busy,
-                           calibration=noisy)
+        session = _session(base, base, pre=busy, post=busy, calibration=noisy)
         with mock.patch.object(bench, "run_jobs", return_value=session):
             outcome = measure(*self.jobs, self.workload)
         text = " ".join(outcome["warnings"])
@@ -645,16 +710,27 @@ class TestMeasure(unittest.TestCase):
             bench, "run_jobs", return_value={"runs": [], "error": "boom"}
         ):
             outcome = measure(*self.jobs, self.workload)
-        self.assertEqual(outcome, {"warnings": [], "status": "failed",
-                                   "reason": "boom", "failed_job": None})
+        self.assertEqual(
+            outcome,
+            {
+                "warnings": [],
+                "status": "failed",
+                "reason": "boom",
+                "failed_job": None,
+            },
+        )
 
     def test_failure_names_the_build_and_its_error(self) -> None:
         """The reason says which build failed, when and why."""
         session = {
             "runs": [
                 {"job": "B", "phase": "warmup", "rc": 0},
-                {"job": "B", "phase": "calibration", "rc": 1,
-                 "err": "Round-trip data mismatch\nat iteration 0\n"},
+                {
+                    "job": "B",
+                    "phase": "calibration",
+                    "rc": 1,
+                    "err": "Round-trip data mismatch\nat iteration 0\n",
+                },
             ],
             "error": "B exited 1",
         }
@@ -666,8 +742,12 @@ class TestMeasure(unittest.TestCase):
             "the baseline run exited 1 in the calibration phase: "
             "Round-trip data mismatch at iteration 0",
         )
-        tune = {"runs": [{"job": "V", "phase": "round", "rc": -9,
-                          "err": "timeout"}], "error": "V exited -9"}
+        tune = {
+            "runs": [
+                {"job": "V", "phase": "round", "rc": -9, "err": "timeout"}
+            ],
+            "error": "V exited -9",
+        }
         self.assertEqual(
             bench.failure_reason(tune),
             ("the tune run exited -9 in the round phase: timeout", "V"),
@@ -680,8 +760,9 @@ class TestMeasure(unittest.TestCase):
         with mock.patch.object(
             bench, "run_jobs", side_effect=[same, differ]
         ) as runner:
-            first = bench.check_once(*self.jobs, self.workload,
-                                     extra_env={"QEMU_CPU": "rv64i"})
+            first = bench.check_once(
+                *self.jobs, self.workload, extra_env={"QEMU_CPU": "rv64i"}
+            )
             second = bench.check_once(*self.jobs, self.workload)
         self.assertEqual(first["status"], "checked")
         self.assertEqual(second["status"], "failed")

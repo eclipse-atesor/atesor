@@ -153,9 +153,7 @@ class TestProvisionLockSerializesImageBuild:
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(
-                pool.map(lambda _i: provision(), range(2))
-            )
+            results = list(pool.map(lambda _i: provision(), range(2)))
 
         assert results == [True, True]
         assert client.build_calls == 1, (
@@ -228,19 +226,19 @@ class TestBatchContainerPool:
 
         monkeypatch.setattr(bt.subprocess, "Popen", fake_popen)
 
-        packages = [(f"pkg{i}", f"https://example.org/pkg{i}") for i in
-                    range(6)]
+        packages = [
+            (f"pkg{i}", f"https://example.org/pkg{i}") for i in range(6)
+        ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             futures = [
-                ex.submit(bt.run_agent, url, name)
-                for name, url in packages
+                ex.submit(bt.run_agent, url, name) for name, url in packages
             ]
             results = [f.result() for f in futures]
 
         assert all(success for success, _out, _dur in results)
-        assert pool_q.double_leases == [], (
-            "a container name must never be leased by two runs at once"
-        )
+        assert (
+            pool_q.double_leases == []
+        ), "a container name must never be leased by two runs at once"
         remaining = self._drain(pool_q)
         assert sorted(remaining) == sorted(
             f"{bt._BASE_CONTAINER}-w{i + 1}" for i in range(3)
@@ -310,8 +308,7 @@ class TestAuthThreadIsolation:
         monkeypatch.setenv("GIT_TOKEN", "sekret-token")
         monkeypatch.setattr("os.path.exists", lambda _p: False)
         monkeypatch.setattr(
-            "src.scripted_ops.ScriptedOperations."
-            "_ensure_container_healthy",
+            "src.scripted_ops.ScriptedOperations." "_ensure_container_healthy",
             lambda _self: None,
         )
         monkeypatch.setattr(
@@ -362,9 +359,9 @@ class TestAuthThreadIsolation:
         assert github_env.get("GIT_CONFIG_VALUE_0", "").endswith(
             "sekret-token"
         ), "the GitHub clone must keep its header while another runs"
-        assert "GIT_CONFIG_KEY_0" not in other_env, (
-            "the non-GitHub clone must never see the sibling's header"
-        )
+        assert (
+            "GIT_CONFIG_KEY_0" not in other_env
+        ), "the non-GitHub clone must never see the sibling's header"
 
 
 # Recipe cache — real multi-process writers (like batch workers)
@@ -416,7 +413,7 @@ class TestRecipeCacheMultiProcessWriters:
         cache = json.loads(cache_path.read_text())  # must stay valid
         packages = cache.get("packages", {})
         for i in range(n):
-            assert f"pkg{i}" in packages, (
-                f"pkg{i} lost in concurrent write — filelock broken"
-            )
+            assert (
+                f"pkg{i}" in packages
+            ), f"pkg{i} lost in concurrent write — filelock broken"
             assert "alpine-riscv64" in packages[f"pkg{i}"]

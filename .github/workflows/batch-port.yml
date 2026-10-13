@@ -48,7 +48,7 @@ on:
         description: "LLM provider to run with (preflight gates on this)"
         type: choice
         default: openrouter
-        options: [openrouter, gemini, openai]
+        options: [openrouter, gemini, openai, anthropic]
 
 permissions:
   contents: write       # publish assets + push data-update branch
@@ -73,6 +73,12 @@ jobs:
     secrets: inherit
     with:
       provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+      # Scheduled runs take the first healthy provider of the chain, and
+      # every job writes that choice into LLM_PROVIDER. A manual run
+      # stays on the provider it picked.
+      provider_chain: >-
+        ${{ github.event_name == 'schedule'
+            && (vars.LLM_PROVIDER_CHAIN || 'openrouter,anthropic') || '' }}
       # Manual runs skip cleanly when the selected provider is down.
       # Scheduled runs must fail so provider outages do not look green.
       fail_on_unavailable: >-
@@ -116,10 +122,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -258,7 +265,7 @@ jobs:
 
   atesor-debian-full:
     name: atesor-debian-full (shard ${{ matrix.shard }}/${{ needs.plan-full.outputs.debian_total }})
-    needs: plan-full
+    needs: [preflight, plan-full]
     if: >-
       needs.plan-full.outputs.debian_total != '0' &&
       (
@@ -301,10 +308,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -405,10 +413,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -446,7 +455,7 @@ jobs:
   # 4. atesor-alpine-full (sharded, skip-already-released; see plan-full)
   atesor-alpine-full:
     name: atesor-alpine-full (shard ${{ matrix.shard }}/${{ needs.plan-full.outputs.alpine_total }})
-    needs: plan-full
+    needs: [preflight, plan-full]
     if: >-
       needs.plan-full.outputs.alpine_total != '0' &&
       (
@@ -488,10 +497,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}

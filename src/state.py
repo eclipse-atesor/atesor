@@ -893,9 +893,7 @@ def classify_error(error_message: str) -> ErrorCategory:
     ) or has_any(("timed out", "command timeout", "command timed out")):
         return ErrorCategory.NETWORK
 
-    if re.search(
-        r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower
-    ):
+    if re.search(r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower):
         return ErrorCategory.CONFIGURATION
 
     if has_any(
@@ -938,7 +936,7 @@ def classify_error(error_message: str) -> ErrorCategory:
         "asm\\",
     )
     arch_terms = (
-        "#error \"unsupported architecture\"",
+        '#error "unsupported architecture"',
         "#error unsupported architecture",
         "unsupported architecture",
         "unsupported goos/goarch pair linux/riscv64",
@@ -946,9 +944,9 @@ def classify_error(error_message: str) -> ErrorCategory:
         "unknown value 'native' for '-march'",
         "unknown value \"native\" for '-march'",
         "unknown value 'native' for -march",
-        "unknown value \"native\" for -march",
+        'unknown value "native" for -march',
         "'asm' operand has impossible constraints",
-        "\"asm\" operand has impossible constraints",
+        '"asm" operand has impossible constraints',
         "invalid instruction mnemonic",
         "unknown mnemonic",
         "unrecognized opcode",
@@ -964,8 +962,7 @@ def classify_error(error_message: str) -> ErrorCategory:
         or has_any(arch_terms)
         or re.search(option_pattern, error_lower)
         or re.search(
-            r"\b(architecture|sse\d?|avx\d*|neon|simd"
-            r"|x86[-_]64|amd64)\b",
+            r"\b(architecture|sse\d?|avx\d*|neon|simd" r"|x86[-_]64|amd64)\b",
             error_lower,
         )
     ):
@@ -996,25 +993,23 @@ def classify_error(error_message: str) -> ErrorCategory:
     ):
         return ErrorCategory.LINKING
 
-    if (
-        "cmake error" in error_lower
-        and re.search(r"could\s+not\s+find\s+\w+", error_lower)
+    if "cmake error" in error_lower and re.search(
+        r"could\s+not\s+find\s+\w+", error_lower
     ):
         return ErrorCategory.DEPENDENCY
 
-    if (
-        re.search(r"\bno package ['`\"]?[^'`\"\n]+['`\"]? found", error_lower)
-        or has_any(
-            (
-                "package not found",
-                "missing dependency",
-                "failed to select a version",
-                "unable to select packages",
-                "no such package",
-                "unable to locate package",
-                "broken packages",
-                "has no installation candidate",
-            )
+    if re.search(
+        r"\bno package ['`\"]?[^'`\"\n]+['`\"]? found", error_lower
+    ) or has_any(
+        (
+            "package not found",
+            "missing dependency",
+            "failed to select a version",
+            "unable to select packages",
+            "no such package",
+            "unable to locate package",
+            "broken packages",
+            "has no installation candidate",
         )
     ):
         return ErrorCategory.DEPENDENCY

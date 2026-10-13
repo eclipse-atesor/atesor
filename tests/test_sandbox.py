@@ -534,11 +534,12 @@ class TestBuildImage(_NativeCase):
             timers.append(timer)
             return timer
 
-        with mock.patch(
-            "src.sandbox.subprocess.Popen", return_value=fake
-        ), mock.patch(
-            "src.sandbox.threading.Timer", side_effect=fake_timer
-        ) as timer_class:
+        with (
+            mock.patch("src.sandbox.subprocess.Popen", return_value=fake),
+            mock.patch(
+                "src.sandbox.threading.Timer", side_effect=fake_timer
+            ) as timer_class,
+        ):
             code = sandbox.build_image("img:1", "FROM x\n", print, 60)
         self.assertEqual(sandbox.BUILD_TIMED_OUT, code)
         timer_class.assert_called_once()

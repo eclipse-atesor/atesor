@@ -25,8 +25,8 @@ on:
       llm_provider:
         description: "LLM provider to run with (preflight gates on this)"
         type: choice
-        default: openrouter
-        options: [openrouter, gemini, openai]
+        default: anthropic
+        options: [openrouter, gemini, openai, anthropic]
 
 permissions:
   contents: write   # publish assets to the monthly release
@@ -35,7 +35,9 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   PYTHONUNBUFFERED: "1"
-  LLM_PROVIDER: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+  # Retries are the hard cases, so they default to Anthropic (Sonnet
+  # fixer); RETRY_LLM_PROVIDER_CHAIN changes the automatic order.
+  LLM_PROVIDER: ${{ inputs.llm_provider || 'anthropic' }}
   # ID and head SHA of the main run we are retrying for, so all 4 jobs
   # agree on parity. A manual run uses its own commit SHA.
   MAIN_RUN_ID: >-
@@ -58,11 +60,17 @@ jobs:
   # packages being retried already failed once, and with no working LLM
   # every one of them re-escalates without producing a diagnosis.
   preflight:
-    name: preflight (${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }})
+    name: preflight (${{ inputs.llm_provider || 'anthropic' }})
     uses: ./.github/workflows/llm-health.yml
     secrets: inherit
     with:
-      provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+      provider: ${{ inputs.llm_provider || 'anthropic' }}
+      # An automatic retry takes the first healthy provider of the chain;
+      # a manual retry stays on the provider it picked.
+      provider_chain: >-
+        ${{ github.event_name == 'workflow_run'
+            && (vars.RETRY_LLM_PROVIDER_CHAIN || 'anthropic,openrouter')
+            || '' }}
       fail_on_unavailable: >-
         ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
 
@@ -165,10 +173,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -311,7 +320,7 @@ jobs:
   #   4. Re-runs only those packages and publishes via release-zips.
   retry-debian-full:
     name: retry-debian-full (shard ${{ matrix.shard }}/${{ needs.plan-retry-full.outputs.debian_total }})
-    needs: plan-retry-full
+    needs: [preflight, plan-retry-full]
     if: >-
       needs.plan-retry-full.outputs.debian_total != '0' &&
       (
@@ -416,10 +425,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -464,7 +474,7 @@ jobs:
 
   retry-alpine-full:
     name: retry-alpine-full (shard ${{ matrix.shard }}/${{ needs.plan-retry-full.outputs.alpine_total }})
-    needs: plan-retry-full
+    needs: [preflight, plan-retry-full]
     if: >-
       needs.plan-retry-full.outputs.alpine_total != '0' &&
       (
@@ -569,10 +579,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}

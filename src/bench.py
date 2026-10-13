@@ -93,8 +93,10 @@ def shell_path(
     tests can add more hash directories to the tree.
     """
     actual = (paths or {}).get(rel, rel)
-    return shlex.quote(tree.rstrip("/")) + "/" + "/".join(
-        shlex.quote(part) for part in actual.split("/")
+    return (
+        shlex.quote(tree.rstrip("/"))
+        + "/"
+        + "/".join(shlex.quote(part) for part in actual.split("/"))
     )
 
 
@@ -121,7 +123,7 @@ def render_paths(
 
 # Writes deterministic test data. Arguments: kind, size in MiB, seed,
 # output path. The same seed always gives the same bytes.
-_INPUT_PROGRAM = r'''
+_INPUT_PROGRAM = r"""
 import json
 import random
 import sys
@@ -166,7 +168,7 @@ with open(path, "wb") as out:
             )).encode()
         out.write(chunk)
         written += len(chunk)
-'''
+"""
 
 # Times jobs inside the sandbox. Argument: one JSON spec with "jobs"
 # (name -> cmd, cwd, env, output, input; a run that changes its input
@@ -175,7 +177,7 @@ with open(path, "wb") as out:
 # "hash_output", "check_prefix" (hash only the stdout lines that
 # start with it, so timing lines do not count) and "keep_stderr"
 # (return the stderr of a run that exits 0).
-_RUNNER_PROGRAM = r'''
+_RUNNER_PROGRAM = r"""
 import glob
 import hashlib
 import json
@@ -356,7 +358,7 @@ def main():
 
 
 main()
-'''.replace("@@MARKER@@", _RUNNER_MARKER)
+""".replace("@@MARKER@@", _RUNNER_MARKER)
 
 
 @dataclass
@@ -535,8 +537,7 @@ def bootstrap_ratio_interval(
         raise ValueError("no paired rounds to compare")
     rng = random.Random(seed)
     medians = sorted(
-        median([rng.choice(ratios) for _ in ratios])
-        for _ in range(iterations)
+        median([rng.choice(ratios) for _ in ratios]) for _ in range(iterations)
     )
     low = medians[int(0.025 * iterations)]
     high = medians[max(0, int(math.ceil(0.975 * iterations)) - 1)]
@@ -576,7 +577,7 @@ def mann_whitney_p(first: Sequence[float], second: Sequence[float]) -> float:
     )
     u_value = rank_sum - n1 * (n1 + 1) / 2.0
     total = n1 + n2
-    tie_term = sum(t ** 3 - t for t in ties) / (total * (total - 1))
+    tie_term = sum(t**3 - t for t in ties) / (total * (total - 1))
     variance = n1 * n2 / 12.0 * ((total + 1) - tie_term)
     if variance <= 0:
         return 1.0
@@ -631,7 +632,7 @@ def _parse_runner_output(stdout: str) -> Optional[Dict[str, Any]]:
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_RUNNER_MARKER):
             try:
-                payload = json.loads(line[len(_RUNNER_MARKER):])
+                payload = json.loads(line[len(_RUNNER_MARKER) :])
             except ValueError:
                 return None
             return payload if isinstance(payload, dict) else None
@@ -665,8 +666,10 @@ def run_jobs(
     payload = _parse_runner_output(result.stdout)
     if payload is None:
         detail = (result.stderr or result.stdout or "").strip()[-300:]
-        return {"runs": [], "error": f"runner exit {result.exit_code}: "
-                f"{detail}"}
+        return {
+            "runs": [],
+            "error": f"runner exit {result.exit_code}: " f"{detail}",
+        }
     return payload
 
 
@@ -840,7 +843,8 @@ def failure_reason(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """
     error = payload.get("error") or "the runner failed"
     failed = [
-        run for run in payload.get("runs", [])
+        run
+        for run in payload.get("runs", [])
         if run.get("input_changed") or run.get("rc") not in (0, None)
     ]
     if not failed:
@@ -859,8 +863,7 @@ def failure_reason(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     if signal:
         reason = (
             f"{who} run crashed with {signal} in the "
-            f"{run.get('phase')} phase"
-            + (f": {detail}" if detail else "")
+            f"{run.get('phase')} phase" + (f": {detail}" if detail else "")
         )
         return reason, job
     reason = (

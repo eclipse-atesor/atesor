@@ -286,21 +286,24 @@ def curate_artifacts(
         from langchain_core.messages import HumanMessage
 
         from .graph import invoke_llm
-        from .llm_helpers import response_cost, response_usage
+        from .llm_helpers import (
+            extract_content,
+            response_cost,
+            response_usage,
+        )
         from .llm_logger import log_llm_call
 
         response = invoke_llm(llm, [HumanMessage(content=prompt)], timeout=60)
-        text = (
-            response.content if hasattr(response, "content") else str(response)
-        )
-        if isinstance(text, list):  # some providers return list of parts
-            text = "".join(str(p) for p in text)
+        # A list of parts (Claude thinking + text) keeps only the text.
+        text = extract_content(getattr(response, "content", response))
         tokens_in, tokens_out = response_usage(response)
         log_llm_call(
             agent_role="curator",
             prompt=prompt,
             response=text,
-            model=getattr(llm, "model_name", "unknown"),
+            # ChatAnthropic names its model in `model`, not `model_name`.
+            model=getattr(llm, "model_name", None)
+            or getattr(llm, "model", "unknown"),
             cost_usd=response_cost(llm, response),
             tokens_in=tokens_in,
             tokens_out=tokens_out,

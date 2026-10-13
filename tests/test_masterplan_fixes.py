@@ -86,9 +86,10 @@ class TestRustToolchainBakedIn:
             pins = _dockerfile_pins(name)
             assert "rust" in pins, f"{name} does not bake in a Rust toolchain"
             major, minor = (int(p) for p in pins["rust"].split(".")[:2])
-            assert (major, minor) >= (1, 88), (
-                f"{name} pins rustc {pins['rust']}; crates require >= 1.88"
-            )
+            assert (major, minor) >= (
+                1,
+                88,
+            ), f"{name} pins rustc {pins['rust']}; crates require >= 1.88"
 
     def test_both_images_pin_same_rust(self) -> None:
         """Skew between images reintroduces per-distro failures."""
@@ -112,9 +113,9 @@ class TestRustToolchainBakedIn:
         from src import platforms
 
         for profile in (platforms.ALPINE_RISCV, platforms.DEBIAN_RISCV):
-            assert "rust" not in profile.package_map, (
-                f"{profile.name} still maps rust to a distro package"
-            )
+            assert (
+                "rust" not in profile.package_map
+            ), f"{profile.name} still maps rust to a distro package"
 
 
 # autotools-bootstrap — 11 packages
@@ -387,9 +388,9 @@ class TestPreflightGateTracksImages:
                 "Dockerfile" if platform == "alpine" else "Dockerfile.debian"
             )
             pins = _dockerfile_pins(dockerfile)
-            assert not batch._version_lt(pins["go"], minimums["go"]), (
-                f"{platform}: image go {pins['go']} < gate {minimums['go']}"
-            )
+            assert not batch._version_lt(
+                pins["go"], minimums["go"]
+            ), f"{platform}: image go {pins['go']} < gate {minimums['go']}"
             assert not batch._version_lt(pins["rust"], minimums["cargo"]), (
                 f"{platform}: image rust {pins['rust']} < "
                 f"gate {minimums['cargo']}"
@@ -403,13 +404,16 @@ class TestPreflightGateTracksImages:
         batch = _load_batch_module()
         minimums = batch._MIN_TOOLCHAIN["debian"]
 
-        assert batch._stale_reasons({"go": "1.26.3", "cargo": "1.90.0"},
-                                    minimums)
-        assert batch._stale_reasons({"go": "1.26.5", "cargo": "1.85.0"},
-                                    minimums)
+        assert batch._stale_reasons(
+            {"go": "1.26.3", "cargo": "1.90.0"}, minimums
+        )
+        assert batch._stale_reasons(
+            {"go": "1.26.5", "cargo": "1.85.0"}, minimums
+        )
         # Missing Rust entirely (the old Alpine image).
-        assert batch._stale_reasons({"go": "1.26.5"},
-                                    batch._MIN_TOOLCHAIN["alpine"])
+        assert batch._stale_reasons(
+            {"go": "1.26.5"}, batch._MIN_TOOLCHAIN["alpine"]
+        )
         # A current container triggers no rebuild.
         assert not batch._stale_reasons(
             {"go": "1.26.5", "cargo": "1.90.0"}, minimums

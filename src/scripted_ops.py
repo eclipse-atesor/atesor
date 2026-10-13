@@ -96,17 +96,6 @@ def normalize_repo_url(url: str) -> str:
     )
 
 
-def _walk_root_is_excluded(root: str, *names: str) -> bool:
-    """Return True when a path COMPONENT of ``root`` is in ``names``.
-
-    Substring checks like ``".git" in root`` misfire for repos whose
-    own name contains the token (``user.github.io`` contains ``.git``),
-    silently disabling the whole walk.
-    """
-    parts = root.split(os.sep)
-    return any(part in names for part in parts)
-
-
 def _prune_vendored_dirs(dirs: List[str]) -> None:
     """Remove vendored/test directory names from ``dirs`` in place.
 
@@ -119,16 +108,39 @@ def _prune_vendored_dirs(dirs: List[str]) -> None:
 # named ``x_amd64.go`` builds only for amd64, even without a build tag.
 _GO_ARCHES = frozenset(
     {
-        "386", "amd64", "arm", "arm64", "loong64", "mips", "mipsle",
-        "mips64", "mips64le", "ppc64", "ppc64le", "riscv64", "s390x",
+        "386",
+        "amd64",
+        "arm",
+        "arm64",
+        "loong64",
+        "mips",
+        "mipsle",
+        "mips64",
+        "mips64le",
+        "ppc64",
+        "ppc64le",
+        "riscv64",
+        "s390x",
         "wasm",
     }
 )
 _GO_OSES = frozenset(
     {
-        "aix", "android", "darwin", "dragonfly", "freebsd", "illumos",
-        "ios", "js", "linux", "netbsd", "openbsd", "plan9", "solaris",
-        "wasip1", "windows",
+        "aix",
+        "android",
+        "darwin",
+        "dragonfly",
+        "freebsd",
+        "illumos",
+        "ios",
+        "js",
+        "linux",
+        "netbsd",
+        "openbsd",
+        "plan9",
+        "solaris",
+        "wasip1",
+        "windows",
     }
 )
 # Tags that a default native linux build with cgo sets, besides GOARCH.

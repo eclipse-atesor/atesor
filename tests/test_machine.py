@@ -204,8 +204,7 @@ class TestParsing(unittest.TestCase):
         }
         for (vendor, arch), name in cases.items():
             with self.subTest(name=name):
-                core = {"compatible": [], "mvendorid": vendor,
-                        "marchid": arch}
+                core = {"compatible": [], "mvendorid": vendor, "marchid": arch}
                 self.assertEqual(match_core(core)["name"], name)
         # One vendor makes many cores: the vendor id alone never matches.
         self.assertIsNone(match_core({"mvendorid": 0x489}))
@@ -234,8 +233,7 @@ class TestParsing(unittest.TestCase):
         cases = [
             ({"rc": 0, "aligned_ns": 0.6, "misaligned_ns": 1.5}, "fast"),
             ({"rc": 0, "aligned_ns": 0.6, "misaligned_ns": 6.0}, "slow"),
-            ({"rc": 0, "aligned_ns": 0.6, "misaligned_ns": 900.0},
-             "emulated"),
+            ({"rc": 0, "aligned_ns": 0.6, "misaligned_ns": 900.0}, "emulated"),
             ({"rc": -7}, "unsupported"),
             ({"rc": 135}, "unsupported"),
             ({"rc": 1, "err": "PermissionError"}, "unknown"),
@@ -345,20 +343,26 @@ class TestEvaluateProbe(unittest.TestCase):
             "uname": ["Linux", "megrez", "6.6.77-win2030", "#1", "riscv64"],
         }
         fast = _megrez_payload(
-            misaligned_test={"rc": 0, "aligned_ns": 0.56,
-                             "misaligned_ns": 1.1},
+            misaligned_test={
+                "rc": 0,
+                "aligned_ns": 0.56,
+                "misaligned_ns": 1.1,
+            },
             **blocked,
         )
         profile = evaluate_probe(fast, "native")
         self.assertEqual(profile.misaligned, "fast")
         self.assertEqual(profile.misaligned_source, "timing test")
         self.assertEqual(align_flags(profile, "gcc"), [])
-        self.assertIn("1.10 ns misaligned", "\n".join(
-            machine.describe(profile)
-        ))
+        self.assertIn(
+            "1.10 ns misaligned", "\n".join(machine.describe(profile))
+        )
         trap = _megrez_payload(
-            misaligned_test={"rc": 0, "aligned_ns": 0.56,
-                             "misaligned_ns": 480.0},
+            misaligned_test={
+                "rc": 0,
+                "aligned_ns": 0.56,
+                "misaligned_ns": 480.0,
+            },
             **blocked,
         )
         profile = evaluate_probe(trap, "native")
@@ -372,8 +376,7 @@ class TestEvaluateProbe(unittest.TestCase):
     def test_hwprobe_answer_wins_over_the_timing(self) -> None:
         """The kernel's own measurement comes first."""
         payload = _megrez_payload(
-            misaligned_test={"rc": 0, "aligned_ns": 0.5,
-                             "misaligned_ns": 0.6},
+            misaligned_test={"rc": 0, "aligned_ns": 0.5, "misaligned_ns": 0.6},
         )
         profile = evaluate_probe(payload, "native")
         self.assertEqual(profile.misaligned, "slow")
@@ -411,9 +414,7 @@ class TestEvaluateProbe(unittest.TestCase):
 
     def test_failed_test_instructions_warn(self) -> None:
         """An exec-protected sandbox leaves cpuinfo and hwprobe."""
-        payload = _megrez_payload(
-            tests=_tests(error=("zba", "zbb", "zbs"))
-        )
+        payload = _megrez_payload(tests=_tests(error=("zba", "zbb", "zbs")))
         profile = evaluate_probe(payload, "native")
         self.assertNotIn("tests", profile.sources)
         self.assertTrue(profile.has("zba", "zbb"))
@@ -423,16 +424,14 @@ class TestEvaluateProbe(unittest.TestCase):
         """GCC 11 accepts zba/zbb but emits none of them."""
         payload = _megrez_payload(compilers={"gcc": _gcc(emits=False)})
         profile = evaluate_probe(payload, "native")
-        self.assertIn("emits no such instruction", " ".join(
-            profile.warnings
-        ))
+        self.assertIn("emits no such instruction", " ".join(profile.warnings))
         self.assertIsNone(march_for(profile, "gcc"))
 
     def test_profile_round_trips_through_a_dict(self) -> None:
         profile = _megrez()
-        again = MachineProfile.from_dict(json.loads(json.dumps(
-            profile.to_dict()
-        )))
+        again = MachineProfile.from_dict(
+            json.loads(json.dumps(profile.to_dict()))
+        )
         self.assertEqual(again, profile)
 
 
@@ -459,27 +458,23 @@ class TestRules(unittest.TestCase):
         )
 
     def test_march_needs_compiler_acceptance(self) -> None:
-        payload = _megrez_payload(
-            compilers={"gcc": _gcc(accepts=("zba",))}
-        )
+        payload = _megrez_payload(compilers={"gcc": _gcc(accepts=("zba",))})
         profile = evaluate_probe(payload, "native")
         self.assertEqual(march_for(profile, "gcc"), "rv64gc_zba")
 
     def test_tune_prefers_the_core_table_order(self) -> None:
         """sifive-p550 wins when accepted; else the next name."""
         profile = _megrez()
-        self.assertEqual(
-            tune_for(profile, "gcc"), "-mtune=sifive-p400-series"
+        self.assertEqual(tune_for(profile, "gcc"), "-mtune=sifive-p400-series")
+        payload = _megrez_payload(
+            compilers={
+                "gcc": _gcc(tunes=("sifive-p550", "sifive-p400-series")),
+                "clang-19": _gcc(tunes=("sifive-p450",)),
+            }
         )
-        payload = _megrez_payload(compilers={
-            "gcc": _gcc(tunes=("sifive-p550", "sifive-p400-series")),
-            "clang-19": _gcc(tunes=("sifive-p450",)),
-        })
         profile = evaluate_probe(payload, "native")
         self.assertEqual(tune_for(profile, "gcc"), "-mtune=sifive-p550")
-        self.assertEqual(
-            tune_for(profile, "clang-19"), "-mtune=sifive-p450"
-        )
+        self.assertEqual(tune_for(profile, "clang-19"), "-mtune=sifive-p450")
 
     def test_unknown_core_gets_no_tune(self) -> None:
         payload = _megrez_payload(
@@ -519,9 +514,7 @@ class TestRules(unittest.TestCase):
     def test_rust_flags(self) -> None:
         """A known CPU that fits wins; else the stable features."""
         profile = _megrez()
-        self.assertEqual(
-            rust_flags_for(profile), "-C target-cpu=sifive-p550"
-        )
+        self.assertEqual(rust_flags_for(profile), "-C target-cpu=sifive-p550")
         profile.toolchains["rust_cpus"] = ["generic-rv64"]
         self.assertEqual(
             rust_flags_for(profile), "-C target-feature=+zba,+zbb"
@@ -540,8 +533,15 @@ class TestRules(unittest.TestCase):
         self.assertEqual(
             rust_flags_for(profile), "-C target-feature=+zba,+zbb"
         )
-        features["sifive-p550"] = ["a", "c", "d", "f", "m", "zba",
-                                   "unaligned-scalar-mem"]
+        features["sifive-p550"] = [
+            "a",
+            "c",
+            "d",
+            "f",
+            "m",
+            "zba",
+            "unaligned-scalar-mem",
+        ]
         self.assertFalse(machine.rust_cpu_fits(profile, "sifive-p550"))
         profile.misaligned = "fast"
         self.assertTrue(machine.rust_cpu_fits(profile, "sifive-p550"))
@@ -594,10 +594,17 @@ class TestIntegrityCheck(unittest.TestCase):
         ast.parse(machine._INTEGRITY_PROGRAM)
         cpus = sorted(os.sched_getaffinity(0))[:2]
         done = subprocess.run(
-            [sys.executable, "-c", machine._INTEGRITY_PROGRAM,
-             json.dumps({"cpus": cpus + [99999], "rounds": 2,
-                         "size_mb": 1})],
-            capture_output=True, text=True, timeout=120,
+            [
+                sys.executable,
+                "-c",
+                machine._INTEGRITY_PROGRAM,
+                json.dumps(
+                    {"cpus": cpus + [99999], "rounds": 2, "size_mb": 1}
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         self.assertEqual(done.returncode, 0, done.stderr)
         payload = machine._parse_probe_output(done.stdout)
@@ -609,14 +616,14 @@ class TestIntegrityCheck(unittest.TestCase):
     def test_failures_and_crashes_count(self) -> None:
         """Wrong data and a crashed child both fail the check."""
         result = {"bad": {"0": 0, "1": 2, "2": -1, "3": 0}}
-        self.assertEqual(machine.integrity_failures(result),
-                         {"1": 2, "2": -1})
+        self.assertEqual(machine.integrity_failures(result), {"1": 2, "2": -1})
 
     def test_check_reports_a_broken_run(self) -> None:
         """No JSON line: the check gives the error, not a verdict."""
         broken = CommandResult("python3", 1, "", "Traceback", 0.1)
-        with mock.patch.object(machine, "execute_command",
-                               return_value=broken):
+        with mock.patch.object(
+            machine, "execute_command", return_value=broken
+        ):
             result, error = machine.check_integrity([0, 1])
         self.assertIsNone(result)
         self.assertIn("Traceback", error)

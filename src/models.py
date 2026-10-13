@@ -17,6 +17,7 @@ chain; ``cost_for_usage`` prices a call from its token usage via
 ``MODEL_PRICES_PER_MTOK``.
 """
 
+import importlib.util
 import logging
 import os
 from enum import Enum
@@ -43,6 +44,7 @@ class ModelProvider(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     OPENROUTER = "openrouter"
+    ANTHROPIC = "anthropic"
 
 
 MODEL_CONFIG = {
@@ -71,7 +73,6 @@ MODEL_CONFIG = {
             "temperature": 0.1,
         },
     },
-
     # Free-tier slugs with per-role diversity: an outage at one
     # upstream provider does not starve every role at once.
     "openrouter": {
@@ -98,6 +99,44 @@ MODEL_CONFIG = {
         "summarizer": {
             "model": "meta-llama/llama-3.3-70b-instruct:free",
             "temperature": 0.1,
+        },
+    },
+    # Claude Haiku 5.5 ($0.10/$0.50 per MTok) takes the planning,
+    # extraction and summary roles. Claude Sonnet 5.5 ($2/$10) takes the
+    # two code roles: the fixer, and the builder, whose model writes the
+    # optimizer harness. Both models reject `temperature`, so it is None
+    # (not sent); `effort` (low|medium|high|xhigh|max) sets the depth
+    # of their adaptive thinking and is sent as `output_config`.
+    "anthropic": {
+        "supervisor": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "low",
+        },
+        "planner": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "scout": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "builder": {
+            "model": "claude-sonnet-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "fixer": {
+            "model": "claude-sonnet-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "summarizer": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "low",
         },
     },
 }
@@ -136,6 +175,25 @@ def check_api_keys() -> Tuple[bool, str, str]:
             )
         return True, "OpenRouter API key verified", provider
 
+    elif provider == ModelProvider.ANTHROPIC.value:
+        key = os.getenv("ANTHROPIC_API_KEY")
+        if not key or key == "your_key_here":
+            return (
+                False,
+                "ANTHROPIC_API_KEY not found in environment",
+                provider,
+            )
+        # The package is optional for the other providers, so a missing
+        # install fails here, before the first agent call.
+        if importlib.util.find_spec("langchain_anthropic") is None:
+            return (
+                False,
+                "langchain-anthropic is not installed "
+                "(pip install -r requirements.txt)",
+                provider,
+            )
+        return True, "Anthropic API key verified", provider
+
     return False, f"Unknown provider: {provider}", provider
 
 
@@ -150,13 +208,18 @@ OPENROUTER_FREE_ROUTER = "openrouter/free"
 # can be configured with. Free-tier models resolve to $0 via
 # ``cost_for_usage`` regardless of this table. Keep the table current
 # when adding a paid model; sources:
-# https://platform.openai.com/docs/pricing and
-# https://ai.google.dev/gemini-api/docs/pricing
+# https://platform.openai.com/docs/pricing,
+# https://ai.google.dev/gemini-api/docs/pricing and
+# https://platform.claude.com/docs/en/about-claude/pricing
 MODEL_PRICES_PER_MTOK = {
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gemini-flash-lite-latest": (0.10, 0.40),
     "gemini-flash-latest": (0.30, 2.50),
+    # Haiku 5.5 bills $0.50/$2.50 for a prompt over 100K tokens. Atesor
+    # prompts stay below 10K tokens, so the table keeps the base price.
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
 }
 
 # Conservative default for paid models missing from the table, so an
@@ -253,8 +316,9 @@ def create_llm_pool(role: AgentRole) -> List[BaseChatModel]:
     comma-separated list of model ids; the curated defaults when unset)
     when the active provider is OpenRouter -- the most failure-prone of
     the three because the free tier returns 404 when upstream models go
-    down. For OpenAI and Gemini only the primary is returned (those
-    providers' SDKs already retry transient errors transparently).
+    down. For OpenAI, Gemini and Anthropic only the primary is returned
+    (those providers' SDKs already retry transient errors
+    transparently).
 
     Fallbacks are constructed, not probed; per-call rotation in
     ``llm_call_with_validation`` handles failures.
@@ -378,6 +442,21 @@ def _create_llm_with_model(role: AgentRole, model_name: str) -> BaseChatModel:
             # without truncating legitimate outputs. Larger caps can
             # still be requested per-call by wrapping the LLM.
             max_tokens=_DEFAULT_MAX_TOKENS,
+        )
+    elif provider == ModelProvider.ANTHROPIC.value:
+        # Imported here: the other providers must keep working when the
+        # langchain-anthropic package is not installed.
+        from langchain_anthropic import ChatAnthropic
+
+        effort = MODEL_CONFIG[provider][role_key].get("effort")
+        # ChatAnthropic reads ANTHROPIC_API_KEY itself. max_tokens also
+        # covers the adaptive-thinking tokens of the reply.
+        return ChatAnthropic(
+            model=model_name,
+            temperature=temperature,
+            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            output_config={"effort": effort} if effort else None,
         )
     raise ValueError(f"Unsupported provider: {provider}")
 

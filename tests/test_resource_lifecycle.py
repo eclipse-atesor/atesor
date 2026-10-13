@@ -48,9 +48,7 @@ class TestConfigureLoggingHandlerHygiene:
 
             main_mod.configure_logging(False, repo_name="t1")
             file_handlers = [
-                h
-                for h in root.handlers
-                if isinstance(h, logging.FileHandler)
+                h for h in root.handlers if isinstance(h, logging.FileHandler)
             ]
             assert file_handlers, "expected a FileHandler after configure"
             first = file_handlers[0]
@@ -81,12 +79,8 @@ class TestDockerClientLifecycle:
         import main as main_mod
 
         fake_client = mock.MagicMock()
-        monkeypatch.setattr(
-            main_mod.docker, "from_env", lambda: fake_client
-        )
-        monkeypatch.setattr(
-            main_mod, "_ensure_riscv64_binfmt", lambda: False
-        )
+        monkeypatch.setattr(main_mod.docker, "from_env", lambda: fake_client)
+        monkeypatch.setattr(main_mod, "_ensure_riscv64_binfmt", lambda: False)
 
         assert main_mod.setup_docker_environment() is False
         fake_client.close.assert_called_once()
@@ -103,9 +97,7 @@ class TestDockerClientLifecycle:
         fake_client.containers.get.side_effect = docker_pkg.errors.NotFound(
             "gone"
         )
-        monkeypatch.setattr(
-            main_mod.docker, "from_env", lambda: fake_client
-        )
+        monkeypatch.setattr(main_mod.docker, "from_env", lambda: fake_client)
 
         main_mod.cleanup_container(remove_image=False)
         fake_client.close.assert_called_once()
@@ -138,9 +130,7 @@ class TestApplyPatchTempFileHygiene:
         monkeypatch.setattr(
             tools,
             "execute_command",
-            mock.MagicMock(
-                side_effect=AssertionError("must not execute")
-            ),
+            mock.MagicMock(side_effect=AssertionError("must not execute")),
         )
 
         ok = tools.apply_patch(
@@ -255,8 +245,7 @@ class TestCloneAuthTokenHygiene:
         # Fresh-clone branch: pretend nothing exists on the host.
         monkeypatch.setattr("os.path.exists", lambda _p: False)
         monkeypatch.setattr(
-            "src.scripted_ops.ScriptedOperations."
-            "_ensure_container_healthy",
+            "src.scripted_ops.ScriptedOperations." "_ensure_container_healthy",
             lambda _self: None,
         )
         monkeypatch.setattr(
@@ -288,9 +277,7 @@ class TestCloneAuthTokenHygiene:
             "https://github.com/foo/bar.git",
         )
 
-        clone_calls = [
-            (cmd, env) for cmd, env in calls if "git clone" in cmd
-        ]
+        clone_calls = [(cmd, env) for cmd, env in calls if "git clone" in cmd]
         assert clone_calls, "a clone command must have been issued"
         for _cmd, env in clone_calls:
             assert env.get("GIT_CONFIG_KEY_0") == (
@@ -370,9 +357,7 @@ class TestCleanupWorkspaceNonInteractive:
         import main as main_mod
 
         self._make_workspace(tmp_path, monkeypatch)
-        monkeypatch.setattr(
-            "builtins.input", mock.MagicMock(return_value="q")
-        )
+        monkeypatch.setattr("builtins.input", mock.MagicMock(return_value="q"))
 
         main_mod.cleanup_workspace()
         assert (

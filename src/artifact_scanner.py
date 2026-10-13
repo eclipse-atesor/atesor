@@ -106,7 +106,7 @@ _OUTPUT_MARKER = "ATESOR_SCAN_JSON "
 # in it is doubled.
 # Arguments: root, max_files, JSON list of expected basenames,
 # minimum mtime (epoch seconds) for files outside the repository.
-_SCAN_PROGRAM = r'''
+_SCAN_PROGRAM = r"""
 import json
 import os
 import stat
@@ -351,7 +351,7 @@ def main():
 
 
 main()
-''' % {
+""" % {
     "outside_dirs": repr(OUTSIDE_DIRS),
     "marker": _OUTPUT_MARKER,
 }
@@ -636,9 +636,7 @@ def evaluate_scan(
     ]
 
     if result.foreign:
-        sample = ", ".join(
-            f"{a.path} ({a.arch})" for a in result.foreign[:5]
-        )
+        sample = ", ".join(f"{a.path} ({a.arch})" for a in result.foreign[:5])
         more = len(result.foreign) - 5
         result.status = WRONG_ARCH
         result.reason = (
@@ -697,7 +695,7 @@ def _parse_scan_output(stdout: str) -> Optional[Dict[str, Any]]:
     for line in reversed((stdout or "").splitlines()):
         if line.startswith(_OUTPUT_MARKER):
             try:
-                payload = json.loads(line[len(_OUTPUT_MARKER):])
+                payload = json.loads(line[len(_OUTPUT_MARKER) :])
             except ValueError:
                 return None
             return payload if isinstance(payload, dict) else None
@@ -758,9 +756,7 @@ class ArtifactScanner:
             json.dumps(names),
             str(int(min_mtime)),
         ]
-        result = execute_command(
-            command, timeout=self.timeout, validate=False
-        )
+        result = execute_command(command, timeout=self.timeout, validate=False)
         payload = _parse_scan_output(result.stdout)
         if payload is None:
             detail = (result.stderr or result.stdout or "").strip()

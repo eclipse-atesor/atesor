@@ -9,11 +9,13 @@ from src.models import (
     _DEFAULT_MAX_TOKENS,
     LLM_REQUEST_TIMEOUT,
     MODEL_CONFIG,
+    MODEL_PRICES_PER_MTOK,
     OPENROUTER_FREE_ROUTER,
     _create_llm_with_model,
     _openrouter_fallback_ids,
     _resolve_model_name,
     check_api_keys,
+    cost_for_usage,
     create_llm,
     create_llm_pool,
     is_free_model,
@@ -423,6 +425,79 @@ class TestPrintModelInfo(unittest.TestCase):
         print_model_info()
 
         mock_print.assert_called_once_with("   Provider: unknown")
+
+
+class TestAnthropicProvider(unittest.TestCase):
+    """Tests for the Anthropic provider wiring."""
+
+    def test_key_and_package_checks(self) -> None:
+        find_spec = "src.models.importlib.util.find_spec"
+        cases = [
+            ({}, object(), False, "ANTHROPIC_API_KEY not found"),
+            (
+                {"ANTHROPIC_API_KEY": "your_key_here"},
+                object(),
+                False,
+                "not found",
+            ),
+            ({"ANTHROPIC_API_KEY": "k"}, None, False, "not installed"),
+            ({"ANTHROPIC_API_KEY": "k"}, object(), True, "Anthropic"),
+        ]
+        for extra_env, spec, expected_ok, expected_msg in cases:
+            env = {"LLM_PROVIDER": "anthropic", **extra_env}
+            with self.subTest(env=env, spec=spec):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    with mock.patch(find_spec, return_value=spec):
+                        ok, message, provider = check_api_keys()
+                self.assertEqual(ok, expected_ok)
+                self.assertIn(expected_msg, message)
+                self.assertEqual(provider, "anthropic")
+
+    def test_config_sends_no_temperature_and_a_valid_effort(self) -> None:
+        for role, entry in MODEL_CONFIG["anthropic"].items():
+            with self.subTest(role=role):
+                self.assertIsNone(entry["temperature"])
+                self.assertIn(entry["effort"], {"low", "medium", "high"})
+                self.assertIn(entry["model"], MODEL_PRICES_PER_MTOK)
+
+    def test_code_roles_use_sonnet_and_the_rest_haiku(self) -> None:
+        config = MODEL_CONFIG["anthropic"]
+        for role in ("fixer", "builder"):
+            self.assertEqual(config[role]["model"], "claude-sonnet-5-5")
+        for role in ("supervisor", "planner", "scout", "summarizer"):
+            self.assertEqual(config[role]["model"], "claude-haiku-5-5")
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "anthropic"}, clear=True)
+    def test_constructor_arguments(self) -> None:
+        chat = mock.MagicMock()
+        fake_module = SimpleNamespace(ChatAnthropic=chat)
+        with mock.patch.dict(
+            "sys.modules", {"langchain_anthropic": fake_module}
+        ):
+            _create_llm_with_model(AgentRole.FIXER, "claude-sonnet-5-5")
+
+        chat.assert_called_once_with(
+            model="claude-sonnet-5-5",
+            temperature=None,
+            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            output_config={"effort": "medium"},
+        )
+
+    @mock.patch.dict(os.environ, {"LLM_PROVIDER": "anthropic"}, clear=True)
+    def test_pool_is_the_primary_only(self) -> None:
+        with mock.patch(
+            "src.models._create_llm_with_model", return_value="llm"
+        ):
+            self.assertEqual(create_llm_pool(AgentRole.SCOUT), ["llm"])
+
+    def test_claude_prices(self) -> None:
+        self.assertAlmostEqual(
+            cost_for_usage("claude-haiku-5-5", 1_000_000, 1_000_000), 0.60
+        )
+        self.assertAlmostEqual(
+            cost_for_usage("claude-sonnet-5-5", 1_000_000, 1_000_000), 12.0
+        )
 
 
 if __name__ == "__main__":
