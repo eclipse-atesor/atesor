@@ -39,7 +39,7 @@ on:
       group_size:
         description: "Max packages per full-list shard (job)"
         type: string
-        default: "50"
+        default: "25"
       force_all:
         description: "Rebuild ALL packages (ignore already-released zips under the monthly tag)"
         type: boolean
@@ -199,7 +199,7 @@ jobs:
       alpine_groups: ${{ steps.plan.outputs.alpine_groups }}
       alpine_total:  ${{ steps.plan.outputs.alpine_total }}
     env:
-      GROUP_SIZE: ${{ inputs.group_size || '50' }}
+      GROUP_SIZE: ${{ inputs.group_size || '25' }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4

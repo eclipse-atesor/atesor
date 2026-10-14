@@ -21,7 +21,7 @@ on:
         description: "Packages per shard for the full-list retry (must match the main run for shard parity)."
         type: string
         required: false
-        default: "50"
+        default: "25"
       llm_provider:
         description: "LLM provider to run with (preflight gates on this)"
         type: choice
@@ -261,7 +261,7 @@ jobs:
       alpine_groups: ${{ steps.plan.outputs.alpine_groups }}
       alpine_total:  ${{ steps.plan.outputs.alpine_total }}
     env:
-      GROUP_SIZE: ${{ github.event.inputs.group_size || '50' }}
+      GROUP_SIZE: ${{ github.event.inputs.group_size || '25' }}
     steps:
       - name: Checkout main run's SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4

@@ -3,7 +3,7 @@
   "description": "Atesor AI full RISC-V porting catalog. See packages/README.md for the schema and rules for adding new entries.",
   "defaults": {
     "max_attempts": 5,
-    "timeout_seconds": 3600
+    "timeout_seconds": 2400
   },
   "packages": [
     { "name": "anew",                            "url": "https://github.com/tomnomnom/anew",                            "lang": "go",   "group": "tomnomnom",        "tags": ["cli", "small"] },

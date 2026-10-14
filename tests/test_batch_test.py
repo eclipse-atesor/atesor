@@ -80,6 +80,39 @@ class TestNativeDefaultWorkers(_BatchTestCase):
                 )
 
 
+class TestProbeToolchains(_BatchTestCase):
+    """The toolchain probe must see the image's own PATH."""
+
+    def test_probe_uses_a_non_login_shell(self) -> None:
+        """`sh -lc` reads /etc/profile, which drops /usr/local/go/bin."""
+        outputs = {
+            "go version": "go version go1.26.5 linux/riscv64",
+            "cargo --version": "cargo 1.99.0 (5f94df478 2026-08-27)",
+        }
+        shells = []
+
+        def fake_exec_argv(container, argv):
+            shells.append(argv[:2])
+            return mock.Mock(argv=["exec", container, *argv])
+
+        def fake_run(argv, **kwargs):
+            return _completed(0, outputs[argv[-1]])
+
+        with mock.patch.object(
+            self.bt.target, "is_native", return_value=False
+        ):
+            with mock.patch.object(
+                self.bt.sandbox, "build_exec_argv", side_effect=fake_exec_argv
+            ):
+                with mock.patch.object(
+                    self.bt.subprocess, "run", side_effect=fake_run
+                ):
+                    versions = self.bt._probe_toolchains(_WORKER)
+
+        self.assertEqual({"go": "1.26.5", "cargo": "1.99.0"}, versions)
+        self.assertEqual([["sh", "-c"], ["sh", "-c"]], shells)
+
+
 class TestReadMachineResources(_BatchTestCase):
     """One ssh call reads the host name, the cores and the memory."""
 

@@ -589,6 +589,12 @@ def _probe_toolchains(container_name: str) -> dict[str, str]:
 
     On native, a worker container stops when its main.py run ends, so
     the probe runs in a throwaway container from the same image.
+
+    The probe uses a non-login shell: it keeps the image's ``ENV PATH``
+    (``/usr/local/go/bin``, ``/root/.cargo/bin``). A login shell
+    (``sh -lc``) reads ``/etc/profile``, which resets PATH on Alpine and
+    Debian, so Go and Cargo looked missing and every batch rebuilt a
+    current image.
     """
     out: dict[str, str] = {}
     commands = {
@@ -598,12 +604,10 @@ def _probe_toolchains(container_name: str) -> dict[str, str]:
     for tool, probe in commands.items():
         if target.is_native():
             result = sandbox.run_in_throwaway(
-                PROFILES[PLATFORM].image_name, ["sh", "-lc", probe]
+                PROFILES[PLATFORM].image_name, ["sh", "-c", probe]
             )
         else:
-            call = sandbox.build_exec_argv(
-                container_name, ["sh", "-lc", probe]
-            )
+            call = sandbox.build_exec_argv(container_name, ["sh", "-c", probe])
             result = subprocess.run(
                 call.argv,
                 capture_output=True,
