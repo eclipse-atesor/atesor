@@ -1701,6 +1701,362 @@
       "id": "builder-auto-139",
       "source": "auto",
       "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: tget build execution",
+      "tags": [
+        "go",
+        "tget"
+      ],
+      "build_system": "go",
+      "repo_name": "tget",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "go mod tidy",
+            "go build -buildvcs=false ./cmd/tget"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from tget.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-140",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: wiretap build execution",
+      "tags": [
+        "go",
+        "wiretap"
+      ],
+      "build_system": "go",
+      "repo_name": "wiretap",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "cd src && go mod tidy",
+            "go build -buildvcs=false ."
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from wiretap.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-141",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: toru build execution",
+      "tags": [
+        "go",
+        "toru"
+      ],
+      "build_system": "go",
+      "repo_name": "toru",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "go mod tidy",
+            "go build -buildvcs=false ./cmd/toru"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from toru.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-142",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: wgcf build execution",
+      "tags": [
+        "go",
+        "wgcf"
+      ],
+      "build_system": "go",
+      "repo_name": "wgcf",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "go version",
+            "apt-get update",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git",
+            "go mod download"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "go build -buildvcs=false -o wgcf ."
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from wgcf.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-143",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: iputils build execution",
+      "tags": [
+        "meson",
+        "iputils"
+      ],
+      "build_system": "meson",
+      "repo_name": "iputils",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update",
+            "apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "meson setup builddir -DSKIP_TESTS=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "ninja -C builddir"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from iputils.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-144",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: iproute2 build execution",
+      "tags": [
+        "make",
+        "iproute2"
+      ],
+      "build_system": "make",
+      "repo_name": "iproute2",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update",
+            "apt-get install -y --no-install-recommends build-essential make bison flex libmnl-dev libelf-dev libselinux1-dev libatm1-dev libdb-dev"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "sh configure /usr/include && grep -E '^HAVE_' config.mk || true"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "make -j$(nproc)"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from iproute2.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-145",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: ffuf build execution",
+      "tags": [
+        "go",
+        "ffuf"
+      ],
+      "build_system": "go",
+      "repo_name": "ffuf",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git",
+            "go version"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "go build ."
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from ffuf.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-146",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: gau build execution",
+      "tags": [
+        "go",
+        "gau"
+      ],
+      "build_system": "go",
+      "repo_name": "gau",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "go mod tidy",
+            "go build -buildvcs=false ./cmd/gau"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from gau.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-147",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: gitleaks build execution",
+      "tags": [
+        "go",
+        "gitleaks"
+      ],
+      "build_system": "go",
+      "repo_name": "gitleaks",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "go mod tidy",
+            "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/config -buildvcs=false ./cmd/generate/config"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from gitleaks.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-148",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: nanopb build execution",
+      "tags": [
+        "cmake",
+        "nanopb"
+      ],
+      "build_system": "cmake",
+      "repo_name": "nanopb",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends cmake build-essential libprotobuf-dev python3 python3-pip python3-dev meson make"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd build && make -j$(nproc)"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from nanopb.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-149",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: highway build execution",
+      "tags": [
+        "cmake",
+        "highway"
+      ],
+      "build_system": "cmake",
+      "repo_name": "highway",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential make",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libatomic1"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHWY_ENABLE_TESTS=OFF -DHWY_ENABLE_EXAMPLES=OFF"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd build && cmake --build . -j$(nproc) --target hwy hwy_contrib"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from highway.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-150",
+      "source": "auto",
+      "timestamp": "2026-10-14"
     }
   ]
 }
