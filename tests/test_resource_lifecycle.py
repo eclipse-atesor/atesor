@@ -8,8 +8,9 @@ Locks in the open/close contracts around external resources:
   * apply_patch never leaves its temporary patch file behind on the
     host, on any path (invalid diff, executor exception, success);
   * execute_command's pkg-lock retry keeps extra_env on host retries;
-  * the scoped GitHub auth header installed for a clone is removed
-    again before the sandbox runs anything else (token hygiene);
+  * the GitHub auth header for a clone travels only in that command's
+    environment: never in a command string or the git config, and
+    never to a non-GitHub host (token hygiene);
   * cleanup_workspace degrades gracefully without interactive stdin.
 
 No test here touches the network, a real Docker daemon, or the LLM.
@@ -20,23 +21,23 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from src.state import CommandResult
 
-# ===========================================================================
 # configure_logging — handler FD hygiene
-# ===========================================================================
 
 
 class TestConfigureLoggingHandlerHygiene:
     """configure_logging must close the handlers it removes."""
 
     def test_reconfigure_closes_previous_file_handler(
-        self, tmp_path, monkeypatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The first FileHandler's stream is closed on reconfigure."""
         import main as main_mod
 
         root = logging.getLogger()
@@ -47,9 +48,7 @@ class TestConfigureLoggingHandlerHygiene:
 
             main_mod.configure_logging(False, repo_name="t1")
             file_handlers = [
-                h
-                for h in root.handlers
-                if isinstance(h, logging.FileHandler)
+                h for h in root.handlers if isinstance(h, logging.FileHandler)
             ]
             assert file_handlers, "expected a FileHandler after configure"
             first = file_handlers[0]
@@ -67,32 +66,28 @@ class TestConfigureLoggingHandlerHygiene:
             root.setLevel(saved_level)
 
 
-# ===========================================================================
 # Docker client lifecycle — main.py
-# ===========================================================================
 
 
 class TestDockerClientLifecycle:
     """docker.from_env() clients must be closed on every exit path."""
 
     def test_setup_docker_environment_closes_client_on_failure(
-        self, monkeypatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Preflight failure still closes the client (finally path)."""
         import main as main_mod
 
         fake_client = mock.MagicMock()
-        monkeypatch.setattr(
-            main_mod.docker, "from_env", lambda: fake_client
-        )
-        monkeypatch.setattr(
-            main_mod, "_ensure_riscv64_binfmt", lambda: False
-        )
+        monkeypatch.setattr(main_mod.docker, "from_env", lambda: fake_client)
+        monkeypatch.setattr(main_mod, "_ensure_riscv64_binfmt", lambda: False)
 
         assert main_mod.setup_docker_environment() is False
         fake_client.close.assert_called_once()
 
-    def test_cleanup_container_closes_client(self, monkeypatch) -> None:
+    def test_cleanup_container_closes_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """cleanup_container closes the client even when nothing exists."""
         import docker as docker_pkg
 
@@ -102,17 +97,13 @@ class TestDockerClientLifecycle:
         fake_client.containers.get.side_effect = docker_pkg.errors.NotFound(
             "gone"
         )
-        monkeypatch.setattr(
-            main_mod.docker, "from_env", lambda: fake_client
-        )
+        monkeypatch.setattr(main_mod.docker, "from_env", lambda: fake_client)
 
         main_mod.cleanup_container(remove_image=False)
         fake_client.close.assert_called_once()
 
 
-# ===========================================================================
 # apply_patch — host temp file hygiene
-# ===========================================================================
 
 
 class TestApplyPatchTempFileHygiene:
@@ -130,17 +121,16 @@ class TestApplyPatchTempFileHygiene:
         monkeypatch.setattr(tempfile, "NamedTemporaryFile", spy)
         return created
 
-    def test_invalid_diff_removes_tempfile(self, monkeypatch) -> None:
-        """Rejected (non-diff) content still cleans up the temp file."""
+    def test_invalid_diff_removes_tempfile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from src import tools
 
         created = self._spy_tempfiles(monkeypatch)
         monkeypatch.setattr(
             tools,
             "execute_command",
-            mock.MagicMock(
-                side_effect=AssertionError("must not execute")
-            ),
+            mock.MagicMock(side_effect=AssertionError("must not execute")),
         )
 
         ok = tools.apply_patch(
@@ -152,8 +142,9 @@ class TestApplyPatchTempFileHygiene:
         assert ok is False
         assert created and not os.path.exists(created[0])
 
-    def test_executor_exception_removes_tempfile(self, monkeypatch) -> None:
-        """An exception mid-apply still cleans up the temp file."""
+    def test_executor_exception_removes_tempfile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from src import tools
 
         created = self._spy_tempfiles(monkeypatch)
@@ -172,8 +163,9 @@ class TestApplyPatchTempFileHygiene:
         assert ok is False
         assert created and not os.path.exists(created[0])
 
-    def test_success_removes_tempfile(self, monkeypatch) -> None:
-        """The happy path cleans up the temp file too."""
+    def test_success_removes_tempfile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from src import tools
 
         created = self._spy_tempfiles(monkeypatch)
@@ -193,15 +185,15 @@ class TestApplyPatchTempFileHygiene:
         assert created and not os.path.exists(created[0])
 
 
-# ===========================================================================
 # execute_command — retry env preservation
-# ===========================================================================
 
 
 class TestPkgLockRetryEnv:
     """Host-side pkg-lock retries must keep the caller's extra_env."""
 
-    def test_host_retry_passes_extra_env(self, monkeypatch) -> None:
+    def test_host_retry_passes_extra_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The retried subprocess.run receives the merged env dict."""
         from src import tools
 
@@ -233,9 +225,7 @@ class TestPkgLockRetryEnv:
             assert env.get("ATESOR_TEST_MARKER") == "1"
 
 
-# ===========================================================================
 # Clone auth — GitHub token hygiene
-# ===========================================================================
 
 
 class TestCloneAuthTokenHygiene:
@@ -255,8 +245,7 @@ class TestCloneAuthTokenHygiene:
         # Fresh-clone branch: pretend nothing exists on the host.
         monkeypatch.setattr("os.path.exists", lambda _p: False)
         monkeypatch.setattr(
-            "src.scripted_ops.ScriptedOperations."
-            "_ensure_container_healthy",
+            "src.scripted_ops.ScriptedOperations." "_ensure_container_healthy",
             lambda _self: None,
         )
         monkeypatch.setattr(
@@ -277,9 +266,8 @@ class TestCloneAuthTokenHygiene:
         return calls
 
     def test_token_travels_via_env_not_command_or_config(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The clone gets the header via env; nothing is persisted."""
         monkeypatch.setenv("GIT_TOKEN", "sekret-token")
         monkeypatch.delenv("GH_TOKEN", raising=False)
 
@@ -289,9 +277,7 @@ class TestCloneAuthTokenHygiene:
             "https://github.com/foo/bar.git",
         )
 
-        clone_calls = [
-            (cmd, env) for cmd, env in calls if "git clone" in cmd
-        ]
+        clone_calls = [(cmd, env) for cmd, env in calls if "git clone" in cmd]
         assert clone_calls, "a clone command must have been issued"
         for _cmd, env in clone_calls:
             assert env.get("GIT_CONFIG_KEY_0") == (
@@ -306,9 +292,8 @@ class TestCloneAuthTokenHygiene:
         assert not any("sekret-token" in cmd for cmd, _env in calls)
 
     def test_no_token_means_no_auth_env(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without a token no auth env is attached anywhere."""
         monkeypatch.delenv("GIT_TOKEN", raising=False)
         monkeypatch.delenv("GH_TOKEN", raising=False)
 
@@ -322,9 +307,8 @@ class TestCloneAuthTokenHygiene:
         assert not any("extraHeader" in cmd for cmd, _env in calls)
 
     def test_non_github_url_never_gets_token(
-        self, stub_execute_command, monkeypatch
+        self, stub_execute_command, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A token in the env is not attached to non-GitHub hosts."""
         monkeypatch.setenv("GIT_TOKEN", "sekret-token")
 
         calls = self._run_clone(
@@ -337,9 +321,7 @@ class TestCloneAuthTokenHygiene:
         assert not any("sekret-token" in cmd for cmd, _env in calls)
 
 
-# ===========================================================================
 # cleanup_workspace — non-interactive stdin
-# ===========================================================================
 
 
 class TestCleanupWorkspaceNonInteractive:
@@ -353,7 +335,9 @@ class TestCleanupWorkspaceNonInteractive:
         (ws / "somefile.txt").write_text("x")
         monkeypatch.setattr(main_mod, "WORKSPACE_ROOT", str(ws))
 
-    def test_eof_on_stdin_is_graceful(self, tmp_path, monkeypatch) -> None:
+    def test_eof_on_stdin_is_graceful(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An EOFError from input() cancels cleanup, not a crash."""
         import main as main_mod
 
@@ -366,14 +350,14 @@ class TestCleanupWorkspaceNonInteractive:
         # Must simply return; a raised EOFError would fail the test.
         main_mod.cleanup_workspace()
 
-    def test_quit_choice_cancels(self, tmp_path, monkeypatch) -> None:
+    def test_quit_choice_cancels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Choosing 'q' cancels without deleting anything."""
         import main as main_mod
 
         self._make_workspace(tmp_path, monkeypatch)
-        monkeypatch.setattr(
-            "builtins.input", mock.MagicMock(return_value="q")
-        )
+        monkeypatch.setattr("builtins.input", mock.MagicMock(return_value="q"))
 
         main_mod.cleanup_workspace()
         assert (

@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from typing import Iterator, List, Optional
 from unittest import mock
 
 from src import sandbox, target
@@ -63,7 +64,7 @@ class _NativeCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         target.reset_target_cache()
 
-    def remote_script(self, argv) -> str:
+    def remote_script(self, argv: List[str]) -> str:
         """Check the ssh prefix of argv and return its remote script."""
         self.assertEqual(target.ssh_argv(), argv[:-2])
         self.assertEqual(_ALIAS, argv[-2])
@@ -79,7 +80,9 @@ class _NativeCase(unittest.TestCase):
         os.chmod(path, 0o755)
         return folder
 
-    def run_on_fake_machine(self, script: str, folder: str, stdin=""):
+    def run_on_fake_machine(
+        self, script: str, folder: str, stdin: Optional[str] = ""
+    ) -> "subprocess.CompletedProcess[str]":
         """Run a remote script in a local POSIX sh, as the machine does."""
         env = {"PATH": folder + os.pathsep + os.environ["PATH"]}
         return subprocess.run(
@@ -177,7 +180,6 @@ class TestNativeArgv(_NativeCase):
                 )
 
     def test_a_real_shell_passes_each_word_unchanged(self) -> None:
-        """A POSIX sh on the machine gets the exact podman argv."""
         folder = self.fake_podman("printf '%s\\0' \"$@\"\n")
         for command in _HARD_COMMANDS:
             with self.subTest(command=command):
@@ -249,7 +251,6 @@ class TestNativeArgv(_NativeCase):
             sandbox.build_exec_argv("box", ["true"], env={"MY-TOKEN": "x"})
 
     def test_run_raw_quotes_each_word(self) -> None:
-        """run_raw() sends one quoted script over ssh."""
         with mock.patch("src.sandbox.subprocess.run") as run:
             run.return_value = _done([], 0)
             sandbox.run_raw(["podman", "rm", "-f", "a b"])
@@ -259,7 +260,10 @@ class TestNativeArgv(_NativeCase):
 
 
 class TestTransportErrors(_NativeCase):
-    """Tests for the ssh transport classification and the retry rule."""
+    """Tests for the ssh transport classification and the retry rule.
+
+    The podman not-running check (``sandbox.not_running``) is here too.
+    """
 
     def test_classification(self) -> None:
         """Only exit 255 with an ssh message is a transport error."""
@@ -303,7 +307,6 @@ class TestTransportErrors(_NativeCase):
                 return exc, run, login_check
 
     def test_connect_failure_retries_once_after_a_good_login(self) -> None:
-        """A connection that never opened gets one more try."""
         refused = _done([], 255, err=_REFUSED)
         result, run, login = self._run_call([refused, _done([], 0, "ok")])
         self.assertEqual("ok", result.stdout)
@@ -319,7 +322,6 @@ class TestTransportErrors(_NativeCase):
         self.assertNotIn("10.0.0.5", str(error))
 
     def test_second_connect_failure_raises(self) -> None:
-        """A retry that fails again raises."""
         refused = _done([], 255, err=_REFUSED)
         error, run, _ = self._run_call([refused, refused])
         self.assertIsInstance(error, sandbox.SandboxUnavailableError)
@@ -335,7 +337,6 @@ class TestTransportErrors(_NativeCase):
         login.assert_not_called()
 
     def test_command_failure_is_a_normal_result(self) -> None:
-        """A failing remote command is returned, not raised."""
         result, run, login = self._run_call(
             [_done([], 2, err="make: Error 2")]
         )
@@ -354,7 +355,7 @@ class TestTransportErrors(_NativeCase):
 
 
 class TestPodmanHelpers(_NativeCase):
-    """Tests for the argv of each podman call on the machine."""
+    """Tests for each podman call on the machine: argv and result."""
 
     def _podman(self, func, *args, result=None):
         """Call a helper with faked ssh and return (value, podman argv)."""
@@ -364,7 +365,6 @@ class TestPodmanHelpers(_NativeCase):
         return value, shlex.split(self.remote_script(run.call_args.args[0]))
 
     def test_each_podman_argv(self) -> None:
-        """The helpers send the podman commands that the plan names."""
         mount = "/home/u/atesor-ai:/workspace:Z"
         probe = ["sh", "-lc", "go version"]
         cases = [
@@ -476,7 +476,7 @@ class _FakeBuild:
         self._killed = threading.Event()
 
     @property
-    def stdout(self):
+    def stdout(self) -> Iterator[str]:
         """Yield the output lines, or wait until the process is killed."""
         if self._hang:
             self._killed.wait(5)
@@ -488,11 +488,9 @@ class _FakeBuild:
         self._killed.set()
 
     def wait(self) -> int:
-        """Return the exit status."""
         return -9 if self._killed.is_set() else self._code
 
-    def poll(self):
-        """Return the exit status once the process ended."""
+    def poll(self) -> int:
         return self.wait()
 
 
@@ -519,14 +517,12 @@ class TestBuildImage(_NativeCase):
         )
 
     def test_remote_timeout_exit_is_reported(self) -> None:
-        """A remote timeout exit maps to BUILD_TIMED_OUT."""
         fake = _FakeBuild([], code=124)
         with mock.patch("src.sandbox.subprocess.Popen", return_value=fake):
             code = sandbox.build_image("img:1", "FROM x\n", print, 60)
         self.assertEqual(sandbox.BUILD_TIMED_OUT, code)
 
     def test_local_margin_timer_kills_stuck_ssh(self) -> None:
-        """If ssh outlives the remote timeout margin, it is killed."""
         fake = _FakeBuild([], hang=True)
         timers = []
 
@@ -538,18 +534,18 @@ class TestBuildImage(_NativeCase):
             timers.append(timer)
             return timer
 
-        with mock.patch(
-            "src.sandbox.subprocess.Popen", return_value=fake
-        ), mock.patch(
-            "src.sandbox.threading.Timer", side_effect=fake_timer
-        ) as timer_class:
+        with (
+            mock.patch("src.sandbox.subprocess.Popen", return_value=fake),
+            mock.patch(
+                "src.sandbox.threading.Timer", side_effect=fake_timer
+            ) as timer_class,
+        ):
             code = sandbox.build_image("img:1", "FROM x\n", print, 60)
         self.assertEqual(sandbox.BUILD_TIMED_OUT, code)
         timer_class.assert_called_once()
         self.assertEqual(150, timers[0].delay)
 
     def test_build_transport_error_raises(self) -> None:
-        """A dropped connection during the build raises."""
         fake = _FakeBuild([_DROPPED], code=255)
         with mock.patch("src.sandbox.subprocess.Popen", return_value=fake):
             with self.assertRaises(sandbox.SandboxUnavailableError):

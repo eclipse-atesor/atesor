@@ -56,7 +56,7 @@ FIELD_MODE_HOST = "atesor-native"
 
 # Options for every native ssh call. None of them holds a secret, so
 # they may appear in argv. ControlPath is added separately because it
-# needs the per-user cache directory.
+# needs control_dir() and the process ID.
 SSH_OPTIONS = (
     "BatchMode=yes",
     "ConnectTimeout=10",
@@ -81,6 +81,9 @@ _PORT_RE = re.compile(r"^[0-9]{1,5}$")
 # "%" tokens in the generated config file.
 _PATH_VALUE_RE = re.compile(r"^[^\s\"'%]+$")
 _WORKDIR_RE = re.compile(r"^[A-Za-z0-9._/~-]+$")
+# Stricter than _WORKDIR_RE: the resolved physical path must be
+# absolute and may not contain "~", because it is interpolated into
+# remote shell commands.
 _SAFE_PHYSICAL_WORKDIR_RE = re.compile(r"^/[A-Za-z0-9._/+-]+$")
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 

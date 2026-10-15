@@ -8,8 +8,8 @@ produced by ``src.packager.package_build``:
 
     <owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<platform>.zip
 
-A zip named with the legacy ``<repo>`` stem also counts, but only when
-that stem is unique in the list: five catalog repos are named ``cli``.
+A zip named with the legacy stem (``src.packager.legacy_package_stem``)
+also counts, but only when that stem is unique in the list.
 
 The script emits the missing names, one per line, to stdout. With
 ``--format space`` they're space-joined on a single line, ready to pass
@@ -23,7 +23,7 @@ import json
 import os
 import re
 import sys
-from typing import Iterable, NamedTuple
+from typing import Iterable, NamedTuple, Optional
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -31,6 +31,7 @@ _REPO_ROOT = os.path.abspath(
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# E402: the sys.path insert above must run before importing src modules.
 from src.packager import legacy_package_stem, package_stem  # noqa: E402
 
 
@@ -45,23 +46,25 @@ class PackageEntry(NamedTuple):
 
     name: str
     package_stem: str
-    legacy_package_stem: str | None = None
+    legacy_package_stem: Optional[str] = None
     legacy_unique: bool = False
 
 
 def _stem_metadata(
     name: str,
     stems_map: dict,
-) -> tuple[str, str | None, bool]:
+) -> tuple[str, Optional[str], bool]:
     """Read new/legacy stem metadata from a remaining-list stems map."""
     raw = stems_map.get(name)
     if isinstance(raw, dict):
         new_stem = raw.get("package_stem") or raw.get("stem") or name
         legacy_stem = raw.get("legacy_package_stem")
         legacy_unique = bool(raw.get("legacy_unique", False))
-        return str(new_stem), (
-            str(legacy_stem) if legacy_stem else None
-        ), legacy_unique
+        return (
+            str(new_stem),
+            (str(legacy_stem) if legacy_stem else None),
+            legacy_unique,
+        )
     if isinstance(raw, str):
         return raw, None, False
     return name, None, False
@@ -75,8 +78,8 @@ def _load_packages(list_path: str) -> list[PackageEntry]:
     * ``.github/packages/*.json`` — ``{"packages": [{"name": ...,
       "url": ...}, ...]}``; stems are derived from the URL.
     * ``remaining-<platform>.json`` (from ``plan_remaining.py``) —
-      ``{"packages": ["name1", ...], "stems": {...}}``; old string
-      stem maps still work, and new maps include legacy-stem metadata.
+      ``{"packages": ["name1", ...], "stems": {...}}``; each ``stems``
+      value is a stem string or a dict with legacy-stem metadata.
 
     Mixed lists are tolerated; entries with neither a ``name`` key nor
     a string value are silently skipped.
@@ -85,11 +88,12 @@ def _load_packages(list_path: str) -> list[PackageEntry]:
         data = json.load(fh)
     pkgs = data.get("packages", [])
     stems_map = data.get("stems") or {}
-    # One pass keeps the declared order, which _apply_shard relies on.
-    # A None uniqueness marks a stem derived here; it is counted below
-    # over the whole list. String entries carry the uniqueness that
-    # plan_remaining.py computed over the full catalog.
-    rows: list[tuple[str, str, str | None, bool | None]] = []
+    # Single pass to preserve the declared order, which _apply_shard
+    # relies on. uniqueness=None marks a stem derived here from a dict
+    # entry; it is counted over the whole list below. Entries from a
+    # plan_remaining.py list carry the uniqueness that script computed
+    # over the full catalog, so they are not recounted here.
+    rows: list[tuple[str, str, Optional[str], Optional[bool]]] = []
     for p in pkgs:
         if isinstance(p, str):
             if p:
@@ -144,7 +148,7 @@ def _apply_shard(
 
 
 def _built_names(packages_dir: str, platform: str) -> set[str]:
-    """Return the set of repo names for which a zip exists on disk."""
+    """Return the stems of the ``platform`` zips in ``packages_dir``."""
     if not os.path.isdir(packages_dir):
         return set()
     pat = re.compile(
@@ -170,6 +174,7 @@ def _is_built(entry: PackageEntry, built: set[str]) -> bool:
 
 
 def _emit(names: Iterable[str], fmt: str) -> None:
+    """Print the missing names, one per line or space-joined."""
     if fmt == "space":
         print(" ".join(names))
     else:  # default: lines
@@ -177,8 +182,13 @@ def _emit(names: Iterable[str], fmt: str) -> None:
             print(n)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the CLI entry point."""
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the CLI entry point.
+
+    Returns:
+        Process exit code: 0 on success (including "nothing missing"),
+        2 on invalid shard arguments.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--list",
@@ -254,10 +264,14 @@ def main(argv: list[str] | None = None) -> int:
         declared_pairs = _apply_shard(declared_pairs, shard_index, shard_total)
     declared = [entry.name for entry in declared_pairs]
     built = _built_names(args.packages_dir, args.platform)
-    missing = [entry.name for entry in declared_pairs if not _is_built(
-        entry,
-        built,
-    )]
+    missing = [
+        entry.name
+        for entry in declared_pairs
+        if not _is_built(
+            entry,
+            built,
+        )
+    ]
 
     _emit(missing, args.format)
 

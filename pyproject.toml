@@ -1,6 +1,6 @@
 [tool.black]
 # House style: 79-char hard limit (PEP 8), double quotes, trailing
-# commas. See .github/skills/python-standards/SKILL.md.
+# commas.
 line-length = 79
 target-version = ["py310"]
 

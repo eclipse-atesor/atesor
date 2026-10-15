@@ -9,10 +9,13 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Environment configuration and path management.
+"""Environment-aware paths and Docker detection.
 
-Detects the Docker context and sets up the workspace directories used
-throughout the Atesor AI system.
+The module-level constants (``WORKSPACE_ROOT``, ``REPOS_DIR``, ...) are
+computed once at import time from ``ATESOR_HOME``, the active target,
+and the Docker context, so ``main.py`` loads ``.env`` and applies
+``--target`` before importing this module. Every getter creates its
+directory.
 """
 
 import os
@@ -22,12 +25,16 @@ from .target import NATIVE, is_native, target_name_from_env
 
 
 def is_running_in_docker() -> bool:
-    """Detect if running inside a Docker container."""
-    # Check for .dockerenv file
+    """Return True when the process runs inside a container.
+
+    Heuristic: any of ``/.dockerenv``, a container runtime named in
+    ``/proc/1/cgroup``, or the sandbox layout (``/workspace`` without
+    ``/home``) counts.
+    """
     if os.path.exists("/.dockerenv"):
         return True
 
-    # Check cgroup for docker/containerd
+    # /proc/1/cgroup names the runtime that started PID 1.
     try:
         with open("/proc/1/cgroup", "r") as f:
             for line in f:
@@ -40,13 +47,12 @@ def is_running_in_docker() -> bool:
     except (FileNotFoundError, PermissionError):
         pass
 
-    # Check if we are at /workspace (standard for our image).
+    # Sandbox-image heuristic: /workspace exists and /home does not.
     if (
         os.path.abspath(os.sep) == "/"
         and os.path.exists("/workspace")
         and not os.path.exists("/home")
     ):
-        # If /workspace exists and /home is missing, likely a container.
         return True
 
     return False
@@ -57,7 +63,7 @@ def get_state_home() -> str:
 
     Resolution order: the ``ATESOR_HOME`` environment variable, then
     ``/workspace`` inside the sandbox container, then the source
-    checkout root when running from a clone, and finally
+    checkout root when running from a writable clone, and finally
     ``$XDG_DATA_HOME/atesor-ai`` (default ``~/.local/share/atesor-ai``).
     Keeping mutable state out of the install tree lets the tool run from
     a read-only system location such as ``/opt``.
@@ -88,13 +94,12 @@ def get_workspace_root() -> str:
 
     ``ATESOR_HOME`` always wins — including inside a container — so the
     documented override contract of ``get_state_home`` holds for the
-    workspace tree too (previously the in-docker shortcut silently
-    ignored it, sending state to ``/workspace`` in CI/devcontainers).
-    The bare ``/workspace`` default applies only inside the sandbox
-    container, for the qemu target, when no override is set. The native
-    target always uses ``workspace-native``, even from a container: its
-    repositories live on the machine, and the local mirror of them must
-    not land in the container's own ``/workspace`` tree.
+    workspace tree too. The bare ``/workspace`` default applies only
+    inside the sandbox container, for the qemu target, when no override
+    is set. The native target always uses ``workspace-native``, even
+    from a container: its repositories live on the machine, and the
+    local mirror of them must stay apart from the qemu tree that the
+    container keeps directly in ``/workspace``.
     """
     native = target_name_from_env() == NATIVE
     if (
@@ -117,7 +122,7 @@ def get_data_dir() -> str:
 
 
 def get_output_dir() -> str:
-    """Get output directory path."""
+    """Return the output directory, creating it if missing."""
     workspace = get_workspace_root()
     output_dir = os.path.join(workspace, "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -125,7 +130,7 @@ def get_output_dir() -> str:
 
 
 def get_repos_dir() -> str:
-    """Get repositories directory path."""
+    """Return the cloned-repositories directory, creating it if missing."""
     workspace = get_workspace_root()
     repos_dir = os.path.join(workspace, "repos")
     os.makedirs(repos_dir, exist_ok=True)
@@ -133,7 +138,7 @@ def get_repos_dir() -> str:
 
 
 def get_cache_dir() -> str:
-    """Get cache directory path."""
+    """Return the cache directory, creating it if missing."""
     workspace = get_workspace_root()
     cache_dir = os.path.join(workspace, ".cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -141,7 +146,7 @@ def get_cache_dir() -> str:
 
 
 def get_logs_dir() -> str:
-    """Get logs directory path."""
+    """Return the logs directory, creating it if missing."""
     workspace = get_workspace_root()
     logs_dir = os.path.join(workspace, "logs")
     os.makedirs(logs_dir, exist_ok=True)
@@ -149,14 +154,15 @@ def get_logs_dir() -> str:
 
 
 def get_packages_dir() -> str:
-    """Get packages directory path (zip artifacts of successful builds)."""
+    """Return the zip-artifact directory, creating it if missing."""
     workspace = get_workspace_root()
     packages_dir = os.path.join(workspace, "packages")
     os.makedirs(packages_dir, exist_ok=True)
     return packages_dir
 
 
-# Global configuration
+# Resolved once at import time; main.py applies .env and --target
+# before this module is imported.
 _IN_DOCKER = is_running_in_docker()
 STATE_HOME = get_state_home()
 WORKSPACE_ROOT = get_workspace_root()
@@ -167,7 +173,8 @@ LOGS_DIR = get_logs_dir()
 PACKAGES_DIR = get_packages_dir()
 DATA_DIR = get_data_dir()
 
-# Docker Configuration
+# Defaults matching the Alpine profile; provisioning resolves the
+# active names through src.platforms instead.
 CONTAINER_NAME = "atesor-ai-sandbox"
 IMAGE_NAME = "atesor-ai-sandbox:latest"
 
@@ -185,8 +192,9 @@ def to_host_path(path: str) -> str:
 
     Returns:
         The equivalent host path, or ``path`` unchanged when it is not
-        a container path (or when we ARE running inside the container
-        with a QEMU target).
+        a container path, when it is already under ``WORKSPACE_ROOT``,
+        or when ``/workspace`` exists locally on the qemu target (as
+        inside the sandbox container).
 
     Raises:
         SandboxUnavailableError: On native, if the mirror copy fails.
@@ -206,16 +214,16 @@ def to_host_path(path: str) -> str:
     # ``/workspace`` also exists locally: without this, host-side reads
     # would fall through to the local container tree instead of the
     # remote repository, and QEMU/native state would no longer be
-    # separated. When WORKSPACE_ROOT is already ``/workspace`` (native
-    # from inside the sandbox), the string translation is a no-op but
-    # the mirror still refreshes.
+    # separated. WORKSPACE_ROOT is ``/workspace`` here only when this
+    # module computed it for the qemu target. Then the path stays
+    # unchanged, but the mirror still refreshes.
     if is_native():
         refresh_mirror(path)
         if WORKSPACE_ROOT != "/workspace":
-            return WORKSPACE_ROOT + path[len("/workspace"):]
+            return WORKSPACE_ROOT + path[len("/workspace") :]
         return path
     if not os.path.exists("/workspace"):
-        return WORKSPACE_ROOT + path[len("/workspace"):]
+        return WORKSPACE_ROOT + path[len("/workspace") :]
     return path
 
 
@@ -234,7 +242,8 @@ def refresh_mirror(path: str) -> None:
     """
     if not is_native():
         return
-    # src.mirror imports this module, so this import waits for a call.
+    # Deferred import: src.mirror imports this module, so importing it
+    # at module level would create a cycle.
     from . import mirror
 
     repo = mirror.repo_of(path)

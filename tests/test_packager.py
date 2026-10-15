@@ -1,4 +1,4 @@
-"""Tests for src.packager."""
+"""Tests for src/packager.py: zip layout, manifest schema, and safety skips."""
 
 import json
 import os
@@ -59,9 +59,7 @@ class TestPackageBuild(unittest.TestCase):
         import re
 
         base = os.path.basename(self._build())
-        self.assertRegex(
-            base, r"^owasp-amass-amass-\d{8}-\d{6}-debian\.zip$"
-        )
+        self.assertRegex(base, r"^owasp-amass-amass-\d{8}-\d{6}-debian\.zip$")
         # Without a URL the repository name stays the stem.
         legacy = os.path.basename(self._build(repo_url=None))
         self.assertIsNotNone(
@@ -69,7 +67,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_manifest_v2_records_stems_verdict_and_hashes(self) -> None:
-        """The zip says what was verified and pins each output by hash."""
         import hashlib
 
         os.makedirs(os.path.join(self.repo_path, "build"))
@@ -103,8 +100,10 @@ class TestPackageBuild(unittest.TestCase):
         zp = self._build(
             verification=verification,
             curated_artifacts=[
-                {"filepath": f"{container_root}/build/amass",
-                 "role": "primary"}
+                {
+                    "filepath": f"{container_root}/build/amass",
+                    "role": "primary",
+                }
             ],
             container_repo_path=container_root,
         )
@@ -147,7 +146,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertNotIn("output_tail", m["package_tests"])
 
     def test_failed_write_leaves_no_zip_and_no_part_file(self) -> None:
-        """A write killed half-way never looks like a finished zip."""
         with mock.patch(
             "src.packager._add_repo_tree", side_effect=OSError("disk full")
         ):
@@ -157,7 +155,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(os.listdir(self.packages_dir), [])
 
     def test_manifest_without_verification_says_not_run(self) -> None:
-        """A zip made without a verdict does not claim verification."""
         with zipfile.ZipFile(self._build()) as zf:
             m = json.loads(zf.read("manifest.json"))
 
@@ -166,7 +163,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(m["artifacts"], [])
 
     def test_layout_recipe_at_root_and_repo_subtree(self) -> None:
-        """Zip contains root recipe, manifest, and repo files."""
         zp = self._build()
         with zipfile.ZipFile(zp) as zf:
             names = set(zf.namelist())
@@ -188,7 +184,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(m["repo_url"], "https://github.com/owasp-amass/amass")
 
     def test_dot_git_excluded(self) -> None:
-        """Package excludes .git entries from the zip archive."""
         git_dir = os.path.join(self.repo_path, ".git")
         os.makedirs(git_dir)
         with open(os.path.join(git_dir, "HEAD"), "w") as f:
@@ -202,7 +197,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_symlinks_skipped_for_security(self) -> None:
-        """Package skips symlinks while keeping real repo files."""
         # A symlink pointing OUTSIDE the repo must not be packaged.
         outside = os.path.join(self.root, "secret.txt")
         with open(outside, "w") as f:
@@ -215,27 +209,23 @@ class TestPackageBuild(unittest.TestCase):
             names = zf.namelist()
         self.assertNotIn(f"{self.repo_name}/leak.txt", names)
         self.assertNotIn(f"{self.repo_name}/dangling", names)
-        # Real files still made it in.
         self.assertIn(f"{self.repo_name}/main.go", names)
 
     def test_missing_repo_dir_raises(self) -> None:
-        """Missing repository directory raises FileNotFoundError."""
         with self.assertRaises(FileNotFoundError):
             self._build(
                 repo_path=os.path.join(self.root, "does", "not", "exist")
             )
 
     def test_missing_recipe_raises(self) -> None:
-        """Missing recipe file raises FileNotFoundError."""
         os.remove(self.recipe_path)
         with self.assertRaises(FileNotFoundError):
             self._build()
 
     def test_collision_appends_suffix(self) -> None:
-        """Second package path gets a suffix instead of clobbering."""
         zp1 = self._build()
         # Same name, same second — packager must avoid clobbering.
-        # Create a sentinel at the would-be path.
+        # The first zip already occupies the path the second would pick.
         sentinel = zp1
         with open(sentinel, "ab"):
             pass
@@ -245,7 +235,6 @@ class TestPackageBuild(unittest.TestCase):
         self.assertTrue(os.path.isfile(zp2))
 
     def test_logs_included_at_zip_root(self) -> None:
-        """Existing agent and batch logs are added at the zip root."""
         agent_log = os.path.join(self.root, f"agent_{self.repo_name}.log")
         batch_log = os.path.join(self.root, f"{self.repo_name}.log")
         with open(agent_log, "w") as f:
@@ -273,9 +262,6 @@ class TestPackageBuild(unittest.TestCase):
         )
 
     def test_missing_logs_are_skipped_not_fatal(self) -> None:
-        """Missing log paths add no zip entries and do not fail."""
-        # Caller passes paths but neither file exists → no zip entries,
-        # no exception, manifest reflects absence.
         zp = self._build(
             agent_log_path=os.path.join(self.root, "nope-agent.log"),
             batch_log_path=os.path.join(self.root, "nope-batch.log"),
@@ -288,17 +274,112 @@ class TestPackageBuild(unittest.TestCase):
         self.assertEqual(manifest["logs_in_zip"], [])
 
     def test_no_log_args_means_no_log_entries(self) -> None:
-        """Omitted log paths produce no log entries in the archive."""
         zp = self._build()
         with zipfile.ZipFile(zp) as zf:
             names = set(zf.namelist())
             manifest = json.loads(zf.read("manifest.json").decode())
-        # No *.log entries at all when caller didn't pass paths.
         self.assertFalse(
             any(n.endswith(".log") for n in names),
             msg=f"unexpected .log entries: {names}",
         )
         self.assertEqual(manifest["logs_in_zip"], [])
+
+
+class TestOptimizedPackage(unittest.TestCase):
+    """Performance mode adds schema 3 sections and optimized files."""
+
+    # The same scratch repository as TestPackageBuild, without running
+    # its tests a second time.
+    setUp = TestPackageBuild.setUp
+    tearDown = TestPackageBuild.tearDown
+    _build = TestPackageBuild._build
+
+    def _optimization(self) -> dict:
+        return {
+            "status": "done",
+            "kind": "native",
+            "reason": "GCC -O3 is faster: median time ratio 0.9",
+            "workload": {"description": "compress 64 MiB"},
+            "accepted": "v3-o3",
+            "accepted_ratio": 0.9,
+            "accepted_artifacts": ["build/amass", "../escape", "link"],
+            "variants": [
+                {
+                    "variant": {"vid": "v1-tune", "flags": ["-mtune=x"]},
+                    "verdict": "no change",
+                    "ratio": 0.99,
+                },
+                {
+                    "variant": {"vid": "v3-o3", "flags": ["-O3"]},
+                    "verdict": "faster",
+                    "ratio": 0.9,
+                },
+            ],
+        }
+
+    def test_manifest_v3_lists_machine_and_variant(self) -> None:
+        """The accepted artifacts go in optimized/ with their hashes."""
+        import hashlib
+
+        accepted = os.path.join(self.root, "repos", "amass.opt", "accepted")
+        os.makedirs(os.path.join(accepted, "build"))
+        tool = os.path.join(accepted, "build", "amass")
+        with open(tool, "wb") as fh:
+            fh.write(b"\x7fELF optimized")
+        with open(os.path.join(self.root, "repos", "escape"), "w") as fh:
+            fh.write("outside")
+        os.symlink(tool, os.path.join(accepted, "link"))
+        machine = {
+            "kind": "native",
+            "label": "rv64gc+zba+zbb",
+            "core_name": "sifive-p550",
+            "misaligned": "slow",
+            "extensions": ["zba", "zbb"],
+            "board": {"x": 1},
+        }
+        zp = self._build(
+            optimization=self._optimization(),
+            machine=machine,
+            optimized_dir=accepted,
+        )
+        with zipfile.ZipFile(zp) as zf:
+            m = json.loads(zf.read("manifest.json"))
+            names = zf.namelist()
+            payload = zf.read("optimized/build/amass")
+        self.assertEqual(m["schema_version"], 3)
+        self.assertEqual(m["machine"]["core_name"], "sifive-p550")
+        self.assertNotIn("board", m["machine"])
+        section = m["optimization"]
+        self.assertEqual(section["accepted"], "v3-o3")
+        self.assertEqual(section["accepted_variant"]["flags"], ["-O3"])
+        self.assertEqual(section["workload"], "compress 64 MiB")
+        self.assertEqual(
+            section["artifacts"],
+            [
+                {
+                    "path_in_zip": "optimized/build/amass",
+                    "sha256": hashlib.sha256(b"\x7fELF optimized").hexdigest(),
+                }
+            ],
+        )
+        self.assertEqual(len(section["variants"]), 2)
+        self.assertEqual(payload, b"\x7fELF optimized")
+        self.assertNotIn("optimized/link", names)
+        self.assertNotIn("optimized/../escape", names)
+
+    def test_optimization_without_accepted_dir(self) -> None:
+        """A run that accepted nothing still records schema 3."""
+        record = dict(
+            self._optimization(), accepted=None, accepted_artifacts=[]
+        )
+        zp = self._build(optimization=record, machine=None)
+        with zipfile.ZipFile(zp) as zf:
+            m = json.loads(zf.read("manifest.json"))
+            names = zf.namelist()
+        self.assertEqual(m["schema_version"], 3)
+        self.assertIsNone(m["optimization"]["accepted_variant"])
+        self.assertEqual(m["machine"]["kind"], None)
+        self.assertFalse(any(n.startswith("optimized/") for n in names))
 
 
 class TestLegacyPackageStem(unittest.TestCase):
@@ -335,7 +416,6 @@ class TestLegacyPackageStem(unittest.TestCase):
                 )
 
     def test_ambiguous_basenames_match_state(self) -> None:
-        """The copied ambiguous-name set equals the one in src.state."""
         from src import packager, state
 
         self.assertEqual(
@@ -357,7 +437,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_safe_zip_path_increments_past_collisions(self) -> None:
-        """Test safe zip path increments past collisions."""
         for name in ("pkg.zip", "pkg.1.zip"):
             with open(os.path.join(self.root, name), "w") as f:
                 f.write("x")
@@ -367,7 +446,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
         )
 
     def test_symlinked_directory_is_skipped(self) -> None:
-        """Test symlinked directory is skipped."""
         repo = os.path.join(self.root, "repo")
         outside = os.path.join(self.root, "outside")
         os.makedirs(repo)
@@ -386,7 +464,6 @@ class TestPackagerEdgeCases(unittest.TestCase):
             self.assertNotIn("r/link/secret.txt", zf.namelist())
 
     def test_unreadable_file_is_skipped(self) -> None:
-        """Test unreadable file is skipped."""
         repo = os.path.join(self.root, "repo")
         os.makedirs(repo)
         with open(os.path.join(repo, "main.c"), "w") as f:

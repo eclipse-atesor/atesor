@@ -19,6 +19,8 @@ Layout produced::
     │                            # riscv64 artifacts with SHA-256
     ├── <repo>.log               # batch_test per-package log (optional)
     ├── agent_<repo>.log         # main.py per-package debug log (optional)
+    ├── optimized/               # accepted variant artifacts
+    │                            # (--optimize only, manifest v3)
     └── <repo>/                  # source tree (excluding .git/, symlinks)
         └── ...
 
@@ -37,7 +39,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Top-level entries inside the repo subtree that are excluded from packages.
+# Directory names that are excluded from packages at every depth of the
+# repo subtree.
 # Kept conservative on purpose — users asked for "repo code", not a clone.
 _EXCLUDED_DIRS = frozenset({".git"})
 
@@ -62,6 +65,7 @@ def _url_path_parts(repo_url: str) -> list:
 
 
 def _sanitize_stem(raw: str) -> str:
+    """Replace path-unsafe characters with ``-`` and drop leading dots."""
     return _UNSAFE_STEM_CHARS.sub("-", raw).lstrip(".")
 
 
@@ -78,7 +82,8 @@ def package_stem(repo_url: str) -> str:
 
     Returns:
         A lower-case, path-safe stem such as ``"hetznercloud-cli"``.
-        A URL without an owner segment gives the bare repo stem.
+        A URL without an owner segment gives the bare repo stem. A URL
+        that gives no usable name gives ``"repo"``.
     """
     parts = _url_path_parts(repo_url)
     stem = _sanitize_stem("-".join(parts[-2:])).lower()
@@ -112,10 +117,7 @@ def legacy_package_stem(repo_url: str) -> str:
     trimmed = (repo_url or "").strip().rstrip("/")
     segments = [s for s in trimmed.split("/") if s]
     basename = segments[-1].removesuffix(".git") if segments else ""
-    if (
-        basename.lower() in _LEGACY_AMBIGUOUS_BASENAMES
-        and len(segments) >= 2
-    ):
+    if basename.lower() in _LEGACY_AMBIGUOUS_BASENAMES and len(segments) >= 2:
         owner = segments[-2].removesuffix(".git")
         # Skip the scheme and host segments ("https:", "github.com").
         if owner and ":" not in owner and "." not in owner:
@@ -159,10 +161,9 @@ def _add_repo_tree(
     files_added = 0
     symlinks_skipped = 0
 
-    # ``followlinks=False`` keeps os.walk from descending into symlinked dirs.
     for root, dirs, files in os.walk(repo_path, followlinks=False):
-        # Skip symlinked directories (os.walk lists them in ``dirs`` but
-        # would only recurse if followlinks=True; we still want to log).
+        # Even with followlinks=False, os.walk lists symlinked
+        # directories in ``dirs``; filter them out to count and log them.
         kept_dirs = []
         for d in dirs:
             full = os.path.join(root, d)
@@ -234,7 +235,7 @@ def _manifest_artifacts(
         if roles.get(path):
             entry["role"] = roles[path]
         if root and path.startswith(root + "/"):
-            rel = path[len(root) + 1:]
+            rel = path[len(root) + 1 :]
             host_file = os.path.join(repo_path, rel)
             entry["path_in_zip"] = rel
             if os.path.isfile(host_file) and not os.path.islink(host_file):
@@ -242,6 +243,85 @@ def _manifest_artifacts(
                 entry["sha256"] = _sha256(host_file)
         entries.append(entry)
     return entries
+
+
+# Machine-profile keys copied into the v3 manifest's "machine" section.
+_MACHINE_KEYS = (
+    "kind",
+    "emulated_cpu",
+    "label",
+    "extensions",
+    "vlen",
+    "core_name",
+    "misaligned",
+    "kernel",
+    "libc",
+)
+
+
+def _optimization_manifest(
+    optimization: Dict[str, Any],
+    optimized_dir: Optional[str],
+) -> tuple:
+    """Return the manifest section of performance mode and its files.
+
+    The accepted variant's artifacts go in the zip under
+    ``optimized/``, next to the verified baseline. Symlinks and paths
+    that leave ``optimized_dir`` are skipped.
+
+    Returns:
+        ``(section, [(host_path, arcname), ...])``.
+    """
+    files: List[tuple] = []
+    entries: List[Dict[str, Any]] = []
+    if optimized_dir and os.path.isdir(optimized_dir):
+        base = os.path.realpath(optimized_dir)
+        for rel in optimization.get("accepted_artifacts") or []:
+            host = os.path.realpath(os.path.join(optimized_dir, rel))
+            if not host.startswith(base + os.sep):
+                continue
+            path = os.path.join(optimized_dir, rel)
+            if os.path.isfile(path) and not os.path.islink(path):
+                arcname = f"optimized/{rel}"
+                files.append((path, arcname))
+                entries.append(
+                    {"path_in_zip": arcname, "sha256": _sha256(path)}
+                )
+    variants = optimization.get("variants") or []
+    accepted = next(
+        (
+            record.get("variant")
+            for record in variants
+            if (record.get("variant") or {}).get("vid")
+            == optimization.get("accepted")
+        ),
+        None,
+    )
+    workload = optimization.get("workload") or {}
+    section = {
+        "status": optimization.get("status"),
+        "kind": optimization.get("kind"),
+        "reason": optimization.get("reason"),
+        "workload": workload.get("description"),
+        "workload_mode": workload.get("mode"),
+        "workload_origin": workload.get("origin"),
+        "accepted": optimization.get("accepted"),
+        "accepted_label": optimization.get("accepted_label"),
+        "accepted_ratio": optimization.get("accepted_ratio"),
+        "accepted_variant": accepted,
+        "artifacts": entries,
+        "variants": [
+            {
+                "vid": (record.get("variant") or {}).get("vid"),
+                "label": (record.get("variant") or {}).get("label"),
+                "technique": (record.get("variant") or {}).get("technique"),
+                "verdict": record.get("verdict"),
+                "ratio": record.get("ratio"),
+            }
+            for record in variants
+        ],
+    }
+    return section, files
 
 
 def package_build(
@@ -257,6 +337,9 @@ def package_build(
     curated_artifacts: Optional[List[Dict[str, Any]]] = None,
     container_repo_path: Optional[str] = None,
     package_tests: Optional[Dict[str, Any]] = None,
+    optimization: Optional[Dict[str, Any]] = None,
+    machine: Optional[Dict[str, Any]] = None,
+    optimized_dir: Optional[str] = None,
 ) -> str:
     """Produce a zip artifact for a successful build.
 
@@ -285,9 +368,16 @@ def package_build(
         package_tests: The non-gating package test result
             (``AgentState.package_tests``); its summary goes in the
             manifest.
+        optimization: The performance mode record
+            (``AgentState.optimization``), or None. When it is given,
+            the manifest has schema version 3 with ``machine`` and
+            ``optimization`` sections; otherwise it stays version 2.
+        machine: The machine profile (``AgentState.machine_profile``).
+        optimized_dir: Host directory with the accepted variant's
+            artifacts (``<repo>.opt/accepted``), or None.
 
     Returns:
-        Absolute path to the created zip file.
+        Path to the created zip file in ``packages_dir``.
 
     Raises:
         FileNotFoundError: if ``repo_path`` is not a directory or
@@ -352,6 +442,17 @@ def package_build(
         "source_root_in_zip": repo_name,
         "logs_in_zip": [],
     }
+    optimized_files: List[tuple] = []
+    if optimization:
+        # Schema 3 adds the two sections; a run without --optimize
+        # keeps writing schema 2.
+        manifest["schema_version"] = 3
+        manifest["machine"] = {
+            key: (machine or {}).get(key) for key in _MACHINE_KEYS
+        }
+        manifest["optimization"], optimized_files = _optimization_manifest(
+            optimization, optimized_dir
+        )
 
     # Resolve which optional logs are actually present on disk. We log
     # (don't fail) when a caller hands us a missing path — the most
@@ -384,15 +485,17 @@ def package_build(
     try:
         with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(recipe_path, arcname="build_recipe.md")
-            zf.writestr(
-                "manifest.json", json.dumps(manifest, indent=2) + "\n"
-            )
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
             for host_path, arcname in logs_to_add:
+                zf.write(host_path, arcname=arcname)
+            for host_path, arcname in optimized_files:
                 zf.write(host_path, arcname=arcname)
             files_added, symlinks_skipped = _add_repo_tree(
                 zf, repo_path, arc_root=repo_name
             )
         os.replace(part_path, zip_path)
+    # BaseException, not Exception: a Ctrl-C (KeyboardInterrupt) during
+    # the write must also remove the partial zip.
     except BaseException:
         try:
             os.remove(part_path)

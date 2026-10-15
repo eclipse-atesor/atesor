@@ -1,9 +1,10 @@
-"""Tests for the native target in .github/scripts/batch_test.py.
+"""Tests for .github/scripts/batch_test.py, mainly its native target.
 
 A native batch runs on the user's own riscv64 machine, for local runs.
 These tests cover the worker count, the machine probe and the --target
-flag. The QEMU calls to main.py must keep today's argv. No test opens
-an ssh connection or starts a real process.
+flag. The QEMU argv passed to main.py is pinned verbatim. Other tests
+cover the run deadline, the per-repo lock, the platform choice and the
+exit code. No test opens an ssh connection or starts a real process.
 """
 
 import contextlib
@@ -79,6 +80,39 @@ class TestNativeDefaultWorkers(_BatchTestCase):
                 )
 
 
+class TestProbeToolchains(_BatchTestCase):
+    """The toolchain probe must see the image's own PATH."""
+
+    def test_probe_uses_a_non_login_shell(self) -> None:
+        """`sh -lc` reads /etc/profile, which drops /usr/local/go/bin."""
+        outputs = {
+            "go version": "go version go1.26.5 linux/riscv64",
+            "cargo --version": "cargo 1.99.0 (5f94df478 2026-08-27)",
+        }
+        shells = []
+
+        def fake_exec_argv(container, argv):
+            shells.append(argv[:2])
+            return mock.Mock(argv=["exec", container, *argv])
+
+        def fake_run(argv, **kwargs):
+            return _completed(0, outputs[argv[-1]])
+
+        with mock.patch.object(
+            self.bt.target, "is_native", return_value=False
+        ):
+            with mock.patch.object(
+                self.bt.sandbox, "build_exec_argv", side_effect=fake_exec_argv
+            ):
+                with mock.patch.object(
+                    self.bt.subprocess, "run", side_effect=fake_run
+                ):
+                    versions = self.bt._probe_toolchains(_WORKER)
+
+        self.assertEqual({"go": "1.26.5", "cargo": "1.99.0"}, versions)
+        self.assertEqual([["sh", "-c"], ["sh", "-c"]], shells)
+
+
 class TestReadMachineResources(_BatchTestCase):
     """One ssh call reads the host name, the cores and the memory."""
 
@@ -112,7 +146,10 @@ class TestReadMachineResources(_BatchTestCase):
 
 
 class TestMainPyArgv(_BatchTestCase):
-    """Each main.py call gets --target native on native only."""
+    """Each main.py call gets --target native on native only.
+
+    The run_agent() call also gets the ATESOR_RUN_DEADLINE kill time.
+    """
 
     def _setup_argv(self, rebuild: bool = False) -> list:
         """Return the argv of one _run_setup() call."""
@@ -159,7 +196,7 @@ class TestMainPyArgv(_BatchTestCase):
         self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
 
     def test_qemu_argv_is_unchanged(self) -> None:
-        """QEMU calls keep today's argv, with no --target."""
+        """QEMU calls keep the pinned argv, with no --target."""
         self.assertEqual(
             [
                 "python3",
@@ -228,7 +265,11 @@ class TestMainPyArgv(_BatchTestCase):
 
 
 class TestBatchMain(_BatchTestCase):
-    """main() picks the target, the worker count and the header rows."""
+    """main() picks the target, the worker count and the header rows.
+
+    The class also tests the platform choice, the exit code and the
+    per-repo lock.
+    """
 
     def setUp(self) -> None:
         """Write a one-package list and the fake .env values."""
@@ -287,9 +328,7 @@ class TestBatchMain(_BatchTestCase):
                 bt, "_refresh_worker_pool_if_needed", return_value=True
             ),
             mock.patch.object(bt, "run_agent", return_value=run_result),
-            mock.patch.object(
-                bt, "_install_signal_handlers", signal_handler
-            ),
+            mock.patch.object(bt, "_install_signal_handlers", signal_handler),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
@@ -311,14 +350,12 @@ class TestBatchMain(_BatchTestCase):
         )
 
     def test_workers_flag_overrides_the_native_default(self) -> None:
-        """--workers still wins over the native default."""
         code, _, _, _ = self._run("--target", "native", "--workers", "2")
 
         self.assertEqual(0, code)
         self.assertEqual(2, self.bt.MAX_WORKERS)
 
     def test_native_workers_stay_within_the_machine_cores(self) -> None:
-        """On native, the limit is the core count of the machine."""
         code, _, err, _ = self._run("--target", "native", "--workers", "5")
 
         self.assertEqual(2, code)
@@ -350,7 +387,6 @@ class TestBatchMain(_BatchTestCase):
         self.assertNotIn("Machine", out)
 
     def test_qemu_workers_limit_message_is_unchanged(self) -> None:
-        """QEMU keeps today's error for too many workers."""
         too_many = self.bt._MAX_AVAILABLE_WORKERS + 1
         code, _, err, _ = self._run("--workers", str(too_many))
 
@@ -362,7 +398,6 @@ class TestBatchMain(_BatchTestCase):
         )
 
     def test_target_flag_wins_over_env_file(self) -> None:
-        """--target native wins over ATESOR_TARGET=qemu in .env."""
         self.env_file["ATESOR_TARGET"] = "qemu"
         code, _, _, probe = self._run("--target", "native")
 
@@ -371,7 +406,6 @@ class TestBatchMain(_BatchTestCase):
         self.assertEqual("native", os.environ["ATESOR_TARGET"])
 
     def test_qemu_flag_wins_over_native_env_file(self) -> None:
-        """--target qemu wins over ATESOR_TARGET=native in .env."""
         self.env_file["ATESOR_TARGET"] = "native"
         code, _, _, probe = self._run("--target", "qemu")
 
@@ -380,7 +414,6 @@ class TestBatchMain(_BatchTestCase):
         self.assertEqual("qemu", os.environ["ATESOR_TARGET"])
 
     def test_env_file_selects_native_without_the_flag(self) -> None:
-        """With no flag, ATESOR_TARGET in .env selects the target."""
         self.env_file["ATESOR_TARGET"] = "native"
         code, _, _, probe = self._run()
 
@@ -402,7 +435,6 @@ class TestBatchMain(_BatchTestCase):
         self.assertIsNot(lock_a, lock_c)
 
     def test_platform_flag_wins_over_invalid_env(self) -> None:
-        """An explicit --platform ignores a bad inherited env value."""
         os.environ["ATESOR_PLATFORM"] = "bogus"
         code, _, err, _ = self._run("--platform", "debian")
 
@@ -411,7 +443,6 @@ class TestBatchMain(_BatchTestCase):
         self.assertEqual("debian", os.environ["ATESOR_PLATFORM"])
 
     def test_invalid_env_platform_fails_without_flag(self) -> None:
-        """A bad env platform is reported only when no flag overrides it."""
         self.env_file["ATESOR_PLATFORM"] = "bogus"
         code, _, err, _ = self._run()
 

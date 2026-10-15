@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
-"""Main entry point for Atesor AI.
+"""Command-line entry point of Atesor AI.
 
-Handles CLI, Docker setup, and starts the multi-agent porting
-workflow.
+Owns argument parsing, .env loading, sandbox provisioning (QEMU Docker
+and native podman), the recipe-cache fast path, and the final reports
+and exit codes. The porting workflow itself lives in ``src/graph.py``.
 """
 
 import argparse
 import contextlib
 import fcntl
+import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 import docker
 from dotenv import load_dotenv
 from termcolor import colored
 
 # Load environment variables before importing project modules so that
-# provider configuration is available at import time. The current
-# directory is searched first, then standard per-user locations, so an
-# installed CLI finds keys regardless of the working directory.
+# provider configuration is available at import time. The bare
+# load_dotenv() call searches the directory of this file and its
+# parents, not the current directory. The standard per-user locations
+# follow, so an installed CLI finds keys regardless of the working
+# directory. A variable that is already set keeps its value.
 load_dotenv()
 _home = os.path.expanduser("~")
 _xdg_config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
@@ -42,8 +47,10 @@ for _env_path in _env_candidates:
     load_dotenv(_env_path, override=False)
 
 # src.config computes its paths at import time, so a --target flag must
-# reach the environment first. The flag wins over .env.
-from src.target import (  # noqa: E402
+# reach the environment first. The flag wins over .env. The src imports
+# in this module intentionally sit behind the dotenv/target setup; the
+# per-line noqa: E402 markers record that exception.
+from src.target import (  # noqa: E402 - dotenv runs first
     apply_target_flag,
     close_connection,
     is_native,
@@ -57,8 +64,8 @@ from src.target import (  # noqa: E402
 apply_target_flag(sys.argv[1:])
 _TARGET_AT_IMPORT = target_name_from_env()
 
-from src import __version__, sandbox  # noqa: E402
-from src.config import (  # noqa: E402
+from src import __version__, sandbox  # noqa: E402 - env setup runs first
+from src.config import (  # noqa: E402 - env setup runs first
     LOGS_DIR,
     OUTPUT_DIR,
     PACKAGES_DIR,
@@ -66,14 +73,14 @@ from src.config import (  # noqa: E402
     WORKSPACE_ROOT,
 )
 from src.models import check_api_keys, print_model_info  # noqa: E402
-from src.state import AgentState  # noqa: E402
+from src.state import AgentState  # noqa: E402 - env setup runs first
 
 # Directory holding bundled resources (Dockerfiles, seed data), resolved
 # from the install location so image builds work regardless of the CWD.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# The first native image build downloads the base image and the Go and
-# Rust toolchains on the machine.
+# Seconds. The first native image build downloads the base image and
+# the Go and Rust toolchains on the machine.
 NATIVE_BUILD_TIMEOUT = 5400
 
 # The distro IDs that each profile accepts in the container. The ubuntu
@@ -84,8 +91,12 @@ _NATIVE_DISTROS = {
     "ubuntu": {"debian", "ubuntu"},
 }
 
+# A QEMU_CPU model: a name such as rva22u64, or rv64i with properties
+# such as "rv64i,m=true,zba=true". It goes to the sandbox as one value.
+# Every QEMU model name starts with a letter.
+_EMULATE_CPU_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.,=+-]{0,511}$")
 
-# Configure logging
+
 def configure_logging(verbose: bool, repo_name: str = "") -> None:
     """Configure root logging handlers for console and file output.
 
@@ -94,11 +105,11 @@ def configure_logging(verbose: bool, repo_name: str = "") -> None:
         repo_name: Optional repository name used to derive a per-repo
             log file path.
     """
-    # Capture everything at root level
+    # Root stays at DEBUG so the file handler sees everything; each
+    # handler then applies its own level.
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
-    # Create a custom formatter for better readability
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"
     )
@@ -110,8 +121,8 @@ def configure_logging(verbose: bool, repo_name: str = "") -> None:
         root_logger.removeHandler(handler)
         handler.close()
 
-    # 1. File Handler (Always Capture Everything)
-    # Use per-repo log files to avoid cross-process corruption in batch mode
+    # Per-repo log files: batch workers share the mounted logs dir, and
+    # concurrent writes to one file would interleave.
     log_filename = f"agent_{repo_name}.log" if repo_name else "agent.log"
     log_file = os.path.join(LOGS_DIR, log_filename)
     file_handler = logging.FileHandler(log_file)
@@ -119,19 +130,20 @@ def configure_logging(verbose: bool, repo_name: str = "") -> None:
     file_handler.setLevel(logging.DEBUG)
     root_logger.addHandler(file_handler)
 
-    # 2. Console Handler (Respect Verbose Flag)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
 
     if verbose:
         console_handler.setLevel(logging.DEBUG)
     else:
-        # User requested no in-depth logs in terminal unless verbose is set
+        # Non-verbose runs keep the terminal quiet; the file still
+        # records DEBUG.
         console_handler.setLevel(logging.ERROR)
 
     root_logger.addHandler(console_handler)
 
-    # Reduce noise from sensitive/chatty packages
+    # The root DEBUG level would flood the log file with these
+    # libraries' HTTP and trace chatter.
     logging.getLogger("docker").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.INFO)
@@ -141,7 +153,8 @@ def configure_logging(verbose: bool, repo_name: str = "") -> None:
     logging.getLogger("langsmith").setLevel(logging.ERROR)
     logging.getLogger("google.ai").setLevel(logging.WARNING)
 
-    # Ensure stdout is flushed
+    # Line buffering keeps progress lines visible when batch mode pipes
+    # stdout into a log file (redirected stdout is block-buffered).
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
 
@@ -150,7 +163,11 @@ logger = logging.getLogger(__name__)
 
 
 def check_keys() -> bool:
-    """Verify required API keys are set."""
+    """Verify the provider API key and print the active model config.
+
+    Returns:
+        True when the selected provider's key is usable.
+    """
     is_valid, msg, provider = check_api_keys()
     if not is_valid:
         print(colored(f"ERROR: {msg}", "red"))
@@ -220,7 +237,6 @@ def _ensure_riscv64_binfmt() -> bool:
         logger.warning(f"binfmt install failed: {e}")
         return False
 
-    # Re-check
     if os.path.exists(binfmt_path):
         print(colored("qemu-riscv64 binfmt handler registered", "green"))
         return True
@@ -235,6 +251,10 @@ def setup_docker_environment() -> bool:
     `/etc/os-release` matches the selected profile, refusing to proceed on
     mismatch (the most common cause: user passes --platform debian but is
     still pointing at the legacy Alpine container).
+
+    Returns:
+        True when the container runs and answers the health checks. A
+        container architecture other than riscv64 only prints a warning.
     """
     from src.platforms import get_active_profile, get_container_name
 
@@ -276,10 +296,9 @@ def _provision_sandbox(
     --workers N ``main.py`` processes at once; without the lock
     covering the image check, a cold start races N identical 15-45 min
     QEMU image builds (one per worker) plus N concurrent binfmt
-    installer containers. The previous lock only covered container
-    creation. Whoever wins the lock does the expensive work once; the
-    waiters then see the image/container already present and continue
-    in seconds.
+    installer containers. Whoever wins the lock does the expensive
+    work once; the waiters then see the image/container already
+    present and continue in seconds.
     """
     lock_path = os.path.join(LOGS_DIR, ".container_setup.lock")
     os.makedirs(LOGS_DIR, exist_ok=True)
@@ -314,15 +333,14 @@ def _provision_sandbox_locked(
     """Build the sandbox image if needed and start the container.
 
     The caller (`_provision_sandbox`) holds the setup flock for the
-    whole duration and closes the Docker client afterwards.
+    whole duration. `setup_docker_environment` closes the Docker client
+    afterwards.
     """
-    # Preflight: the host must have qemu-riscv64 registered in
-    # binfmt_misc, otherwise every riscv64 container exits immediately
-    # with "exec format error" before the agent can run anything. The
-    # Debian image is riscv64-native so this is mandatory; the Alpine
-    # image is too, just historically less likely to hit this because
-    # docker-desktop ships binfmt by default. Auto-register if we can,
-    # otherwise emit a clear instruction and exit.
+    # Preflight: without a qemu-riscv64 handler in binfmt_misc, every
+    # riscv64 container exits immediately with "exec format error"
+    # before the agent can run anything. Docker Desktop registers one
+    # by default; bare Linux hosts often do not. Auto-register when
+    # possible, otherwise print the manual fix and stop.
     if not _ensure_riscv64_binfmt():
         print(
             colored(
@@ -342,7 +360,8 @@ def _provision_sandbox_locked(
         )
         return False
 
-    # Check/Build Docker Image
+    # Reuse the cached image; build only when it is missing or
+    # REBUILD_IMAGE=true forces a rebuild.
     print(
         colored(
             f"\nSetting up RISC-V development environment "
@@ -360,6 +379,8 @@ def _provision_sandbox_locked(
                     f"Forcing rebuild of image '{image_name}'...", "yellow"
                 )
             )
+            # Fall into the ImageNotFound handler below so a forced
+            # rebuild runs the same build path as a missing image.
             raise docker.errors.ImageNotFound("Triggering rebuild")
 
         client.images.get(image_name)
@@ -380,8 +401,8 @@ def _provision_sandbox_locked(
             )
         )
         try:
-            # Use low-level API to stream build progress so the user
-            # sees activity
+            # The low-level API streams the build log, so the user sees
+            # progress during the 15-45 minute QEMU build.
             build_stream = client.api.build(
                 path=APP_DIR,
                 dockerfile=dockerfile,
@@ -398,13 +419,12 @@ def _provision_sandbox_locked(
                         line = chunk["stream"].rstrip()
                         if not line:
                             continue
-                        # Show step headers prominently; condense noisy
-                        # lines
+                        # Step headers stand out; every other line
+                        # still prints so a long build never looks
+                        # hung.
                         if line.startswith("Step "):
                             print(colored(f"   {line}", "cyan"))
                         else:
-                            # Keep the user feeling alive: print a dot
-                            # per log line, full text every 50
                             print(f"   {line}")
                     elif "errorDetail" in chunk:
                         raise docker.errors.BuildError(
@@ -547,8 +567,7 @@ def _provision_sandbox_locked(
     )
     logger.info("Workspace mounted at /workspace in container")
 
-    # ---- Self-check: container's actual distro must match the
-    # selected profile ----
+    # Self-check: the container distro must match the selected profile.
     try:
         osr = container.exec_run("cat /etc/os-release")
         if osr.exit_code == 0:
@@ -601,9 +620,8 @@ def _provision_sandbox_locked(
     except Exception as e:
         logger.warning(f"Distro self-check skipped: {e}")
 
-    # Verify container is working and architecture is correct
+    # Verify container is responsive and reports the riscv64 architecture.
     try:
-        # Check architecture
         arch_result = container.exec_run("uname -m")
         if arch_result.exit_code == 0:
             arch = arch_result.output.decode("utf-8").strip()
@@ -636,7 +654,6 @@ def _provision_sandbox_locked(
             )
             return False
 
-        # Simple health check
         exec_result = container.exec_run("echo 'Container ready!'")
         if exec_result.exit_code == 0:
             print(colored("Container is responsive", "green"))
@@ -648,7 +665,6 @@ def _provision_sandbox_locked(
     except Exception as e:
         print(colored(f"ERROR: Container health check failed: {e}", "red"))
 
-        # Try to recreate container on health check failure
         print(colored("   Attempting to recreate container...", "yellow"))
         try:
             container.stop()
@@ -656,7 +672,6 @@ def _provision_sandbox_locked(
         except Exception as e:
             logger.warning(f"Cleanup failed: {e}")
 
-        # Retry setup
         container = None
         for attempt in range(2):
             try:
@@ -721,9 +736,7 @@ def _provision_sandbox_locked(
     return True
 
 
-# ---------------------------------------------------------------------------
 # Native target: the build container on the user's riscv64 machine
-# ---------------------------------------------------------------------------
 
 
 @contextlib.contextmanager
@@ -793,7 +806,11 @@ def setup_native_environment() -> bool:
 
 
 def _ensure_native_image(profile) -> bool:
-    """Build the native image when it is missing or a rebuild is due."""
+    """Build the native image when it is missing or a rebuild is due.
+
+    Returns:
+        True when a usable image is present on the machine.
+    """
     image = profile.image_name
     if os.environ.get("REBUILD_IMAGE") == "true":
         print(colored(f"Forcing rebuild of image '{image}'...", "yellow"))
@@ -1144,12 +1161,51 @@ def remove_native_repo(repo_name: str) -> None:
         )
 
 
+def _emulate_cpu_value(cli_value: Optional[str]) -> Optional[str]:
+    """Return the QEMU_CPU model: --emulate-cpu, else ATESOR_QEMU_CPU."""
+    return cli_value or os.environ.get("ATESOR_QEMU_CPU", "").strip() or None
+
+
+def _verified_cached_recipe(repo_url: str) -> Optional[Dict[str, Any]]:
+    """Return the verified recipe-cache entry of a repository, or None.
+
+    Only an entry with a verified verdict proves that its recipe made
+    riscv64 output; any other entry is not used.
+    """
+    from src.memory import get_cached_recipe
+    from src.state import derive_repo_name
+
+    cached = get_cached_recipe(derive_repo_name(repo_url), repo_url=repo_url)
+    verdict = (cached or {}).get("verification") or {}
+    return cached if verdict.get("status") == "verified" else None
+
+
+def _performance_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Return the run_agent arguments of performance mode, if it is on.
+
+    With --optimize (and no --force), a verified cached recipe of the
+    package becomes the build plan, so the port builds again without
+    planning.
+    """
+    kwargs: Dict[str, Any] = {}
+    if args.optimize:
+        kwargs["optimize"] = True
+        if not getattr(args, "force", False) and args.repo:
+            cached = _verified_cached_recipe(args.repo)
+            if cached:
+                kwargs["cached_recipe"] = cached
+    if args.emulate_cpu:
+        kwargs["emulate_cpu"] = args.emulate_cpu
+    return kwargs
+
+
 def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
     """Set up the native container, run the command, then stop it.
 
     After a port, the repository tree on the machine is removed. Then
     the container stops. Both happen after a port, a failure, an
-    escalation or an exception. --setup-only only stops the container.
+    escalation or an exception. An infra-only run, or a failed setup,
+    only stops the container.
 
     Args:
         args: The parsed command-line arguments.
@@ -1176,22 +1232,83 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
             max_attempts=args.max_attempts,
             verbose=args.verbose,
             package=args.package,
+            **_performance_kwargs(args),
         )
     finally:
         if ported:
             remove_native_repo(derive_repo_name(args.repo))
+            if args.optimize:
+                # The variant trees and accepted artifacts; the mirror
+                # keeps its copy.
+                remove_native_repo(derive_repo_name(args.repo) + ".opt")
         stop_native_container()
 
 
+def _run_probe(args: argparse.Namespace, native: bool) -> int:
+    """Probe the machine in the sandbox, then print and save the result.
+
+    The probe only reads: /proc, /sys, compiler checks on stdin, and
+    test instructions in child processes. The profile goes to
+    ``machine_profile_<kind>.json`` in ``OUTPUT_DIR``. On native, the
+    container stops at the end.
+
+    Args:
+        args: The parsed command-line arguments.
+        native: True on the native target.
+
+    Returns:
+        0 when the probe ran, else 1.
+    """
+    from src.machine import describe, describe_rules, probe_machine
+
+    try:
+        if native:
+            if not setup_native_environment():
+                return 1
+        elif not setup_docker_environment():
+            return 1
+        if native and args.emulate_cpu:
+            print(
+                colored(
+                    "--emulate-cpu applies to QEMU runs only; it is "
+                    "ignored on the native target.",
+                    "yellow",
+                )
+            )
+        kind = "native" if native else "qemu"
+        profile, error = probe_machine(
+            kind, None if native else args.emulate_cpu
+        )
+        if profile is None:
+            print(colored(f"ERROR: the machine probe failed: {error}", "red"))
+            return 1
+        print(colored("\nMachine probe", "cyan", attrs=["bold"]))
+        for line in describe(profile) + describe_rules(profile):
+            print(f"   {line}")
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        path = os.path.join(OUTPUT_DIR, f"machine_profile_{kind}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(profile.to_dict(), handle, indent=2)
+        print(colored(f"   Profile saved: {path}", "green"))
+        return 0
+    finally:
+        if native:
+            stop_native_container()
+
+
 def save_porting_outputs(state: AgentState, output_dir: str) -> None:
-    """Save all porting outputs to files."""
-    # Ensure output directory exists
+    """Write the state JSON, recipe, report, and patches to files.
+
+    Args:
+        state: The final agent state of the run.
+        output_dir: Directory for the generated files; created if
+            missing.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     repo_name = state.repo_name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # 0. Save complete state (JSON)
     state_path = os.path.join(
         output_dir, f"{repo_name}_state_{timestamp}.json"
     )
@@ -1201,14 +1318,12 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
     except Exception as e:
         logger.error(f"Failed to save state JSON: {e}")
 
-    # 1. Save porting recipe
     if state.porting_recipe:
         recipe_path = os.path.join(output_dir, f"{repo_name}_recipe.md")
         with open(recipe_path, "w") as f:
             f.write(state.porting_recipe)
         print(colored(f"Porting recipe saved: {recipe_path}", "green"))
 
-    # 2. Save detailed build report
     report_data = state.to_dict()
     report_data["execution_duration"] = state.get_execution_duration()
     report = generate_detailed_report(report_data)
@@ -1219,7 +1334,6 @@ def save_porting_outputs(state: AgentState, output_dir: str) -> None:
         f.write(report)
     print(colored(f"Detailed report saved: {report_path}", "green"))
 
-    # 3. Save patches
     if state.patches_generated:
         patches_dir = os.path.join(
             output_dir, f"{repo_name}_patches_{timestamp}"
@@ -1314,8 +1428,177 @@ def _package_tests_section(tests: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _machine_section(machine: Optional[Dict[str, Any]]) -> str:
+    """Render the machine probe of performance mode for the report."""
+    if not machine:
+        return ""
+    from src.machine import MachineProfile, describe, describe_rules
+
+    profile = MachineProfile.from_dict(machine)
+    lines = ["## Machine Profile", "", "```"]
+    lines += describe(profile) + describe_rules(profile)
+    lines += ["```", "", "---", "", ""]
+    return "\n".join(lines)
+
+
+def _variant_settings(variant: Dict[str, Any]) -> str:
+    """Return the flags and environment of one variant, for a table.
+
+    ``-fprofile`` flags are dropped (the ``pgo`` field is shown on its
+    own) and ``CCACHE_DISABLE`` is hidden as a wrapper detail.
+    """
+    parts = []
+    if variant.get("compiler"):
+        parts.append(variant["compiler"])
+    parts += [
+        flag for flag in variant.get("flags") or [] if "-fprofile" not in flag
+    ]
+    parts += [
+        f"{key}={value}"
+        for key, value in (variant.get("env") or {}).items()
+        if key not in ("CCACHE_DISABLE",)
+    ]
+    if variant.get("pgo"):
+        parts.append(f"PGO {variant['pgo']}")
+    return " ".join(parts).replace("|", "/")
+
+
+def _cell(text: Any, limit: int = 200) -> str:
+    """Return one markdown table cell: one line, no pipe characters."""
+    return " ".join(str(text or "").replace("|", "/").split())[:limit]
+
+
+def _optimization_section(
+    optimization: Optional[Dict[str, Any]],
+    machine: Optional[Dict[str, Any]],
+) -> str:
+    """Render the performance mode result (--optimize) for the report."""
+    if not optimization:
+        return ""
+    from src.bench import Workload
+    from src.optimize import headline, tune_result
+    from src.workload import describe as describe_workload
+
+    lines = ["## Performance Mode (--optimize)", ""]
+    lines.append(
+        f"**Optimized**: "
+        f"{optimization.get('headline') or headline(optimization)}  "
+    )
+    lines.append(
+        f"**Result**: {optimization.get('status', 'unknown')}: "
+        f"{optimization.get('reason') or 'N/A'}  "
+    )
+    if optimization.get("advice"):
+        lines.append(f"**Fix**: {optimization['advice']}  ")
+    if machine:
+        lines.append(
+            f"**Machine**: {machine.get('kind')}, {machine.get('label')}, "
+            f"core {machine.get('core_name') or 'unknown'}, misaligned "
+            f"access {machine.get('misaligned')} (source: "
+            f"{machine.get('misaligned_source') or 'none'})  "
+        )
+    package = optimization.get("package") or {}
+    if package:
+        libraries = ", ".join(package.get("libraries") or []) or "none"
+        programs = ", ".join(package.get("programs") or []) or "none"
+        lines.append(
+            f"**Package**: {package.get('kind')} ({package.get('language')}, "
+            f"{package.get('build_system')}); libraries: {libraries}; "
+            f"programs: {programs}  "
+        )
+    baseline = optimization.get("baseline") or {}
+    if baseline:
+        lines.append(
+            f"**Baseline**: the verified build, rebuilt in a copy in "
+            f"{baseline.get('build_seconds')}s; {baseline.get('same_code')} "
+            f"of {baseline.get('artifacts')} riscv64 artifacts have the "
+            "code of the verified build  "
+        )
+    workload = optimization.get("workload")
+    if workload:
+        lines.append(
+            f"**Workload**: {describe_workload(Workload.from_dict(workload))}"
+            "  "
+        )
+    if optimization.get("duration_seconds") is not None:
+        lines.append(
+            f"**Duration**: {optimization['duration_seconds']}s of "
+            f"{optimization.get('budget_seconds')}s  "
+        )
+    if optimization.get("accepted_dir"):
+        lines.append(
+            f"**Optimized artifacts**: `{optimization['accepted_dir']}`"
+        )
+    variants = optimization.get("variants") or []
+    if variants:
+        lines += [
+            "",
+            "| Tune | Technique | Settings | Result | Time ratio "
+            "(95% CI) | Details |",
+            "|---|---|---|---|---|---|",
+        ]
+        for record in variants:
+            variant = record.get("variant") or {}
+            comparison = (record.get("measurement") or {}).get(
+                "comparison"
+            ) or {}
+            ratio = record.get("ratio")
+            interval = (
+                f"{ratio} ({comparison['ci_low']}-{comparison['ci_high']})"
+                if ratio and comparison
+                else (ratio or "-")
+            )
+            check = record.get("second_check") or {}
+            details = record.get("reason") or ""
+            if check:
+                details += (
+                    f"; second check ({check.get('check')}): "
+                    f"{check.get('verdict')} {check.get('ratio') or ''}"
+                )
+            lines.append(
+                f"| {_cell(variant.get('label') or variant.get('vid'))} "
+                f"| {_cell(variant.get('technique') or '-')} "
+                f"| {_cell(_variant_settings(variant))} "
+                f"| {_cell(tune_result(record))} "
+                f"| {_cell(interval)} "
+                f"| {_cell(details, 300)} |"
+            )
+    for title, key in (("Warnings", "warnings"), ("Notes", "notes")):
+        items = optimization.get(key) or []
+        if items:
+            lines += ["", f"### {title}", ""]
+            lines += [f"- {item}" for item in items[:30]]
+    for name, source in ((workload or {}).get("files") or {}).items():
+        language = {"c++": "cpp"}.get(
+            (workload or {}).get("source_language") or "",
+            (workload or {}).get("source_language") or "",
+        )
+        lines += [
+            "",
+            f"### Workload source: `{name}`",
+            "",
+            f"```{language}",
+            str(source).rstrip(),
+            "```",
+        ]
+    lines += [
+        "",
+        "A time ratio below 1 means the tune ran faster than the "
+        "baseline. Only native runs measure time.",
+    ]
+    return "\n".join(lines) + "\n\n---\n\n"
+
+
 def generate_detailed_report(state: dict) -> str:
-    """Generate a comprehensive detailed report."""
+    """Render the Markdown porting report from the serialized state.
+
+    Args:
+        state: The state dict from ``AgentState.to_dict()``, extended
+            with ``execution_duration``.
+
+    Returns:
+        The report text.
+    """
     tokens = (
         f"{state.get('api_tokens_in', 0)}/{state.get('api_tokens_out', 0)}"
     )
@@ -1330,6 +1613,11 @@ def generate_detailed_report(state: dict) -> str:
             if verdict == "verified"
             else "SUCCESS, NOT VERIFIED (no riscv64 output proven)"
         )
+    optimization_text = _machine_section(
+        state.get("machine_profile")
+    ) + _optimization_section(
+        state.get("optimization"), state.get("machine_profile")
+    )
     report = f"""# RISC-V Porting Report: {state.get("repo_name", "Unknown")}
 
 ## Executive Summary
@@ -1361,7 +1649,7 @@ def generate_detailed_report(state: dict) -> str:
 {_package_tests_section(state.get("package_tests") or {})}
 ---
 
-## Build System Analysis
+{optimization_text}## Build System Analysis
 
 """
 
@@ -1388,7 +1676,6 @@ def generate_detailed_report(state: dict) -> str:
     else:
         report += "*No build plan available*\n\n"
 
-    # Dependencies
     dependencies = state.get("dependencies")
     if dependencies:
         report += "### Dependencies\n\n"
@@ -1401,7 +1688,6 @@ def generate_detailed_report(state: dict) -> str:
         if system_packages:
             report += f"**System Packages**: {', '.join(system_packages)}\n\n"
 
-    # Architecture-specific code
     arch_code = state.get("arch_specific_code", [])
     if arch_code:
         report += "---\n\n## Architecture-Specific Code\n\n"
@@ -1410,7 +1696,7 @@ def generate_detailed_report(state: dict) -> str:
             f"architecture-specific code:\n\n"
         )
 
-        for i, code in enumerate(arch_code[:5], 1):  # Show first 5
+        for i, code in enumerate(arch_code[:5], 1):
             filepath = code.get("file", "Unknown")
             line_num = code.get("line", "N/A")
             snippet = code.get("code_snippet", "")
@@ -1421,7 +1707,6 @@ def generate_detailed_report(state: dict) -> str:
         if len(arch_code) > 5:
             report += f"*...and {len(arch_code) - 5} more instances*\n\n"
 
-    # Patches
     patches = state.get("patches_generated", [])
     if patches:
         report += "---\n\n## Patches Applied\n\n"
@@ -1438,7 +1723,8 @@ def generate_detailed_report(state: dict) -> str:
                     "*Truncated (full patch available in separate file)*\n\n"
                 )
 
-    # Error history (serialized ErrorRecords are dicts)
+    # Serialized ErrorRecords are dicts; the getattr branch covers
+    # state objects that were never serialized.
     error_history = state.get("error_history", [])
     if error_history:
         report += "---\n\n## Error Resolution History\n\n"
@@ -1454,7 +1740,6 @@ def generate_detailed_report(state: dict) -> str:
             report += f"### Error {i}: {category}\n\n"
             report += f"```\n{message[:300]}\n```\n\n"
 
-    # Recommendations
     report += "---\n\n## Recommendations\n\n"
 
     if status == "SUCCESS" and verdict == "verified":
@@ -1498,25 +1783,97 @@ def generate_detailed_report(state: dict) -> str:
     return report
 
 
+def _optimize_follows(state: Any) -> bool:
+    """Return True when the graph runs optimize_node after finish_node."""
+    from src.graph import route_finish_to_next
+
+    return route_finish_to_next(state) == "optimize_node"
+
+
+def _tune_columns(variant: Dict[str, Any]) -> str:
+    """Return ``Tune-2   machine ISA   -march=...`` for one tune."""
+    label = variant.get("label") or variant.get("vid") or "?"
+    technique = variant.get("technique") or ""
+    value = variant.get("value") or variant.get("title") or ""
+    if len(value) > 34:
+        value = value[:31] + "..."
+    return f"{label:<7} {technique:<28} {value:<34}"
+
+
+def _print_optimization(optimization: Optional[Dict[str, Any]]) -> None:
+    """Print the performance mode result (--optimize) on the console.
+
+    The first line answers the question the user asked with
+    --optimize: did Atesor make a faster build, and by how much.
+    """
+    if not optimization:
+        return
+    from src.optimize import headline, tune_result
+
+    status = optimization.get("status")
+    accepted = optimization.get("accepted")
+    color = "green" if status == "accepted" else "yellow"
+    if status == "checked":
+        color = "white"
+    answer = optimization.get("headline") or headline(optimization)
+    print(colored(f"   Optimized: {answer}", color, attrs=["bold"]))
+    if status != "accepted" and optimization.get("reason"):
+        print(colored(f"     Why: {optimization['reason']}", color))
+    if optimization.get("advice"):
+        print(colored(f"     Fix: {optimization['advice']}", color))
+    for record in optimization.get("variants") or []:
+        variant = record.get("variant") or {}
+        mark = (
+            "  <- accepted"
+            if accepted and variant.get("vid") == accepted
+            else ""
+        )
+        print(
+            colored(
+                f"     {_tune_columns(variant)} {tune_result(record)}{mark}",
+                "white",
+            )
+        )
+    if optimization.get("accepted_dir"):
+        print(
+            colored(
+                f"   Optimized files: {optimization['accepted_dir']} "
+                "(with --package also in the zip under optimized/)",
+                "green",
+            )
+        )
+
+
 def run_agent(
     repo_url: str,
     max_attempts: int = 5,
     verbose: bool = False,
     package: bool = False,
+    optimize: bool = False,
+    emulate_cpu: Optional[str] = None,
+    cached_recipe: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run the RISC-V porting agent on a repository.
 
     Args:
         repo_url: The GitHub/GitLab repository URL
         max_attempts: Maximum fix attempts before escalation
-        verbose: Enable verbose output
+        verbose: If False, print a "Working..." status line after each
+            step except ``supervisor_node``. ``configure_logging``
+            controls the DEBUG console output.
         package: If True, on a successful build, write a zip artifact to
             ``PACKAGES_DIR`` containing the recipe + source tree. Failure
             to package is treated as a fatal error (exit 2) when this is
             requested explicitly.
+        optimize: If True, run performance mode after a verified build.
+            It never changes the exit code of the port.
+        emulate_cpu: The QEMU_CPU model for performance mode under QEMU.
+        cached_recipe: A verified recipe-cache entry; the port builds
+            with it instead of planning again (performance mode).
 
     Returns:
-        Exit code (0 for success, 1 for build failure, 2 for packaging failure)
+        Exit code: 0 verified success, 1 failure, 2 packaging failure,
+        3 unverified success, 130 interrupted.
     """
     from langchain_core.messages import HumanMessage
 
@@ -1536,9 +1893,35 @@ def run_agent(
     print(colored(f"   Repository: {repo_url}", "white"))
     print(colored(f"   Max attempts: {max_attempts}", "white"))
     print(colored(f"   Platform:    {profile.display_name}", "white"))
+    if optimize:
+        model = f", QEMU_CPU={emulate_cpu}" if emulate_cpu else ""
+        print(
+            colored(
+                f"   Optimize:    yes, after a verified build{model}",
+                "white",
+            )
+        )
+    if cached_recipe:
+        verdict = cached_recipe.get("verification") or {}
+        commit = (verdict.get("source_commit") or "")[:12]
+        print(
+            colored(
+                f"   Recipe:      from the cache (verified run of "
+                f"{cached_recipe.get('last_built', '?')}"
+                + (f", commit {commit}" if commit else "")
+                + "); no new planning (--force plans again)",
+                "white",
+            )
+        )
     print(colored("-" * 60, "cyan"))
 
-    initial_state = create_initial_state(repo_url, max_attempts=max_attempts)
+    initial_state = create_initial_state(
+        repo_url,
+        max_attempts=max_attempts,
+        optimize=optimize,
+        emulate_cpu=emulate_cpu,
+        cached_recipe=cached_recipe,
+    )
     initial_state.messages = [
         HumanMessage(
             content=(
@@ -1549,11 +1932,13 @@ def run_agent(
         )
     ]
 
-    # Run the workflow
     try:
         final_state = initial_state
         step_count = 0
 
+        # The optimize step prints its header before it starts (see
+        # below), so its own update must not print a second one.
+        optimize_announced = False
         # LangGraph's default recursion_limit (25 super-steps) is too
         # tight for a full replan + multi-fix run and aborts with
         # GraphRecursionError; the real loop bound is max_attempts +
@@ -1562,18 +1947,19 @@ def run_agent(
             initial_state, config={"recursion_limit": 120}
         ):
             for node_name, state_update in output.items():
-                step_count += 1
-
-                # In LangGraph, state_update can be a dict of updates
+                # app.stream yields either a dict of field updates to
+                # merge into the accumulated state or a full AgentState.
                 if isinstance(state_update, dict):
-                    # Update final_state fields from dict
                     for k, v in state_update.items():
                         if hasattr(final_state, k):
                             setattr(final_state, k, v)
                 elif isinstance(state_update, AgentState):
                     final_state = state_update
 
-                # Print progress
+                if node_name == "optimize_node" and optimize_announced:
+                    continue
+                step_count += 1
+
                 status = getattr(
                     final_state.build_status,
                     "value",
@@ -1606,45 +1992,9 @@ def run_agent(
                     colored(f"   Status: {status}", status_color), flush=True
                 )
 
-                # Print messages if verbose
-                if (
-                    verbose
-                    and hasattr(state_update, "messages")
-                    and state_update.messages
-                ):
-                    for msg in state_update.messages:
-                        role = getattr(msg, "name", "Assistant")
-                        content = getattr(msg, "content", str(msg))
-
-                        logger.debug(f"[{role}] {content}")
-
-                        # Style the roles
-                        role_color = (
-                            "magenta" if role == "Supervisor" else "cyan"
-                        )
-                        if role == "Scout":
-                            role_color = "blue"
-                        if role == "Builder":
-                            role_color = "yellow"
-                        if role == "Fixer":
-                            role_color = "green"
-
-                        print(
-                            colored(
-                                f"   [{role}]", role_color, attrs=["bold"]
-                            ),
-                            end=" ",
-                        )
-
-                        # Handle long content
-                        display_content = content
-                        if not verbose:
-                            if len(display_content) > 500:
-                                display_content = display_content[:500] + "..."
-
-                        print(colored(display_content, "white"), flush=True)
-                elif not verbose and node_name != "Supervisor":
-                    # Minimal feedback for non-verbose mode
+                if not verbose and node_name != "supervisor_node":
+                    # End the status line with \r, not a newline, so the
+                    # next console output can overwrite it.
                     status = (
                         final_state.build_status.value
                         if hasattr(final_state, "build_status")
@@ -1656,7 +2006,27 @@ def run_agent(
                         flush=True,
                     )
 
-        # Save and print results
+                if node_name == "finish_node" and _optimize_follows(
+                    final_state
+                ):
+                    # The optimize step can take an hour and prints its
+                    # own lines, so its header goes first.
+                    step_count += 1
+                    optimize_announced = True
+                    logger.info(
+                        f"[Step {step_count}] optimize_node - Status: "
+                        "OPTIMIZING"
+                    )
+                    print(
+                        colored(
+                            f"\n[Step {step_count}] optimize_node",
+                            "cyan",
+                            attrs=["bold"],
+                        ),
+                        flush=True,
+                    )
+                    print(colored("   Status: OPTIMIZING", "cyan"), flush=True)
+
         logger.info("=" * 60)
 
         print(colored("\n" + "=" * 60, "cyan"))
@@ -1701,6 +2071,7 @@ def run_agent(
                         "white",
                     )
                 )
+            _print_optimization(final_state.optimization)
             logger.info(
                 f"Recipe generated at: "
                 f"{OUTPUT_DIR}/{final_state.repo_name}_recipe.md"
@@ -1741,6 +2112,12 @@ def run_agent(
                 platform_name = profile.name
                 if is_native():
                     platform_name += "-native"
+                optimization = final_state.optimization or {}
+                optimized_dir = None
+                if optimization.get("accepted"):
+                    optimized_dir = os.path.join(
+                        REPOS_DIR, f"{final_state.repo_name}.opt", "accepted"
+                    )
                 try:
                     if is_native():
                         # The build tree is on the machine. Copy its
@@ -1748,6 +2125,10 @@ def run_agent(
                         from src import mirror
 
                         mirror.pull(final_state.repo_name, force=True)
+                        if optimized_dir:
+                            mirror.pull(
+                                f"{final_state.repo_name}.opt", force=True
+                            )
                     zip_path = package_build(
                         repo_name=final_state.repo_name,
                         repo_path=repo_path,
@@ -1761,6 +2142,9 @@ def run_agent(
                         curated_artifacts=final_state.curated_artifacts,
                         container_repo_path=final_state.repo_path,
                         package_tests=final_state.package_tests,
+                        optimization=final_state.optimization,
+                        machine=final_state.machine_profile,
+                        optimized_dir=optimized_dir,
                     )
                 except Exception as exc:
                     logger.error("Packaging failed: %s", exc, exc_info=True)
@@ -1808,7 +2192,7 @@ def run_agent(
                 )
                 print(colored(f"   {final_state.last_error[:500]}", "white"))
 
-            # Print audit trail for transparency
+            # Show the last audit events to explain how the run ended.
             if final_state.audit_trail:
                 logger.info("Agent Decision Audit:")
                 print(
@@ -1854,15 +2238,18 @@ def run_agent(
         return 1
 
     finally:
-        # Ensure logs are flushed. Handlers live on the ROOT logger
-        # (configure_logging attaches them there); the module logger has
-        # none, so flushing `logger.handlers` was a silent no-op.
+        # Flush the root logger's handlers; configure_logging attaches
+        # them to the root, so this module's own logger has none.
         for handler in logging.getLogger().handlers:
             handler.flush()
 
 
 def cleanup_workspace(dry_run: bool = False) -> List[str]:
     """Clean up workspace directory to manage size.
+
+    The function prints the workspace sizes. Without ``dry_run``, it
+    reads a choice from stdin and empties each chosen directory: it
+    deletes the directory and creates it again.
 
     Args:
         dry_run: If True, only show what would be deleted without
@@ -1880,7 +2267,6 @@ def cleanup_workspace(dry_run: bool = False) -> List[str]:
         print(colored("Workspace directory does not exist", "yellow"))
         return []
 
-    # Calculate current size
     total_size = 0
     file_count = 0
 
@@ -1899,7 +2285,6 @@ def cleanup_workspace(dry_run: bool = False) -> List[str]:
     )
     print(colored(f"   Total Files: {file_count}", "white"))
 
-    # List subdirectories with sizes
     print(colored("\nDirectory Breakdown:", "cyan"))
     subdirs = {}
     for subdir in ["repos", "output", "logs", ".cache", "patches"]:
@@ -1916,7 +2301,6 @@ def cleanup_workspace(dry_run: bool = False) -> List[str]:
                 )
             )
 
-    # Offer cleanup options
     print(colored("\nCleanup Options:", "cyan"))
     print(colored("   1. Clean repos/ (cloned repositories)", "white"))
     print(colored("   2. Clean output/ (generated reports)", "white"))
@@ -1956,7 +2340,6 @@ def cleanup_workspace(dry_run: bool = False) -> List[str]:
         print(colored("Invalid option", "red"))
         return []
 
-    # Perform cleanup
     for dirname in dirs_to_clean:
         dir_path = workspace_path / dirname
         if dir_path.exists():
@@ -1967,7 +2350,6 @@ def cleanup_workspace(dry_run: bool = False) -> List[str]:
             except Exception as e:
                 print(colored(f"   Error cleaning {dirname}/: {e}", "red"))
 
-    # Recalculate size
     new_total_size = sum(
         f.stat().st_size for f in workspace_path.rglob("*") if f.is_file()
     )
@@ -1999,7 +2381,6 @@ def cleanup_container(remove_image: bool = False) -> None:
     try:
         client = docker.from_env()
 
-        # Remove container
         try:
             container = client.containers.get(container_name)
             if container.status == "running":
@@ -2017,7 +2398,6 @@ def cleanup_container(remove_image: bool = False) -> None:
         except docker.errors.NotFound:
             print(colored(f"Container '{container_name}' not found", "yellow"))
 
-        # Remove image if requested
         if remove_image:
             try:
                 print(colored(f"Removing image '{image_name}'...", "yellow"))
@@ -2037,6 +2417,10 @@ def cleanup_container(remove_image: bool = False) -> None:
 
 def rebuild_all_sandboxes() -> bool:
     """Rebuild Alpine and Debian sandbox images/containers.
+
+    The function sets ``REBUILD_IMAGE=true`` and leaves it set. It
+    restores ``ATESOR_PLATFORM`` and ``ATESOR_CONTAINER`` at the end,
+    but the active profile stays on the last platform it set.
 
     Returns:
         True if both sandbox environments are rebuilt successfully.
@@ -2131,13 +2515,22 @@ def _main() -> int:
             "  atesor-ai --repo https://github.com/madler/zlib --verbose\n"
             "  atesor-ai --repo https://github.com/sqlite/sqlite "
             "--platform debian --package\n"
+            "  atesor-ai --repo https://github.com/madler/zlib "
+            "--target native --optimize\n"
+            "  atesor-ai --probe --target native"
+            "             # what the machine supports\n"
             "\n"
             "environment:\n"
-            "  LLM_PROVIDER   gemini | openai | openrouter, plus the "
-            "matching *_API_KEY\n"
+            "  LLM_PROVIDER   gemini | openai | openrouter | anthropic, "
+            "plus the\n"
+            "                 matching *_API_KEY\n"
             "  GIT_TOKEN      token for cloning private GitHub repos\n"
             "  ATESOR_HOME    runtime state dir "
             "(default: ~/.local/share/atesor-ai)\n"
+            "  ATESOR_OPTIMIZE_BUDGET  seconds for --optimize "
+            "(default: 3600)\n"
+            "  ATESOR_QEMU_CPU         QEMU_CPU model (env form of "
+            "--emulate-cpu)\n"
             "  Full list in .env-example; a .env in the current dir or\n"
             "  ~/.config/atesor-ai/ is loaded automatically.\n"
         ),
@@ -2181,6 +2574,26 @@ def _main() -> int:
     )
     porting.add_argument(
         "-v", "--verbose", action="store_true", help="show agent activity"
+    )
+
+    performance = parser.add_argument_group("performance")
+    performance.add_argument(
+        "--optimize",
+        action="store_true",
+        help="after a verified port, build and measure faster variants; "
+        "a verified cached recipe replaces the planning (--force plans "
+        "again)",
+    )
+    performance.add_argument(
+        "--emulate-cpu",
+        metavar="MODEL",
+        default=None,
+        help="QEMU_CPU model for --optimize/--probe under QEMU",
+    )
+    performance.add_argument(
+        "--probe",
+        action="store_true",
+        help="show what the machine supports and exit",
     )
 
     sandbox = parser.add_argument_group("sandbox")
@@ -2266,6 +2679,37 @@ def _main() -> int:
         return 1
     native = is_native()
 
+    # The model matters only for --optimize and --probe under QEMU. On
+    # native, only an explicit --emulate-cpu reaches the run, which then
+    # warns that it ignores it.
+    cli_model = args.emulate_cpu
+    if not (args.optimize or args.probe):
+        args.emulate_cpu = None
+    elif native:
+        args.emulate_cpu = cli_model
+    else:
+        args.emulate_cpu = _emulate_cpu_value(cli_model)
+    if args.emulate_cpu and not _EMULATE_CPU_RE.match(args.emulate_cpu):
+        source = "--emulate-cpu" if cli_model else "ATESOR_QEMU_CPU"
+        print(
+            colored(
+                f"ERROR: {source} {args.emulate_cpu!r} is not a QEMU CPU "
+                "model, for example rva22u64 or "
+                "'rv64i,m=true,a=true,f=true,d=true,c=true,zba=true'.",
+                "red",
+            )
+        )
+        return 1
+    if args.probe and args.repo:
+        print(
+            colored(
+                "ERROR: --probe runs alone. Remove --repo, or remove "
+                "--probe to port the repository.",
+                "red",
+            )
+        )
+        return 1
+
     if args.preflight:
         if not native:
             print(
@@ -2349,7 +2793,6 @@ def _main() -> int:
         if not args.rebuild:
             return 0
 
-    # Handle workspace cleanup
     if args.clean_workspace:
         cleaned = cleanup_workspace()
         if native and "repos" in cleaned:
@@ -2366,7 +2809,7 @@ def _main() -> int:
     )
 
     # Require repo URL before starting long-running setup or API checks
-    if not args.repo and not infra_only:
+    if not args.repo and not infra_only and not args.probe:
         print(colored("ERROR: --repo argument is required", "red"))
         parser.print_help()
         return 1
@@ -2381,7 +2824,15 @@ def _main() -> int:
     # neither API keys nor a running sandbox — it only rewrites the
     # recipe file from the cache — so check it BEFORE key validation
     # and Docker provisioning instead of paying for both first.
-    if args.repo and not args.setup_only and not args.force:
+    # --optimize needs a real build tree, so it skips this fast path;
+    # a verified cached recipe becomes its build plan instead
+    # (_performance_kwargs).
+    if (
+        args.repo
+        and not args.setup_only
+        and not args.force
+        and not args.optimize
+    ):
         from src.memory import get_cached_recipe, materialize_cached_recipe
 
         # The URL check stops a cache entry of another repository with
@@ -2480,12 +2931,17 @@ def _main() -> int:
         if not report.passed:
             return 1
 
+    # The probe needs the sandbox but no API key.
+    if args.probe:
+        if args.rebuild:
+            os.environ["REBUILD_IMAGE"] = "true"
+        return _run_probe(args, native)
+
     # API keys are only required when we are actually running the agent.
     if args.repo and not args.setup_only:
         if not check_keys():
             return 1
 
-    # Set up Docker environment
     if args.rebuild:
         os.environ["REBUILD_IMAGE"] = "true"
 
@@ -2497,7 +2953,6 @@ def _main() -> int:
     if not setup_docker_environment():
         return 1
 
-    # Setup/Rebuild only mode (no repository run)
     if infra_only:
         message = "\nSetup complete!"
         if args.rebuild and not args.setup_only:
@@ -2505,12 +2960,12 @@ def _main() -> int:
         print(colored(message, "green"))
         return 0
 
-    # Run the agent
     exit_code = run_agent(
         repo_url=args.repo,
         max_attempts=args.max_attempts,
         verbose=args.verbose,
         package=args.package,
+        **_performance_kwargs(args),
     )
 
     return exit_code

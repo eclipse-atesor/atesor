@@ -34,7 +34,7 @@ _PACKAGES_DIR = os.path.normpath(
 
 
 def _resolve_list_path(value: str) -> str:
-    """Bare name resolves under ``.github/packages/<name>.json``."""
+    """Resolve a bare name under ``.github/packages/<name>.json``."""
     if os.sep in value or value.endswith(".json"):
         return value
     return os.path.join(_PACKAGES_DIR, f"{value}.json")
@@ -45,6 +45,9 @@ def _load_package_count(path: str) -> int:
 
     Accepts both the schema used by ``.github/packages/*.json``
     (``{"packages": [...]}``) and a bare list, for robustness.
+
+    Raises:
+        ValueError: If the JSON is neither an object nor a list.
     """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -60,7 +63,13 @@ def _load_package_count(path: str) -> int:
 
 
 def compute_plan(count: int, group_size: int) -> tuple[int, list[int]]:
-    """Return ``(total_shards, group_indices)`` for ``count`` packages."""
+    """Return ``(total_shards, group_indices)`` for ``count`` packages.
+
+    A ``count`` of 0 or less gives ``(0, [])``.
+
+    Raises:
+        ValueError: If ``group_size`` is less than 1.
+    """
     if group_size < 1:
         raise ValueError(f"group-size must be >= 1 (got {group_size})")
     if count <= 0:
@@ -70,7 +79,12 @@ def compute_plan(count: int, group_size: int) -> tuple[int, list[int]]:
 
 
 def main(argv: list[str]) -> int:
-    """Run the CLI entry point."""
+    """Run the CLI entry point.
+
+    Returns:
+        Process exit code: always 0. argparse exits with 2 on invalid
+        arguments; an unreadable list or a bad ``--group-size`` raises.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--list",

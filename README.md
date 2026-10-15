@@ -22,6 +22,7 @@ Atesor AI takes a source code url (i.e GitHub repo link), builds the package nat
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Native RISC-V machine](#native-risc-v-machine)
+- [Performance mode](#performance-mode---optimize)
 - [Configuration](#configuration)
 - [Outputs](#outputs)
 - [Key features](#key-features)
@@ -61,7 +62,7 @@ The supervisor → executor loop is built on [LangGraph](https://github.com/lang
   docker run --privileged --rm tonistiigi/binfmt --install all
   ```
 - Python 3.10+
-- An API key for one of: Gemini, OpenAI, or OpenRouter.
+- An API key for one of: Gemini, OpenAI, OpenRouter, or Anthropic.
 
 ### Install
 
@@ -219,6 +220,143 @@ Native results and QEMU results never mix:
 
 ---
 
+## Performance mode (`--optimize`)
+
+After a verified port, `--optimize` tries faster builds ("tunes") for
+the machine that runs Atesor. The verified build stays the result. A
+faster tune is an extra output.
+
+```bash
+python3 main.py --probe --target native     # what the machine supports
+python3 main.py --target native --repo https://github.com/madler/zlib --optimize --package
+```
+
+The console shows the work as its own step after `finish_node`, only
+with `--optimize`, and the summary at the end answers one question
+first: did Atesor make a faster build?
+
+```
+[Step 9] optimize_node
+   Status: OPTIMIZING
+   Machine  : native, rv64gc+zba+zbb, core sifive-p550, misaligned access emulated (timing test)
+   Package  : C/C++ library (cmake): build/libz.so.1.3.2.1, build/libz.a
+   Baseline : rebuilding the verified build in a copy
+   Workload : choosing one for a C/C++ library
+   Tune-1   : core tuning = -mtune=sifive-p400-series -mstrict-align
+              1.7% slower, inside the noise: time ratio 1.017 (95% CI 1.007-1.021)
+   ...
+   Result   : YES: Tune-6 (clang-19 -O3 + PGO) is 10.8% faster than the verified build
+...
+   Optimized: YES: Tune-6 (clang-19 -O3 + PGO) is 10.8% faster than the verified build
+     Tune-1  core tuning              -mtune=sifive-p400-series ...      1.7% slower (inside the noise)
+     Tune-6  profile-guided optimization PGO, trained on a second input  10.8% faster  <- accepted
+   Optimized files: /workspace/repos/zlib.opt/accepted (with --package also in the zip under optimized/)
+```
+
+When no tune is faster, or none can be timed, the first line says
+`Optimized: NO: ...`, followed by `Why:` (and `Fix:` when the machine
+gives wrong results).
+
+With a verified recipe of the package in the recipe cache, `--optimize`
+builds that recipe again instead of planning: `cached_recipe_node`
+turns the cached build plan (and its patches) into the plan, so the
+analyst and the scout make no LLM call. A failed build still goes to
+the fixer. `--force` plans again.
+
+The steps:
+
+1. **Machine check (native only).** Every CPU runs 10 zlib round trips
+   of 8 MiB at the same time. Unchanged code must give the data back;
+   when it does not (an unstable clock, bad memory), performance mode
+   stops before it builds anything, because no timing on that machine
+   can be trusted. The Megrez failed 3 of 40 such round trips at
+   1.8 GHz and passed 160 of 160 at 1.4 GHz.
+2. **Probe.** Atesor reads the machine before it builds anything: the ISA
+   extensions (test instructions, `riscv_hwprobe`, `/proc/cpuinfo`), the
+   core (device-tree name, or vendor and architecture ids), the
+   misaligned-access speed (`riscv_hwprobe`, else a load-timing test),
+   the CPUs, the governor, and the compilers with the flags they accept.
+   `--probe` prints this, and the settings that follow from it.
+3. **Package type.** The verified build's artifacts give the language
+   and the type: a library, programs, or both. Test, example and
+   benchmark programs do not count as the package's own programs.
+4. **Baseline.** Atesor rebuilds the verified build in a copy
+   (`<repo>.opt/base`), the same way as every tune, and checks that its
+   code equals the verified build's code. Each tune is compared with this
+   copy, so only the tune's own change counts.
+5. **Workload, by package type.** It must do fixed work in every run:
+   - Go: the module's own benchmarks, with a fixed iteration count.
+   - Programs: the optimizer agent (an LLM) proposes one command on
+     generated input; a strict grammar checks it.
+   - A library: the optimizer agent writes a harness against the
+     library's exported API (C/C++ for a C/C++ library, a Go benchmark, a
+     Cargo example for a Rust crate). It must build, call the library,
+     print the same `ATESOR-CHECK` line in two runs, and take 0.5-5 s per
+     run. A C/C++ harness links the tree's own library, and `ldd` must
+     show that copy. On an error the agent gets the error back (3 rounds
+     at most).
+   - Last, the package tests (a weak signal).
+   Benchmark suites that run for a fixed time (Google Benchmark,
+   criterion, most CTest/Meson benchmarks) are not used. Without a
+   workload, a native run builds no tune and says why.
+6. **Tunes.** C/C++: core tuning (`-mtune`), machine ISA (`-march` with
+   only the probed extensions), vector ISA (only with V), `-O3`, LTO,
+   then clang with the same kind of flags. Go: `GORISCV64`. Rust: the
+   target CPU (only when rustc's feature list for it fits the machine)
+   or the probed target features, then fat LTO. Then PGO on the best
+   tune. A tune that the build already has (every source at `-O3`, or
+   `-flto`) is skipped.
+7. **Rebuild.** Each tune builds in a copy of the patched tree
+   (`<repo>.opt/<id>`) with the commands of the verified build. Wrapper
+   scripts add the tune's flags, and nothing else, to each compiler call. The
+   harness builds in each tree too. Atesor finds each artifact right after
+   the build, also in a folder named after a hash of the flags (lz4), and
+   every later step uses that file.
+8. **Gates.** The artifacts must be riscv64 and built with the tune's
+   settings. The package tests must still pass. When the tests build an
+   artifact again, Atesor puts back the tune's build. The workload output
+   must equal the baseline output, and a run must not change its input
+   file.
+9. **Measurement (native only).** Baseline and tune runs alternate,
+   pinned to one CPU. A tune is faster only when the 95% interval of
+   its time ratio is below 0.98 (p < 0.05), and the gain holds again in a
+   second code layout. The second check gives the layout flag
+   (`-falign-functions=64`) to the baseline too, so only the tune's own
+   change counts. A tune with the same code as an earlier one gets that
+   result without a new measurement. Once a tune is faster, Atesor keeps
+   enough of the time budget for its second check. A gain that got no
+   second timing shows as "not confirmed", with the cause.
+
+| | Native | QEMU |
+|---|---|---|
+| Probe | The board | The `--emulate-cpu` model, else QEMU's `max` CPU |
+| ISA tunes | Yes | Only with `--emulate-cpu` |
+| Gates | Yes | Yes, on the emulated CPU |
+| Time measurement | Yes | No: emulation speed says nothing about hardware |
+| Accepted tune | Yes | Never |
+
+- On native hardware, one workload run must take at most 5 s, so one
+  measurement (about 56 runs) fits the budget. A measurement that the
+  remaining budget cannot finish does not start.
+- Atesor warns when other work uses CPUs at the start of a measurement,
+  and when other Atesor containers run on the machine.
+- `ATESOR_OPTIMIZE_BUDGET` sets the time limit in seconds (default 3600).
+  A batch run never optimizes.
+- The report has a "Performance Mode" section with one row per tune and
+  the harness source. With `--package`, the zip manifest has schema
+  version 3 (`machine` and `optimization`), and the accepted artifacts
+  are in `optimized/`.
+- The clang tune needs clang-19 in the native image. Rebuild the image
+  one time: `python3 main.py --target native --setup-only --rebuild`.
+- Set the cpufreq governor of the board to `performance` for stable
+  numbers. Atesor never changes a board setting; it warns instead.
+- `--emulate-cpu` takes a QEMU CPU model (QEMU 9.0 or later), for example
+  `rva22u64`, or the `QEMU model` line that `--probe --target native`
+  prints for your board. `ATESOR_QEMU_CPU` is the env form (QEMU runs
+  only). `max` counts as no model, and a model must start with a letter.
+
+---
+
 
 ## Architecture (high-level)
 
@@ -327,6 +465,8 @@ Every state has **per-node routing functions**. Each is unique to its source nod
   (`planner_node`, `scout_node`, `build_fix_subgraph`, `finish_node`,
   `escalate_node`). A `SUCCESS` build always routes to `finish_node`,
   even at the attempt/cost ceiling.
+- `route_finish_to_next`: checks `state.optimize_requested` →
+  `optimize_node` (performance mode) / `__end__`
 
 The build-fix cycle is a compiled **subgraph** (`create_build_fix_subgraph()`)
 with its own internal routing:
@@ -358,15 +498,18 @@ Edit `.env` (template in `.env-example`):
 
 | Variable | Required when | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | always | `gemini` (default), `openai`, `openrouter` |
+| `LLM_PROVIDER` | always | `gemini` (default), `openai`, `openrouter`, `anthropic` |
 | `GOOGLE_API_KEY` | provider = `gemini` | |
 | `OPENAI_API_KEY` | provider = `openai` | |
 | `OPENROUTER_API_KEY` | provider = `openrouter` | |
+| `ANTHROPIC_API_KEY` | provider = `anthropic` | Claude Haiku 5.5 for most roles, Claude Sonnet 5.5 for the fixer and the optimizer harness |
 | `LANGCHAIN_API_KEY` + `LANGCHAIN_TRACING_V2` | optional | LangSmith tracing |
 | `ATESOR_PLATFORM` | optional | `alpine` / `debian` (overridden by `--platform`) |
 | `ATESOR_TARGET` | optional | `qemu` (default) / `native` (overridden by `--target`). See [Native RISC-V machine](#native-risc-v-machine) for the SSH keys. |
 | `ATESOR_CONTAINER` | optional | Override container name (overridden by `--container`) |
 | `ATESOR_HOME` | optional | Base dir for runtime state (default `~/.local/share/atesor-ai`) |
+| `ATESOR_OPTIMIZE_BUDGET` | optional | Time limit of `--optimize` in seconds (default 3600) |
+| `ATESOR_QEMU_CPU` | optional | QEMU CPU model for `--optimize` and `--probe` under QEMU (overridden by `--emulate-cpu`) |
 
 NOTE: When using the pre-build binary (atesor-ai) the:
 `.env` is loaded from the current directory first, then
@@ -393,6 +536,8 @@ NOTE: When using the pre-build binary (atesor-ai) the state home is `$ATESOR_HOM
 | `$WS/output/{repo}_state_*.json` | Full `AgentState` snapshot |
 | `$WS/output/{repo}_patches_*/` | Patches applied during the run |
 | `$WS/packages/{owner}-{repo}-*-{platform}.zip` | Packaged artifact (with `--package`); `manifest.json` holds the verification verdict, the riscv64 outputs with SHA-256, the source commit and the package test result |
+| `$WS/repos/{repo}.opt/accepted/` | The accepted tune's riscv64 artifacts (with `--optimize`) |
+| `$WS/output/machine_profile_{target}.json` | The machine probe (with `--probe`) |
 | `$WS/logs/agent_{repo}.log` | Per-repo DEBUG log |
 | `$WS/logs/agent-call_{repo}.log` | Full LLM call audit trail (prompt + response + cost) |
 | `data/recipe_cache.json` | Successful builds, keyed by `{package: {sandbox: recipe}}` |
@@ -436,6 +581,7 @@ then keeps 420 s of that time for the report and the zip. A limit under
 - **Few-shot memory** - agents learn from past successes; up to 100 examples per agent, retrieved by keyword/regex.
 - **Recipe cache** - successful builds are replayable and skip the LLM entirely.
 - **ELF verification** - the ELF header of every build output (`EM_RISCV`, 64-bit class) is read in the sandbox; committed prebuilt binaries are reported but do not decide the verdict.
+- **Performance mode** - `--optimize` probes the machine, finds the package type, has the optimizer agent design a workload for it, builds tunes for the machine, and keeps a tune only when it is measurably faster on native hardware.
 - **Cost-aware** - every LLM call is logged with token estimate and cost; hard cap at $1.00 per package.
 - **Safe execution** - every shell command goes through a regex whitelist and runs inside the sandbox.
 

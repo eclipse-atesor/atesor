@@ -3,7 +3,7 @@
 
 Given a GitHub PR number OR an Actions workflow run ID, this script
 collects everything you need to investigate failures/timeouts in a
-batch-port run and writes it to ``./debug-<id>/`` at the repo root.
+batch-port run and writes it to ``debug-<id>/`` under ``--output-root``.
 
 What it collects (and where each piece comes from):
 
@@ -29,7 +29,7 @@ What it collects (and where each piece comes from):
 
   Those artifacts contain the ``agent_<pkg>.log`` / ``agent-call_<pkg>.log``
   / ``<pkg>.log`` files we want. We download both, extract, and copy
-  every log file matching a failing/timeout package into
+  every log file matching a failing/timeout/unverified package into
   ``debug-<id>/issues/<platform>/<pkg>/``.
 
 * **Reports** — a human-readable ``REPORT.md`` and a machine-readable
@@ -56,11 +56,9 @@ import zipfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
-# ---------------------------------------------------------------------------
 # Parsing patterns (see module docstring for source examples).
-# ---------------------------------------------------------------------------
 
 # Per-package status line printed by .github/scripts/batch_test.py.
 # Anchored on the bracketed "[idx/total]" counter so we never match the
@@ -74,8 +72,9 @@ PKG_LINE_RE = re.compile(
     r"(?P<log>output/batch_logs/\S+\.log)\s*$"
 )
 
-# Final summary line printed at the end of every shard's batch run::
-#     ║ TOTAL 47   PASS 42   FAIL 3   TIMEOUT 2  ║
+# Final summary line printed at the end of every shard's batch run:
+#     ║ TOTAL 47   PASS 40   UNVERIFIED 2   FAIL 3   TIMEOUT 2   SKIPPED 0 ║
+# UNVERIFIED and SKIPPED are optional, so logs without them still parse.
 BATCH_TOTALS_RE = re.compile(
     r"TOTAL\s+(?P<total>\d+)\s+"
     r"PASS\s+(?P<pass_>\d+)\s+"
@@ -123,9 +122,7 @@ def _normalize_status(status: str) -> str:
     return status
 
 
-# ---------------------------------------------------------------------------
 # Dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -150,29 +147,28 @@ class ShardSummary:
     shard: int
     shard_total: int
     status: str  # queued/in_progress/completed
-    conclusion: str | None  # success/failure/cancelled/...
-    started_at: str | None
-    completed_at: str | None
-    html_url: str | None
-    batch_totals: dict | None = None
+    conclusion: Optional[str]  # success/failure/cancelled/...
+    started_at: Optional[str]
+    completed_at: Optional[str]
+    html_url: Optional[str]
+    batch_totals: Optional[dict] = None
     packages: list[PackageResult] = field(default_factory=list)
     ci_errors: list[str] = field(default_factory=list)
     ci_flags: list[str] = field(default_factory=list)
     log_file: str = ""  # relative path to saved CI log
 
 
-# ---------------------------------------------------------------------------
 # gh helpers
-# ---------------------------------------------------------------------------
 
 
 def _run(
-    cmd: list[str], *, stdin: bytes | None = None, capture: bool = True
+    cmd: list[str], *, stdin: Optional[bytes] = None, capture: bool = True
 ) -> bytes:
     """Run a subprocess command and return its stdout bytes.
 
-    Raises CalledProcessError on non-zero exit. Stdout is captured;
-    stderr is left attached to the parent process so failures are visible.
+    Raises CalledProcessError on non-zero exit. Stdout is captured when
+    ``capture`` is True (the default); else the return is None. Stderr
+    is left attached to the parent process so failures are visible.
     """
     return subprocess.run(
         cmd,
@@ -194,7 +190,7 @@ def gh_text(args: list[str]) -> str:
     return out.decode("utf-8", errors="replace")
 
 
-def gh_repo_from_env(explicit: str | None) -> str:
+def gh_repo_from_env(explicit: Optional[str]) -> str:
     """Resolve OWNER/REPO. Use explicit if given, else `gh repo view`."""
     if explicit:
         return explicit
@@ -202,8 +198,16 @@ def gh_repo_from_env(explicit: str | None) -> str:
     return data["nameWithOwner"]
 
 
-def resolve_pr_to_run_id(repo: str, pr: int, workflow_name: str | None) -> int:
-    """Find the most recent workflow run associated with a PR's head SHA."""
+def resolve_pr_to_run_id(
+    repo: str, pr: int, workflow_name: Optional[str]
+) -> int:
+    """Find the most recent workflow run associated with a PR's head SHA.
+
+    When no run matches the head SHA, the PR head branch is searched.
+
+    Raises:
+        SystemExit: If no workflow run matches the PR.
+    """
     pr_info = gh_json(
         [
             "pr",
@@ -252,7 +256,7 @@ def resolve_pr_to_run_id(repo: str, pr: int, workflow_name: str | None) -> int:
             f"error: no workflow runs found for PR #{pr} "
             f"(head_sha={head_sha[:7]}, head_ref={head_ref})."
         )
-    # Most recent first
+    # Newest first: the bundle investigates the latest run for the PR.
     candidates.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return int(candidates[0]["id"])
 
@@ -286,7 +290,7 @@ def fetch_jobs(repo: str, run_id: int) -> list[dict]:
 
 
 def fetch_job_logs(repo: str, job_id: int) -> str:
-    """Return the raw CI log text for a single job."""
+    """Return the raw CI log text for a single job, or "" on failure."""
     try:
         out = gh_text(["api", f"repos/{repo}/actions/jobs/{job_id}/logs"])
     except subprocess.CalledProcessError as exc:
@@ -311,7 +315,11 @@ def fetch_artifacts(repo: str, run_id: int) -> list[dict]:
 
 
 def download_artifact_zip(repo: str, artifact_id: int, dest_zip: Path) -> None:
-    """Download an artifact zip via gh api into dest_zip."""
+    """Download an artifact zip via gh api into dest_zip.
+
+    Raises:
+        subprocess.CalledProcessError: If ``gh api`` fails.
+    """
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     with open(dest_zip, "wb") as fh:
         subprocess.run(
@@ -327,21 +335,21 @@ def download_artifact_zip(repo: str, artifact_id: int, dest_zip: Path) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Log parsing
-# ---------------------------------------------------------------------------
 
 
 def parse_shard_log(
     log_text: str,
-) -> tuple[list[PackageResult], dict | None, list[str], list[str]]:
+) -> tuple[list[PackageResult], Optional[dict], list[str], list[str]]:
     """Parse a single shard's CI log.
 
     Returns (packages, batch_totals, ci_errors, ci_flag_labels).
+    ``batch_totals`` is None when the log has no summary line. Only the
+    first status line of each package counts.
     """
     pkgs: list[PackageResult] = []
     seen_pkgs: set[str] = set()
-    totals: dict | None = None
+    totals: Optional[dict] = None
     errors: list[str] = []
     flags: set[str] = set()
 
@@ -395,9 +403,7 @@ def parse_shard_log(
     return pkgs, totals, errors, sorted(flags)
 
 
-# ---------------------------------------------------------------------------
 # Artifact handling
-# ---------------------------------------------------------------------------
 
 
 def extract_zip(zip_path: Path, dest_dir: Path) -> None:
@@ -441,12 +447,15 @@ def collect_package_logs(
     return candidates
 
 
-# ---------------------------------------------------------------------------
 # Report
-# ---------------------------------------------------------------------------
 
 
-def _fmt_dur(start: str | None, end: str | None) -> str:
+def _fmt_dur(start: Optional[str], end: Optional[str]) -> str:
+    """Format the span between two ISO timestamps as ``1h 02m 03s``.
+
+    Returns ``"?"`` when either timestamp is missing, unparseable, or
+    out of order — a partial job record must not break the report.
+    """
     if not (start and end):
         return "?"
     from datetime import datetime
@@ -471,7 +480,7 @@ def build_report(
     shards: list[ShardSummary],
     debug_root: Path,
 ) -> None:
-    """Write REPORT.md and failures.json into the bundle directory."""
+    """Write REPORT.md into the bundle directory."""
     by_platform: dict[str, list[ShardSummary]] = defaultdict(list)
     for s in shards:
         by_platform[s.platform].append(s)
@@ -532,9 +541,7 @@ def build_report(
         t = sorted({p for p, _ in timeout_pkgs[plat]})
         u = sorted({p for p, _ in unverified_pkgs[plat]})
         md.append(f"### {plat}")
-        md.append(
-            f"- Unverified ({len(u)}): {', '.join(u) if u else '—'}"
-        )
+        md.append(f"- Unverified ({len(u)}): {', '.join(u) if u else '—'}")
         md.append(f"- Failing ({len(f)}): {', '.join(f) if f else '—'}")
         md.append(f"- Timeout ({len(t)}): {', '.join(t) if t else '—'}")
         md.append("")
@@ -619,13 +626,19 @@ def build_report(
     (debug_root / "REPORT.md").write_text("\n".join(md), encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# Entry point
 
 
 def main() -> int:
-    """Run the CLI entry point."""
+    """Collect the bundle, write the reports, and print a summary.
+
+    An existing ``debug-<id>/`` directory at the destination is deleted
+    and rebuilt, so re-running always yields a complete bundle.
+
+    Returns:
+        Process exit code: 0 on success. A PR with no matching workflow
+        run exits non-zero via ``sys.exit`` in ``resolve_pr_to_run_id``.
+    """
     ap = argparse.ArgumentParser(
         description="Bundle CI debug data for an atesor batch-port run."
     )
@@ -781,7 +794,7 @@ def main() -> int:
             for src in log_files:
                 dst = dest_dir / src.name
                 # Disambiguate same-name files coming from different shards
-                # by suffixing with their parent dir name.
+                # by prefixing them with their parent dir name.
                 if dst.exists():
                     dst = dest_dir / f"{src.parent.name}-{src.name}"
                 try:

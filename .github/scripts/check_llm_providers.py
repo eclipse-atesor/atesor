@@ -52,16 +52,15 @@ try:  # Optional: mirrors how the rest of the project loads local config.
 except ImportError:  # pragma: no cover - dotenv is in requirements.txt
     pass
 
+# Seconds to wait for each provider HTTP request.
 TIMEOUT = int(os.getenv("ATESOR_HEALTHCHECK_TIMEOUT", "30"))
 
+# A one-word answer keeps every probe at the minimum possible token cost.
 PROBE = "Reply with the single word: ok"
 
 _MODELS_PY = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "models.py"
 )
-
-
-_ANTHROPIC_PROBE_MODEL = "claude-haiku-4-5-20251001"
 
 
 class ConfigError(RuntimeError):
@@ -75,7 +74,8 @@ def _parse_models_py(path: str = _MODELS_PY) -> Dict[str, Any]:
     into a local table. A stale copy would defeat the purpose of the
     script: it would probe a model the agent does not use and report PASS
     while the configured model is dead. Any hardcoded default is a
-    liability, so extraction failure raises instead of substituting one.
+    liability, so a missing MODEL_CONFIG raises instead of substituting
+    one.
 
     AST parsing (rather than importing) keeps the script runnable with
     only ``requests`` — no langchain — and avoids executing project code
@@ -83,6 +83,8 @@ def _parse_models_py(path: str = _MODELS_PY) -> Dict[str, Any]:
 
     Returns:
         ``{"config": MODEL_CONFIG, "free_router": str, "fallbacks": [...]}``
+        ``free_router`` is None and ``fallbacks`` is empty when the source
+        has no such value.
 
     Raises:
         ConfigError: if src/models.py is unreadable or its shape changed.
@@ -167,7 +169,7 @@ def _configured_models(provider: str) -> List[str]:
 
 
 def _primary_model(provider: str) -> str:
-    """The model the supervisor role would use for ``provider``."""
+    """Return the model that the supervisor role uses for ``provider``."""
     return _MODEL_CONFIG[provider]["supervisor"]["model"]
 
 
@@ -219,13 +221,17 @@ def _classify_http(resp: requests.Response) -> str:
     return f"HTTP {resp.status_code}: {body[:200]}"
 
 
-# --------------------------------------------------------------------------
 # Per-provider probes
-# --------------------------------------------------------------------------
 
 
 def check_openrouter() -> Result:
-    """Probe OpenRouter: quota headroom, catalog drift, live completion."""
+    """Probe OpenRouter: quota headroom, catalog drift, live completion.
+
+    Returns:
+        The probe result. ``ok`` is True when the primary model or the
+        free router answers. ``degraded`` is True when the primary model
+        fails or a configured model is retired.
+    """
     p, env = "openrouter", "OPENROUTER_API_KEY"
     key = os.getenv(env)
     if not key or key == "your_key_here":
@@ -273,8 +279,9 @@ def check_openrouter() -> Result:
         pass
 
     # THE GATE: openrouter/free is the terminal fallback Atesor attaches to
-    # every request (src/models.py:375 puts it last in the server-side
-    # `models` array, and _openrouter_fallback_ids always appends it). It
+    # every request (_create_llm_with_model in src/models.py puts it last
+    # in the server-side `models` array, and _openrouter_fallback_ids
+    # always appends it). It
     # routes to whatever free model is currently available, so as long as
     # it answers, OpenRouter is usable even when every named slug is dead.
     # Conversely nothing can rescue it: the free-models-per-day cap is
@@ -339,7 +346,11 @@ def check_openrouter() -> Result:
 
 
 def check_openai() -> Result:
-    """Probe OpenAI with a minimal completion on the configured model."""
+    """Probe OpenAI with a minimal completion on the configured model.
+
+    Returns:
+        The probe result. ``ok`` is True when the completion succeeds.
+    """
     p, env = "openai", "OPENAI_API_KEY"
     key = os.getenv(env)
     if not key or key == "your_key_here":
@@ -362,7 +373,11 @@ def check_openai() -> Result:
 
 
 def check_gemini() -> Result:
-    """Probe Gemini with a minimal generateContent on the configured model."""
+    """Probe Gemini with a minimal generateContent on the configured model.
+
+    Returns:
+        The probe result. ``ok`` is True when the request succeeds.
+    """
     p, env = "gemini", "GOOGLE_API_KEY"
     key = os.getenv(env)
     if not key or key == "your_key_here":
@@ -386,10 +401,11 @@ def check_gemini() -> Result:
 
 
 def check_anthropic() -> Result:
-    """Probe Anthropic. Validation only — Atesor has no Anthropic provider."""
-    # NOTE: Atesor has no Anthropic provider — ModelProvider in
-    # src/models.py is openai|gemini|openrouter. This probe exists so the
-    # key can be validated ahead of wiring one up; it is never required.
+    """Probe Anthropic with a minimal message on the configured model.
+
+    Returns:
+        The probe result. ``ok`` is True when the message succeeds.
+    """
     p, env = "anthropic", "ANTHROPIC_API_KEY"
     key = os.getenv(env)
     if not key or key == "your_key_here":
@@ -402,7 +418,7 @@ def check_anthropic() -> Result:
                 "anthropic-version": "2023-06-01",
             },
             payload={
-                "model": _ANTHROPIC_PROBE_MODEL,
+                "model": _primary_model("anthropic"),
                 "max_tokens": 8,
                 "messages": [{"role": "user", "content": PROBE}],
             },
@@ -422,11 +438,17 @@ CHECKS: Dict[str, Callable[[], Result]] = {
 }
 
 # Providers Atesor can actually be driven by (see ModelProvider).
-WIRED = {"openrouter", "gemini", "openai"}
+WIRED = {"openrouter", "gemini", "openai", "anthropic"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """Run the selected probes and report; return the process exit code."""
+    """Run the selected probes and report.
+
+    Returns:
+        Process exit code: 0 when every required provider is operational,
+        1 when at least one required provider is not. argparse exits with
+        2 on a bad invocation.
+    """
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "-p",

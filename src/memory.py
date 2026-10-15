@@ -23,6 +23,15 @@ Features:
        packages.
     5. Deduplication and pruning (max 100 per agent, oldest
        auto-learned first).
+
+Concurrency:
+    Writes to ``data/examples/*.json`` and ``data/recipe_cache.json``
+    are read-modify-write cycles serialized on sibling ``*.lock``
+    files (filelock) and committed with an atomic rename, so
+    concurrent processes cannot lose updates and lock-free readers
+    never see a torn file. The import-time seed copy
+    (``_seed_bundled_data``) is the one exception: it takes no lock
+    and does not write atomically.
 """
 
 import hashlib
@@ -54,11 +63,16 @@ MAX_EXAMPLES_PER_AGENT = 100
 
 
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    """Atomically write JSON to ``path`` using a same-directory temp file."""
+    """Atomically write JSON to ``path`` using a same-directory temp file.
+
+    Readers never take the filelock, so tear-safety comes from this
+    function: fsync the temp file, ``os.replace`` it over ``path``
+    (atomic only on the same filesystem — hence same-directory), then
+    fsync the directory. The temp name carries the pid and thread id
+    so concurrent writers in one process cannot share a temp file.
+    """
     os.makedirs(path.parent, exist_ok=True)
-    temp_name = (
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temp_name = f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     temp_path = path.parent / temp_name
     try:
         with open(temp_path, "w", encoding="utf-8") as file_obj:
@@ -87,10 +101,12 @@ def _lock_path_for(path: Path) -> str:
     """Return the lock-file path that guards ``path``.
 
     The lock sits next to the file it guards, as an absolute path, so
-    every writer uses the same lock whatever its working directory. It
-    is never deleted: removing a lock file lets a waiting process and a
-    new one lock two different inodes at once. ``.gitignore`` keeps
-    these files out of git.
+    every writer uses the same lock whatever its working directory. This
+    module never deletes it: removing a lock file lets a waiting process
+    and a new one lock two different inodes at once. filelock 3.24
+    itself unlinks the file on release, but it then discards a lock
+    taken on an unlinked inode, so the race stays closed. ``.gitignore``
+    keeps these files out of git.
     """
     return f"{path.resolve()}.lock"
 
@@ -101,7 +117,7 @@ def _seed_bundled_data() -> None:
     Copies packaged example files and the recipe cache into the
     writable data directory when absent, so a read-only install (for
     example under ``/opt``) still has a working, user-writable few-shot
-    store and cache.
+    store and cache. With no bundled cache, it writes an empty cache.
     """
     os.makedirs(EXAMPLES_DIR, exist_ok=True)
     bundled_examples = _BUNDLED_DATA_DIR / "examples"
@@ -153,11 +169,22 @@ class AgentExample:
     expected_output: Optional[Dict[str, Any]] = None
     solution: Optional[Dict[str, Any]] = None
     execution: Optional[Dict[str, Any]] = None
+
+    # All formats
     reasoning: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_prompt_text(self, example_type: str) -> str:
-        """Convert example to compact text for prompt inclusion."""
+        """Convert example to compact text for prompt inclusion.
+
+        Args:
+            example_type: The agent role: ``scout``, ``fixer`` or
+                ``builder``.
+
+        Returns:
+            The prompt text, or an empty string for any other role
+            (for example ``supervisor``).
+        """
         if example_type == "scout":
             return self._to_scout_prompt()
         elif example_type == "fixer":
@@ -353,7 +380,23 @@ class AgentMemory:
         context: Dict[str, Any],
         max_examples: int = 3,
     ) -> List[AgentExample]:
-        """Get top-K relevant examples based on context matching."""
+        """Return the top-scoring examples relevant to ``context``.
+
+        Examples recorded for a different sandbox are hard-filtered
+        before scoring (see the inline notes), so an Alpine apk recipe
+        never surfaces in a Debian run.
+
+        Args:
+            context: Matching signals — ``build_system``,
+                ``error_message``, ``has_main``, ``module_dir``,
+                ``has_cgo`` and ``sandbox``.
+            max_examples: Maximum number of examples to return.
+
+        Returns:
+            The matching examples, best score first; empty when
+            nothing scores above zero or no example matches the
+            active sandbox.
+        """
         if not self.examples:
             return []
 
@@ -383,7 +426,7 @@ class AgentMemory:
             # examples (forces the LLM to follow Platform knowledge) than
             # to bias it with wrong-distro commands. The first build on a
             # new distro will be example-free; subsequent successful
-            # builds will populate the cache.
+            # builds will populate the few-shot store.
             logger.info(
                 f"No {self.agent_type} examples for sandbox '{ctx_sandbox}'; "
                 "returning empty (will rely on Platform knowledge in prompt)."
@@ -421,14 +464,12 @@ class AgentMemory:
             except re.error:
                 pass
 
-        # Tag-in-error matching
         if context.get("error_message"):
             error_lower = context["error_message"].lower()
             for tag in ex_tags:
                 if tag in error_lower:
                     score += 0.15
 
-        # has_main match
         if context.get("has_main") is not None:
             ex_has_main = ex_trigger.get(
                 "has_main", example.context.get("has_main")
@@ -436,7 +477,6 @@ class AgentMemory:
             if context["has_main"] == ex_has_main:
                 score += 0.1
 
-        # module_dir match
         ctx_md = context.get("module_dir", "")
         ex_md = ex_trigger.get(
             "module_dir", example.context.get("module_dir", "")
@@ -446,14 +486,14 @@ class AgentMemory:
         elif ctx_md and ex_md:
             score += 0.05
 
-        # CGO tag
         if context.get("has_cgo") and "cgo" in ex_tags:
             score += 0.2
 
         # Sandbox / distro match (apk commands won't run on Debian and
-        # vice-versa). Same-sandbox is a strong positive; cross-sandbox
-        # is a hard penalty so a generic build-system match alone doesn't
-        # surface the wrong-distro recipe.
+        # vice-versa). Same-sandbox adds 0.25; cross-sandbox subtracts
+        # 0.35. The penalty alone does not cancel a build-system match
+        # (+0.5), so get_relevant_examples drops wrong-sandbox examples
+        # before scoring.
         ctx_sandbox = context.get("sandbox")
         if not ctx_sandbox:
             try:
@@ -478,7 +518,12 @@ class AgentMemory:
     def format_examples_for_prompt(
         self, examples: List[AgentExample], max_chars: int = 3000
     ) -> str:
-        """Format examples for inclusion in prompt."""
+        """Render examples as one prompt section, capped at ``max_chars``.
+
+        The first example that would cross the cap ends the section,
+        so earlier (higher-ranked) examples win. The cap counts the
+        example text only, not the header line or the separators.
+        """
         if not examples:
             return ""
 
@@ -495,13 +540,22 @@ class AgentMemory:
         return "\n".join(sections)
 
     def save_learned_example(self, example_data: Dict[str, Any]) -> bool:
-        """Save an auto-learned example to the JSON file.
+        """Save an auto-learned example to the agent's JSON file.
+
+        The read-modify-write runs under the file's sibling ``.lock``
+        (filelock, 5 s timeout) and commits atomically; the in-memory
+        list then reloads from disk, so this process also sees entries
+        other processes added.
 
         Args:
-            example_data: The example payload to persist.
+            example_data: The example payload to persist. This method
+                changes it in place: it fills a missing ``sandbox``, and
+                it sets ``id``, ``source`` and ``timestamp`` on a saved
+                example.
 
         Returns:
-            True if saved, False if a duplicate or invalid.
+            True if saved. False if it is a duplicate or invalid, or if
+            the write fails (a lock timeout included).
         """
         if not example_data.get("name") or not example_data.get(
             "build_system"
@@ -547,9 +601,7 @@ class AgentMemory:
                             continue
                 example_data["id"] = f"{prefix}{max_num + 1:03d}"
                 example_data["source"] = "auto"
-                example_data["timestamp"] = datetime.now().strftime(
-                    "%Y-%m-%d"
-                )
+                example_data["timestamp"] = datetime.now().strftime("%Y-%m-%d")
                 examples_list.append(example_data)
 
                 examples_list = self._prune_examples_list(examples_list)
@@ -574,8 +626,9 @@ class AgentMemory:
         """Check if an example duplicates an existing one (sandbox-aware)."""
         new_bs = new_data.get("build_system", "")
         new_repo = new_data.get("repo_name", "")
-        # Auto-stamp sandbox here too so callers that haven't set it
-        # still get accurate dedup.
+        # Default the sandbox here too (without writing it back to
+        # new_data) so callers that haven't set it still get accurate
+        # dedup.
         new_sandbox = new_data.get("sandbox", "")
         if not new_sandbox:
             try:
@@ -644,7 +697,13 @@ class AgentMemory:
         return hashlib.md5(normalized.encode()).hexdigest()
 
     def _prune_examples_list(self, examples: List[Dict]) -> List[Dict]:
-        """Prune to MAX_EXAMPLES_PER_AGENT, oldest auto-learned first."""
+        """Prune to MAX_EXAMPLES_PER_AGENT, oldest auto-learned first.
+
+        Manual examples (no ``source`` counts as manual) are never
+        dropped, so they can keep the list above the cap. An example
+        whose ``source`` is neither ``manual`` nor ``auto`` is dropped
+        whenever the list is over the cap.
+        """
         if len(examples) <= MAX_EXAMPLES_PER_AGENT:
             return examples
 
@@ -674,9 +733,7 @@ class AgentMemory:
         _atomic_write_json(self._filepath, data)
 
 
-# ============================================================================
-# RECIPE CACHE
-# ============================================================================
+# Recipe cache
 
 
 def _migrate_legacy_cache(cache: Dict[str, Any]) -> Dict[str, Any]:
@@ -712,7 +769,12 @@ def _migrate_legacy_cache(cache: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_recipe_cache() -> Dict[str, Any]:
-    """Load the recipe cache from disk (auto-migrating legacy flat entries)."""
+    """Load the recipe cache, migrating legacy flat entries on the fly.
+
+    Takes no lock: cache writes are atomic renames, so a reader sees
+    the old file or the new one, never a partial write. A corrupt or
+    unreadable file logs an error and yields an empty cache.
+    """
     if not RECIPE_CACHE_PATH.exists():
         return {"version": "2.0", "packages": {}}
     try:
@@ -754,10 +816,20 @@ def get_cached_recipe(
     """Look up a cached recipe for a package within a sandbox.
 
     A sandbox is a distro+arch combination. Falls back to the active
-    platform's sandbox when `sandbox` is None. Returns None if no recipe
-    exists for that combination — even if one exists for a different
-    sandbox (apk vs apt commands are not interchangeable). When
-    ``repo_url`` is provided, it must match the stored source URL.
+    platform's sandbox when ``sandbox`` is None. Returns None if no
+    recipe exists for that combination — even if one exists for a
+    different sandbox (apk vs apt commands are not interchangeable).
+    When ``repo_url`` is provided, it must match the stored source URL.
+
+    Args:
+        repo_name: The repository name key.
+        architecture: The architecture the recipe must record.
+        sandbox: Sandbox key; defaults to the active platform.
+        repo_url: The requested source URL. A recipe with no stored
+            URL matches any value.
+
+    Returns:
+        The recipe entry, or None when no recipe matches.
     """
     if sandbox is None:
         sandbox = _default_sandbox()
@@ -805,11 +877,17 @@ def save_to_recipe_cache(
     ``debian-riscv64``) coexist under the same ``repo_name`` so an
     Alpine zlib build does not overwrite a Debian zlib build.
 
+    The read-modify-write holds the cache's sibling ``.lock``
+    (filelock, 5 s timeout) and commits atomically. Stored payloads
+    are capped (10 patches, 20 artifacts) to keep the shared JSON
+    small.
+
     Args:
         repo_name: The repository name key.
         repo_url: The source repository URL.
         build_system: The detected build system.
-        build_plan: The successful build plan to persist.
+        build_plan: The successful build plan to persist. Only the name
+            and commands of each phase are stored.
         dependencies: Resolved dependency names.
         patches: Patch identifiers applied during the build.
         artifacts: Build artifacts produced.
@@ -898,6 +976,99 @@ def save_to_recipe_cache(
         return True
     except Exception as e:
         logger.error(f"Failed to save recipe cache for {repo_name}: {e}")
+        return False
+
+
+def record_optimization(
+    repo_name: str,
+    optimization: Optional[Dict[str, Any]],
+    machine: Optional[Dict[str, Any]] = None,
+    sandbox: Optional[str] = None,
+) -> bool:
+    """Store a measured performance mode result in the recipe cache.
+
+    Only native results with a workload and the status ``accepted`` or
+    ``no gain`` are kept: a QEMU run makes no speed claim. The result
+    goes in the verified build's entry, under
+    ``optimizations`` and keyed by the machine's core (or ISA label),
+    so results from different boards stay apart. When no recipe entry
+    with a build plan exists for ``repo_name``/``sandbox`` yet, the
+    call returns False without creating one — an optimization never
+    introduces a cache entry on its own. Uses the same filelock +
+    atomic write as ``save_to_recipe_cache``.
+
+    Args:
+        repo_name: The repository name key.
+        optimization: The record from ``src.optimize.run_optimization``.
+        machine: The machine profile (``MachineProfile.to_dict``).
+        sandbox: Sandbox key; defaults to the active platform.
+
+    Returns:
+        True if the cache was written, else False.
+    """
+    result = optimization or {}
+    if (
+        result.get("kind") != "native"
+        or result.get("status") not in ("accepted", "no gain")
+        or not result.get("workload")
+    ):
+        return False
+    if sandbox is None:
+        sandbox = _default_sandbox()
+    machine = machine or {}
+    key = machine.get("core_name") or machine.get("label") or "unknown"
+    accepted = None
+    for item in result.get("variants") or []:
+        variant = item.get("variant") or {}
+        if result.get("accepted") and variant.get("vid") == result["accepted"]:
+            accepted = variant
+            break
+    record = {
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "machine": machine.get("label"),
+        "status": result.get("status"),
+        "accepted": result.get("accepted"),
+        "ratio": result.get("accepted_ratio"),
+        "workload": (result.get("workload") or {}).get("description"),
+    }
+    if accepted:
+        # PGO paths point into a removed tree; only the settings that
+        # can be repeated are kept.
+        record["variant"] = {
+            "label": accepted.get("label"),
+            "technique": accepted.get("technique"),
+            "title": accepted.get("title"),
+            "compiler": accepted.get("compiler"),
+            "flags": [
+                flag
+                for flag in accepted.get("flags") or []
+                if not flag.startswith("-fprofile")
+            ],
+            "env": {
+                name: value
+                for name, value in (accepted.get("env") or {}).items()
+                if name not in ("GOFLAGS", "CCACHE_DISABLE")
+            },
+            "pgo": bool(accepted.get("pgo")),
+        }
+    lock_path = _lock_path_for(RECIPE_CACHE_PATH)
+    try:
+        lock = filelock.FileLock(lock_path, timeout=5)
+        with lock:
+            cache = load_recipe_cache()
+            entry = (cache.get("packages", {}).get(repo_name) or {}).get(
+                sandbox
+            )
+            if not isinstance(entry, dict) or "build_plan" not in entry:
+                return False
+            entry.setdefault("optimizations", {})[key] = record
+            _atomic_write_json(RECIPE_CACHE_PATH, cache)
+        logger.info(
+            f"Recipe cache: optimization of {repo_name} on {key} recorded"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to record the optimization of {repo_name}: {e}")
         return False
 
 
@@ -1008,10 +1179,11 @@ def materialize_cached_recipe(
         return None
 
 
-# ============================================================================
-# SINGLETON + CONVENIENCE FUNCTIONS
-# ============================================================================
+# Singleton accessors
 
+# Process-wide cache of per-agent memories. Batch parallelism runs in
+# separate processes, so this dict needs no lock; only the on-disk
+# files are shared between processes, and those are filelock-guarded.
 MEMORY_INSTANCES: Dict[str, AgentMemory] = {}
 
 
@@ -1039,7 +1211,9 @@ def format_few_shot_examples(
     """Build formatted few-shot examples for prompt inclusion.
 
     Args:
-        agent_type: 'scout', 'fixer', 'builder', or 'supervisor'.
+        agent_type: 'scout', 'fixer', or 'builder'. Another role, such
+            as 'supervisor', has no prompt format and renders no
+            example text.
         context: Current context for relevance matching.
         max_examples: Maximum examples to include.
         max_chars: Maximum characters for the examples section.

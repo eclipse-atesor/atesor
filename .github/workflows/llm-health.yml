@@ -18,6 +18,10 @@ name: LLM Provider Health
 #     batch:
 #       needs: preflight
 #       if: needs.preflight.outputs.provider_ok == 'true'
+#
+# With `provider_chain: "openrouter,anthropic"` the run gates on the
+# first operational provider of the chain instead, and reports it as the
+# `provider` output; callers write that value into LLM_PROVIDER.
 
 on:
   workflow_dispatch:
@@ -26,14 +30,15 @@ on:
         description: "Provider to gate on (LLM_PROVIDER for the batch run)"
         type: choice
         default: openrouter
-        options: [openrouter, gemini, openai]
+        options: [openrouter, gemini, openai, anthropic]
       fail_on_unavailable:
         description: "Fail the run when the gated provider is unusable"
         type: string
         default: "true"
   schedule:
-    # 01:00 UTC — one hour ahead of the nightly batch sweep, so a dead
-    # provider is known before compute is spent on it.
+    # 01:00 UTC daily, before the scheduled batch-port sweeps (01:07 UTC
+    # on the 1st, 01:17 UTC on Saturdays), so a dead provider is known
+    # before compute is spent on it.
     - cron: "0 1 * * *"
   workflow_call:
     inputs:
@@ -41,6 +46,14 @@ on:
         description: "Provider the caller intends to run with (LLM_PROVIDER)"
         type: string
         default: openrouter
+      provider_chain:
+        description: >-
+          Comma-separated providers in order of preference. When set, the
+          run gates on the first operational one (ignoring `provider`)
+          and returns it as the `provider` output. Empty: gate on
+          `provider` only.
+        type: string
+        default: ""
       fail_on_unavailable:
         description: >-
           "true" fails this workflow when the selected provider is down.
@@ -57,7 +70,7 @@ on:
         description: "true when the SELECTED provider is operational"
         value: ${{ jobs.summary.outputs.provider_ok }}
       provider:
-        description: "The provider that was gated on"
+        description: "The provider that was gated on (chosen from the chain when one is set)"
         value: ${{ jobs.summary.outputs.provider }}
       openrouter_ok:
         description: "true when OpenRouter is operational"
@@ -72,6 +85,8 @@ on:
 env:
   # Single source of truth for which provider this run gates on.
   GATE_PROVIDER: ${{ inputs.provider || 'openrouter' }}
+  # Optional preference order; the first operational entry wins.
+  GATE_CHAIN: ${{ inputs.provider_chain || '' }}
 
 permissions:
   contents: read
@@ -90,7 +105,7 @@ jobs:
           - provider: openrouter   # primary driver for batch runs
           - provider: gemini       # default provider in src/models.py
           - provider: openai
-          - provider: anthropic    # not wired into Atesor; key validation only
+          - provider: anthropic
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
@@ -163,13 +178,23 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import glob, json, os
           # Providers Atesor can actually be driven by (see ModelProvider).
-          WIRED = {"openrouter", "gemini", "openai"}
+          WIRED = {"openrouter", "gemini", "openai", "anthropic"}
           gate = os.environ.get("GATE_PROVIDER") or "openrouter"
           state, degraded = {}, {}
           for f in glob.glob("results/**/result.json", recursive=True):
               for r in json.load(open(f)).get("results", []):
                   state[r["provider"]] = r["ok"]
                   degraded[r["provider"]] = r.get("degraded", False)
+          chain = [
+              p.strip() for p in os.environ.get("GATE_CHAIN", "").split(",")
+              if p.strip()
+          ]
+          if chain:
+              # First operational wired provider; else the head of the
+              # chain, which then reports provider_ok=false.
+              gate = next(
+                  (p for p in chain if p in WIRED and state.get(p)), chain[0]
+              )
           for p in ("openrouter", "gemini", "openai", "anthropic"):
               print(f"{p}_ok={str(state.get(p, False)).lower()}")
           any_ok = any(v for k, v in state.items() if k in WIRED)
@@ -189,6 +214,8 @@ jobs:
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write("## LLM provider health\n\n" + "\n".join(lines) + "\n")
+              if chain:
+                  fh.write(f"\nProvider chain: {' -> '.join(chain)}\n")
               fh.write(f"\nGating on **{gate}**: "
                        f"{'OK' if provider_ok else 'NOT USABLE'}\n")
               if not provider_ok:
@@ -208,19 +235,21 @@ jobs:
       - name: Report gate result
         run: |
           if [[ "${{ steps.agg.outputs.provider_ok }}" == 'true' ]]; then
-            echo "::notice::${{ env.GATE_PROVIDER }} is operational."
+            echo "::notice::${{ steps.agg.outputs.provider }} is operational."
           else
-            echo "::warning::${{ env.GATE_PROVIDER }} is NOT usable — dependent batch jobs will be skipped."
+            echo "::warning::${{ steps.agg.outputs.provider }} is NOT usable — dependent batch jobs will be skipped."
           fi
 
       # Standalone runs (schedule / manual) fail loudly. Callers that gate
-      # on the `provider_ok` output pass "false" so a dead provider skips
-      # the batch instead of painting the run red. On `schedule` there are
-      # no inputs at all, so this resolves to '' != 'false' -> fail.
+      # on the `provider_ok` output can pass "false" so a dead provider
+      # skips the batch instead of painting the run red. batch-port.yml
+      # and batch-port-retry.yml pass "false" for manual runs only. On
+      # `schedule` there are no inputs at all, so this resolves to
+      # '' != 'false' -> fail.
       - name: Fail when gated provider is unusable
         if: >-
           steps.agg.outputs.provider_ok != 'true' &&
           inputs.fail_on_unavailable != 'false'
         run: |
-          echo "::error::${{ env.GATE_PROVIDER }} is not operational."
+          echo "::error::${{ steps.agg.outputs.provider }} is not operational."
           exit 1

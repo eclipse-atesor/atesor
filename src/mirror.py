@@ -39,7 +39,7 @@ from .sandbox import SandboxUnavailableError
 
 logger = logging.getLogger(__name__)
 
-# The first copy of a large repository can take a while.
+# Seconds. The first copy of a large repository can take a while.
 PULL_TIMEOUT = 900
 # rsync exit statuses that are only warnings: 23 means that some files
 # did not transfer, and 24 means that some source files vanished.
@@ -86,7 +86,7 @@ def repo_of(path: str) -> Optional[str]:
 
     Returns:
         ``zlib`` for that example, or None for a path outside
-        ``/workspace/repos/<repo>``.
+        ``/workspace/repos/<repo>`` or with an unsafe repository name.
     """
     normal = posixpath.normpath(path)
     if not normal.startswith(_REPOS_PREFIX):
@@ -113,7 +113,8 @@ def pull(repo: str, force: bool = False) -> None:
 
     Raises:
         ValueError: If the name is not a plain repository name.
-        SandboxUnavailableError: If rsync fails or runs too long.
+        SandboxUnavailableError: If preflight rung 10 did not record a
+            safe work directory, or if rsync fails or runs too long.
     """
     if not target.is_native():
         return

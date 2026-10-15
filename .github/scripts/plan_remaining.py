@@ -13,8 +13,8 @@ Given:
 
 this script writes the ordered list of packages that still need
 building for that platform to ``--remaining-out`` (as
-``{"packages": [...]}``), and emits two ``KEY=VALUE`` lines suitable
-for ``$GITHUB_OUTPUT``::
+``{"packages": [...], "stems": {...}}``), and emits two ``KEY=VALUE``
+lines suitable for ``$GITHUB_OUTPUT``::
 
     <prefix>_total=<N>
     <prefix>_groups=[0, 1, ..., N-1]
@@ -28,7 +28,10 @@ any of its ``-NN`` overflow tags created when a release fills its
 1000-asset cap) whose filename matches the canonical pattern produced
 by ``src.packager.package_build``::
 
-    <package>-<YYYYMMDD>-<HHMMSS>-<platform>.zip
+    <owner>-<repo>-<YYYYMMDD>-<HHMMSS>-<platform>.zip
+
+A zip named with the legacy stem also counts, but only when that stem
+is unique in the list.
 
 The platform is matched exactly, so ``foo-...-alpine.zip`` does not
 mark ``foo`` as released for the ``debian`` platform.
@@ -46,7 +49,7 @@ import math
 import os
 import re
 import sys
-from typing import Iterable
+from typing import Iterable, Optional
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -54,6 +57,7 @@ _REPO_ROOT = os.path.abspath(
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# E402: the sys.path insert above must run before importing src modules.
 from src.packager import legacy_package_stem, package_stem  # noqa: E402
 
 _PACKAGES_DIR = os.path.normpath(
@@ -62,7 +66,7 @@ _PACKAGES_DIR = os.path.normpath(
 
 
 def _resolve_list_path(value: str) -> str:
-    """Bare name resolves under ``.github/packages/<name>.json``.
+    """Resolve a bare name under ``.github/packages/<name>.json``.
 
     Mirrors ``plan_shards.py::_resolve_list_path`` so the workflow can
     pass either ``--list full`` (production) or an explicit file path
@@ -78,7 +82,7 @@ def _load_packages(list_path: str) -> list[tuple[str, str, str, bool]]:
 
     ``new_stem`` uses the owner-prefixed package stem. ``legacy_stem``
     is accepted only when it is unique in the whole list, because a
-    legacy ``cli-*.zip`` asset cannot identify which ``cli`` repo it
+    legacy stem that two repos share cannot identify which repo a zip
     belongs to.
     """
     with open(list_path, "r", encoding="utf-8") as fh:
@@ -106,7 +110,7 @@ def _released_names(
     asset_names: Iterable[str],
     platform: str,
 ) -> set[str]:
-    """Return the set of package names already released for ``platform``.
+    """Return the zip stems already released for ``platform``.
 
     Filenames that don't match the canonical pattern are silently
     ignored — they can't be confidently attributed to a package, so we
@@ -126,7 +130,7 @@ def _released_names(
     return out
 
 
-def _load_released_assets(path: str | None) -> list[str]:
+def _load_released_assets(path: Optional[str]) -> list[str]:
     """Read released asset filenames from ``path`` (one per line).
 
     Missing or empty file is treated as "no assets" — that's the
@@ -142,16 +146,21 @@ def compute_plan(
     declared: list[str],
     released: set[str],
     group_size: int,
-    stem_of: dict[str, str] | None = None,
-    legacy_stem_of: dict[str, str] | None = None,
-    legacy_unique: dict[str, bool] | None = None,
+    stem_of: Optional[dict[str, str]] = None,
+    legacy_stem_of: Optional[dict[str, str]] = None,
+    legacy_unique: Optional[dict[str, bool]] = None,
 ) -> tuple[list[str], int, list[int]]:
     """Return ``(remaining, total_shards, group_indices)``.
 
     ``remaining`` preserves the declared order; ``total_shards`` is
     ``ceil(len(remaining) / group_size)`` (0 when empty). ``stem_of``
     maps a declared name to the zip filename stem to match against
-    ``released`` (defaults to the name itself).
+    ``released`` (defaults to the name itself). ``legacy_stem_of`` gives
+    a second stem, which counts only when ``legacy_unique`` marks it
+    unique.
+
+    Raises:
+        ValueError: If ``group_size`` is less than 1.
     """
     if group_size < 1:
         raise ValueError(f"group-size must be >= 1 (got {group_size})")
@@ -177,9 +186,9 @@ def compute_plan(
 def _write_remaining(
     path: str,
     remaining: list[str],
-    stem_of: dict[str, str] | None = None,
-    legacy_stem_of: dict[str, str] | None = None,
-    legacy_unique: dict[str, bool] | None = None,
+    stem_of: Optional[dict[str, str]] = None,
+    legacy_stem_of: Optional[dict[str, str]] = None,
+    legacy_unique: Optional[dict[str, bool]] = None,
 ) -> None:
     """Persist the remaining list as ``{"packages": [...]}`` JSON.
 
@@ -194,9 +203,7 @@ def _write_remaining(
         for name in remaining:
             if name not in stem_of:
                 continue
-            legacy_stem = (
-                legacy_stem_of.get(name) if legacy_stem_of else None
-            )
+            legacy_stem = legacy_stem_of.get(name) if legacy_stem_of else None
             unique = bool(legacy_unique and legacy_unique.get(name, False))
             stem_payload[name] = {
                 "package_stem": stem_of[name],
@@ -210,8 +217,14 @@ def _write_remaining(
         fh.write("\n")
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the CLI entry point."""
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the CLI entry point.
+
+    Returns:
+        Process exit code: 0 on success. Invalid arguments exit via
+        argparse (code 2); an invalid ``--group-size`` raises
+        ``ValueError`` from :func:`compute_plan`.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--list",

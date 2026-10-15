@@ -9,10 +9,13 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""Comprehensive LLM call logging and tracking system.
+"""Audit log for LLM calls: prompt, response, model, tokens, and cost.
 
-Logs all LLM invocations with their prompts, responses, and results for
-debugging. Creates ``agent-call.log`` in the ``workspace/logs`` directory.
+Each call is appended to ``agent-call.log`` in the workspace ``logs``
+directory; ``set_llm_log_repo`` switches to a per-repo
+``agent-call_<repo>.log`` so batch workers keep separate files. The
+logger is a process-wide singleton; batch runs use one process per
+package, so threads in one process would share the current file.
 """
 
 import json
@@ -24,7 +27,6 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-# Configure logging for this module
 logger = logging.getLogger(__name__)
 
 
@@ -58,17 +60,18 @@ class LLMCallLogger:
         self._ensure_log_file()
 
     def _ensure_log_file(self):
-        """Ensure the log file directory exists and is writable."""
+        """Ensure the logs directory and the default log file exist.
+
+        On failure, ``log_file`` is None and file writes are skipped.
+        """
         try:
             from src.config import LOGS_DIR
 
-            # Create logs directory if it doesn't exist
             os.makedirs(LOGS_DIR, exist_ok=True)
 
             self.log_file = os.path.join(LOGS_DIR, "agent-call.log")
             self._logs_dir = LOGS_DIR
 
-            # Write header if file is new
             if not os.path.exists(self.log_file):
                 with open(self.log_file, "w") as f:
                     f.write("=" * 80 + "\n")
@@ -84,6 +87,9 @@ class LLMCallLogger:
 
     def set_repo_name(self, repo_name: str) -> None:
         """Switch to a per-repo log file for multi-process batch safety.
+
+        Does nothing when ``repo_name`` is empty or the logs directory
+        is not available.
 
         Args:
             repo_name: Name of the repository whose log to write to.
@@ -107,9 +113,14 @@ class LLMCallLogger:
     ) -> str:
         """Log an LLM call with complete context.
 
+        Appends a summary record to ``calls`` (the last 1000 calls) and,
+        when ``log_file`` is set, the full entry to that file. The file
+        keeps the first 10,000 characters of the prompt and of the
+        response. A file write error is logged and does not raise.
+
         Args:
-            agent_role: The agent role making the call (e.g. SCOUT,
-                BUILDER, FIXER).
+            agent_role: The role label of the caller (e.g. ``scout``,
+                ``fixer``, ``optimizer``).
             prompt: The full prompt sent to the LLM.
             response: The response received from the LLM.
             model: The model used.
@@ -141,7 +152,7 @@ class LLMCallLogger:
 
         self.calls.append(call_record)
 
-        # Write to file immediately
+        # Append right away so a crash does not lose the record.
         if self.log_file:
             with self._write_lock:
                 try:
@@ -159,7 +170,7 @@ class LLMCallLogger:
                             f.write(f"METADATA: {meta_json}\n")
 
                         f.write("\n--- PROMPT ---\n")
-                        f.write(prompt[:10000])  # First 10k chars.
+                        f.write(prompt[:10000])  # Keep the log bounded
                         if len(prompt) > 10000:
                             dropped = len(prompt) - 10000
                             f.write(
@@ -168,7 +179,7 @@ class LLMCallLogger:
                             )
 
                         f.write("\n--- RESPONSE ---\n")
-                        f.write(response[:10000])  # First 10k chars.
+                        f.write(response[:10000])  # Keep the log bounded
                         if len(response) > 10000:
                             dropped = len(response) - 10000
                             f.write(
@@ -183,7 +194,8 @@ class LLMCallLogger:
         return call_id
 
 
-# Global instance
+# Instantiated at import time, so the log directory and header exist
+# even when a run ends before the first LLM call.
 _llm_logger = LLMCallLogger()
 
 
@@ -197,7 +209,14 @@ def log_llm_call(
     tokens_out: int = 0,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Log an LLM call through the global logger instance."""
+    """Log one LLM call through the process-wide logger.
+
+    Thin wrapper over ``LLMCallLogger.log_call``; see it for the
+    parameter meanings.
+
+    Returns:
+        The call ID for cross-referencing the audit file.
+    """
     return _llm_logger.log_call(
         agent_role,
         prompt,

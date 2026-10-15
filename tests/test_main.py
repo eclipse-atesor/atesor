@@ -15,11 +15,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable, Iterator, Optional, Sequence
 from unittest import mock
 
 import main
 from src.state import (
     AgentRole,
+    AgentState,
     BuildPhase,
     BuildPlan,
     BuildStatus,
@@ -89,19 +91,19 @@ class _FakeContainer:
         self.start_calls += 1
         self.status = "running"
 
-    def stop(self, *args, **kwargs) -> None:
+    def stop(self, *args: object, **kwargs: object) -> None:
         """Stop the fake container."""
         self.stop_calls += 1
         self.status = "exited"
 
-    def remove(self, *args, **kwargs) -> None:
+    def remove(self, *args: object, **kwargs: object) -> None:
         """Remove the fake container."""
         self.remove_calls.append(dict(kwargs))
 
     def reload(self) -> None:
-        """Reload the fake container."""
+        """Do nothing: the fake keeps its status in memory."""
 
-    def exec_run(self, cmd: str):
+    def exec_run(self, cmd: str) -> SimpleNamespace:
         """Return canned responses for health-check commands."""
         if "os-release" in cmd:
             if self.raise_on_os_release:
@@ -122,27 +124,13 @@ class _FakeContainer:
         return SimpleNamespace(exit_code=0, output=b"ok\n")
 
 
-class _FlippingVerbose:
-    """Truthiness helper for the defensive verbose-content branch."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def __bool__(self) -> bool:
-        """Return True once and False on later checks."""
-        self.calls += 1
-        return self.calls == 1
-
-
 class _MainTestCase(unittest.TestCase):
     """Base class that keeps scratch files out of temporary directories."""
 
     def setUp(self) -> None:
         """Create a per-test scratch directory under tests/."""
         _SCRATCH_PARENT.mkdir(exist_ok=True)
-        self._temp_dir = tempfile.TemporaryDirectory(
-            dir=str(_SCRATCH_PARENT)
-        )
+        self._temp_dir = tempfile.TemporaryDirectory(dir=str(_SCRATCH_PARENT))
         self.temp_path = Path(self._temp_dir.name)
         self.addCleanup(self._cleanup_temp_dir)
 
@@ -184,8 +172,8 @@ class _MainTestCase(unittest.TestCase):
     def _call_cli(
         self,
         args: list[str],
-        cache: dict[str, object] | None = None,
-        recipe_path: str | None = "recipe.md",
+        cache: Optional[dict[str, object]] = None,
+        recipe_path: Optional[str] = "recipe.md",
         key_result: bool = True,
         setup_result: bool = True,
         rebuild_result: bool = True,
@@ -264,7 +252,7 @@ class _MainTestCase(unittest.TestCase):
             }
 
     @contextlib.contextmanager
-    def _patched_graph(self, app) -> None:
+    def _patched_graph(self, app) -> Iterator[None]:
         """Provide a fake src.graph module for run_agent tests."""
         fake_graph = SimpleNamespace(app=app)
         with mock.patch.dict(sys.modules, {"src.graph": fake_graph}):
@@ -275,7 +263,6 @@ class TestConfigureLogging(_MainTestCase):
     """Tests for configure_logging()."""
 
     def test_verbose_logging_uses_debug_console_and_repo_file(self) -> None:
-        """Configure DEBUG console logging with a per-repo file."""
         root = logging.getLogger()
         saved_handlers = root.handlers[:]
         saved_level = root.level
@@ -310,7 +297,6 @@ class TestConfigureLogging(_MainTestCase):
             root.setLevel(saved_level)
 
     def test_non_verbose_logging_uses_error_console(self) -> None:
-        """Configure ERROR console logging without a repo name."""
         root = logging.getLogger()
         saved_handlers = root.handlers[:]
         saved_level = root.level
@@ -345,22 +331,26 @@ class TestCheckKeys(_MainTestCase):
     """Tests for API-key validation wrappers."""
 
     def test_check_keys_reports_success_and_prints_model_info(self) -> None:
-        """Return True when provider keys are valid."""
-        with mock.patch.object(
-            main,
-            "check_api_keys",
-            return_value=(True, "Gemini ready", "gemini"),
-        ), mock.patch.object(main, "print_model_info") as print_info:
+        with (
+            mock.patch.object(
+                main,
+                "check_api_keys",
+                return_value=(True, "Gemini ready", "gemini"),
+            ),
+            mock.patch.object(main, "print_model_info") as print_info,
+        ):
             self.assertTrue(main.check_keys())
             print_info.assert_called_once_with()
 
     def test_check_keys_reports_failure_without_model_info(self) -> None:
-        """Return False when provider keys are missing."""
-        with mock.patch.object(
-            main,
-            "check_api_keys",
-            return_value=(False, "missing key", "gemini"),
-        ), mock.patch.object(main, "print_model_info") as print_info:
+        with (
+            mock.patch.object(
+                main,
+                "check_api_keys",
+                return_value=(False, "missing key", "gemini"),
+            ),
+            mock.patch.object(main, "print_model_info") as print_info,
+        ):
             self.assertFalse(main.check_keys())
             print_info.assert_not_called()
 
@@ -369,68 +359,82 @@ class TestBinfmtSetup(_MainTestCase):
     """Tests for qemu-riscv64 binfmt preflight."""
 
     def test_existing_enabled_binfmt_returns_true(self) -> None:
-        """Use the existing enabled binfmt handler."""
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=True,
-        ), mock.patch(
-            "builtins.open",
-            mock.mock_open(read_data="enabled\n"),
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=True,
+            ),
+            mock.patch(
+                "builtins.open",
+                mock.mock_open(read_data="enabled\n"),
+            ),
         ):
             self.assertTrue(main._ensure_riscv64_binfmt())
 
     def test_existing_binfmt_read_error_attempts_registration(self) -> None:
-        """Fall through to installer when the existing file is unreadable."""
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            side_effect=[True, True],
-        ), mock.patch("builtins.open", side_effect=OSError), mock.patch(
-            "subprocess.run",
-            return_value=completed,
-        ) as run:
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                side_effect=[True, True],
+            ),
+            mock.patch("builtins.open", side_effect=OSError),
+            mock.patch(
+                "subprocess.run",
+                return_value=completed,
+            ) as run,
+        ):
             self.assertTrue(main._ensure_riscv64_binfmt())
             run.assert_called_once()
 
     def test_successful_registration_rechecks_binfmt_path(self) -> None:
-        """Return True after the installer creates the handler."""
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            side_effect=[False, True],
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                side_effect=[False, True],
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertTrue(main._ensure_riscv64_binfmt())
 
     def test_failed_registration_returns_false(self) -> None:
-        """Return False when tonistiigi/binfmt exits non-zero."""
         completed = SimpleNamespace(returncode=1, stderr="denied")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
     def test_registration_exception_returns_false(self) -> None:
-        """Return False when the installer command cannot run."""
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", side_effect=FileNotFoundError),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
     def test_registration_success_without_recheck_returns_false(self) -> None:
         """Return False when the installer succeeds but the path is absent."""
         completed = SimpleNamespace(returncode=0, stderr="")
-        with mock.patch.object(
-            main.os.path,
-            "exists",
-            return_value=False,
-        ), mock.patch("subprocess.run", return_value=completed):
+        with (
+            mock.patch.object(
+                main.os.path,
+                "exists",
+                return_value=False,
+            ),
+            mock.patch("subprocess.run", return_value=completed),
+        ):
             self.assertFalse(main._ensure_riscv64_binfmt())
 
 
@@ -438,7 +442,6 @@ class TestDockerEnvironment(_MainTestCase):
     """Tests for Docker sandbox setup and provisioning."""
 
     def test_setup_docker_environment_handles_docker_exception(self) -> None:
-        """Return False when Docker is not reachable."""
         with mock.patch.object(
             main.docker,
             "from_env",
@@ -447,32 +450,37 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertFalse(main.setup_docker_environment())
 
     def test_setup_docker_environment_closes_client(self) -> None:
-        """Close the Docker client after delegated provisioning."""
         client = mock.MagicMock()
-        with mock.patch.object(
-            main.docker,
-            "from_env",
-            return_value=client,
-        ), mock.patch.object(
-            main,
-            "_provision_sandbox",
-            return_value=True,
-        ) as provision:
+        with (
+            mock.patch.object(
+                main.docker,
+                "from_env",
+                return_value=client,
+            ),
+            mock.patch.object(
+                main,
+                "_provision_sandbox",
+                return_value=True,
+            ) as provision,
+        ):
             self.assertTrue(main.setup_docker_environment())
             provision.assert_called_once()
             client.close.assert_called_once_with()
 
     def test_provision_sandbox_waits_for_existing_lock(self) -> None:
-        """Block on an existing flock before entering the locked section."""
-        with self._patched_main_paths(), mock.patch.object(
-            main.fcntl,
-            "flock",
-            side_effect=[OSError, None, None],
-        ) as flock, mock.patch.object(
-            main,
-            "_provision_sandbox_locked",
-            return_value=True,
-        ) as locked:
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main.fcntl,
+                "flock",
+                side_effect=[OSError, None, None],
+            ) as flock,
+            mock.patch.object(
+                main,
+                "_provision_sandbox_locked",
+                return_value=True,
+            ) as locked,
+        ):
             self.assertTrue(
                 main._provision_sandbox(
                     mock.MagicMock(),
@@ -486,7 +494,6 @@ class TestDockerEnvironment(_MainTestCase):
             locked.assert_called_once()
 
     def test_locked_provision_stops_when_binfmt_missing(self) -> None:
-        """Return False before touching images when binfmt is missing."""
         client = mock.MagicMock()
         with mock.patch.object(
             main,
@@ -505,12 +512,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.images.get.assert_not_called()
 
     def test_locked_provision_uses_existing_running_container(self) -> None:
-        """Use an existing healthy riscv64 container."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -528,12 +538,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_not_called()
 
     def test_locked_provision_builds_missing_image_and_container(self) -> None:
-        """Build a missing image and create the sandbox container."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             stream = _CloseableBuildStream(
                 [
                     {"stream": "Step 1/2 : FROM alpine\n"},
@@ -565,14 +578,18 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_called_once()
 
     def test_locked_provision_force_rebuild_uses_build_stream(self) -> None:
-        """Honor REBUILD_IMAGE by rebuilding even when image lookup exists."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"), mock.patch.dict(
-            main.os.environ,
-            {"REBUILD_IMAGE": "true"},
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+            mock.patch.dict(
+                main.os.environ,
+                {"REBUILD_IMAGE": "true"},
+            ),
         ):
             client = mock.MagicMock()
             stream = _CloseableBuildStream([{"stream": "Step 1/1\n"}])
@@ -593,11 +610,13 @@ class TestDockerEnvironment(_MainTestCase):
             client.api.build.assert_called_once()
 
     def test_locked_provision_reports_build_error_detail(self) -> None:
-        """Return False when Docker emits errorDetail during build."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -620,11 +639,13 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertTrue(stream.closed)
 
     def test_locked_provision_reports_build_error_key(self) -> None:
-        """Return False when Docker emits a top-level error."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -645,11 +666,13 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_reports_generic_build_exception(self) -> None:
-        """Return False when Docker build setup raises unexpectedly."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
         ):
             client = mock.MagicMock()
             client.images.get.side_effect = main.docker.errors.ImageNotFound(
@@ -668,12 +691,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_recreates_stale_mount(self) -> None:
-        """Recreate a container whose /workspace mount is stale."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             stale = _FakeContainer(str(self.temp_path / "old-workspace"))
             fresh = _FakeContainer(main.WORKSPACE_ROOT)
             client = mock.MagicMock()
@@ -694,12 +720,15 @@ class TestDockerEnvironment(_MainTestCase):
             client.containers.run.assert_called_once()
 
     def test_locked_provision_starts_stopped_container(self) -> None:
-        """Start an existing but stopped container."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT, status="created")
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -717,12 +746,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(1, container.start_calls)
 
     def test_locked_provision_fails_after_non_running_retries(self) -> None:
-        """Return False after recreated containers never reach running."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             first = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
             second = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
             client = mock.MagicMock()
@@ -744,12 +776,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.run.call_count)
 
     def test_locked_provision_logs_cleanup_failure_on_retry(self) -> None:
-        """Log and continue when stale container cleanup fails."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             first = _FakeContainer(main.WORKSPACE_ROOT)
             first.reload = mock.MagicMock(
                 side_effect=lambda: setattr(first, "status", "exited")
@@ -772,12 +807,15 @@ class TestDockerEnvironment(_MainTestCase):
             first.stop.assert_called_once_with()
 
     def test_locked_provision_retries_when_container_disappears(self) -> None:
-        """Retry when Docker loses the container during reload."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             lost = _FakeContainer(main.WORKSPACE_ROOT)
             lost.reload = mock.MagicMock(
                 side_effect=main.docker.errors.NotFound("gone")
@@ -799,12 +837,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.get.call_count)
 
     def test_locked_provision_rejects_distro_mismatch(self) -> None:
-        """Reject a container whose distro does not match the profile."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(
                 main.WORKSPACE_ROOT,
                 os_release=b"ID=debian\n",
@@ -824,12 +865,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_skips_failed_distro_exception(self) -> None:
-        """Continue when the distro self-check raises unexpectedly."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.raise_on_os_release = True
             client = mock.MagicMock()
@@ -847,12 +891,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_allows_ubuntu_for_debian_profile(self) -> None:
-        """Accept ubuntu containers for the apt-based Debian profile."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(
                 main.WORKSPACE_ROOT,
                 os_release=b"ID=ubuntu\n",
@@ -872,12 +919,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_continues_when_os_release_fails(self) -> None:
-        """Continue health checks when distro self-check cannot run."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.os_release_exit = 1
             client = mock.MagicMock()
@@ -895,12 +945,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_warns_on_wrong_architecture(self) -> None:
-        """Warn but continue when uname is not riscv64."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT, arch=b"x86_64\n")
             client = mock.MagicMock()
             client.images.get.return_value = object()
@@ -917,12 +970,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_fails_when_arch_check_fails(self) -> None:
-        """Return False when uname cannot execute."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.arch_exit = 1
             client = mock.MagicMock()
@@ -940,12 +996,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_fails_when_health_check_fails(self) -> None:
-        """Return False when the echo health check exits non-zero."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             container = _FakeContainer(main.WORKSPACE_ROOT)
             container.ready_exit = 1
             client = mock.MagicMock()
@@ -963,12 +1022,15 @@ class TestDockerEnvironment(_MainTestCase):
             )
 
     def test_locked_provision_recovers_from_health_exception(self) -> None:
-        """Recreate the container after a health-check exception."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             fresh = _FakeContainer(main.WORKSPACE_ROOT)
@@ -992,12 +1054,15 @@ class TestDockerEnvironment(_MainTestCase):
     def test_locked_provision_logs_failed_initial_recreate_cleanup(
         self,
     ) -> None:
-        """Continue when cleanup before recreation raises."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             broken.stop = mock.MagicMock(side_effect=RuntimeError("busy"))
@@ -1019,12 +1084,15 @@ class TestDockerEnvironment(_MainTestCase):
             broken.stop.assert_called_once_with()
 
     def test_locked_provision_skips_non_running_recreation(self) -> None:
-        """Try the next recreation when the first container exits."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             stopped = _FakeContainer(main.WORKSPACE_ROOT, status="exited")
@@ -1046,12 +1114,15 @@ class TestDockerEnvironment(_MainTestCase):
             self.assertEqual(2, client.containers.run.call_count)
 
     def test_locked_provision_logs_recreate_cleanup_failure(self) -> None:
-        """Log cleanup failures inside failed recreation attempts."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             first = _FakeContainer(main.WORKSPACE_ROOT)
@@ -1082,12 +1153,15 @@ class TestDockerEnvironment(_MainTestCase):
             second.remove.assert_called_once_with()
 
     def test_locked_provision_fails_when_recreation_fails(self) -> None:
-        """Return False when both recreation attempts raise."""
-        with self._patched_main_paths(), mock.patch.object(
-            main,
-            "_ensure_riscv64_binfmt",
-            return_value=True,
-        ), mock.patch.object(main.time, "sleep"):
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main,
+                "_ensure_riscv64_binfmt",
+                return_value=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
             broken = _FakeContainer(main.WORKSPACE_ROOT)
             broken.raise_on_ready = True
             client = mock.MagicMock()
@@ -1111,7 +1185,6 @@ class TestOutputReports(_MainTestCase):
     """Tests for report generation and output persistence."""
 
     def test_generate_success_report_includes_all_sections(self) -> None:
-        """Render success details, truncation notes, and recommendations."""
         patch_text = "diff --git a/a b/a\n" + ("+x\n" * 250)
         state = {
             "repo_name": "demo",
@@ -1147,7 +1220,8 @@ class TestOutputReports(_MainTestCase):
             ],
             "patches_generated": [patch_text],
             # AgentState.to_dict() serializes ErrorRecords as dicts
-            # under error_history (the report used to read error_log).
+            # under error_history. Regression: the old error_log key
+            # silently kept errors out of the report.
             "error_history": [
                 {"category": "COMPILATION", "message": "gcc failed"}
             ],
@@ -1188,7 +1262,6 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("*Report generated by Atesor AI*", report)
 
     def test_report_shows_package_test_result(self) -> None:
-        """The non-gating test phase has its own report section."""
         report = main.generate_detailed_report(
             {
                 "repo_name": "demo",
@@ -1239,7 +1312,6 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("Reason: No space left on device", report)
 
     def test_report_lists_other_architecture_outputs(self) -> None:
-        """A wrong-arch verdict names the foreign outputs."""
         report = main.generate_detailed_report(
             {
                 "repo_name": "demo",
@@ -1264,7 +1336,6 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("`/workspace/repos/demo/tool` (x86-64", report)
 
     def test_generate_escalated_report_includes_manual_reason(self) -> None:
-        """Render escalation recommendations when no build plan exists."""
         report = main.generate_detailed_report(
             {
                 "repo_name": "demo",
@@ -1278,7 +1349,6 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("Reason: cost cap", report)
 
     def test_generate_failed_report_uses_failure_recommendations(self) -> None:
-        """Render generic remediation guidance for failed builds."""
         report = main.generate_detailed_report(
             {"repo_name": "demo", "build_status": "FAILED"}
         )
@@ -1287,7 +1357,6 @@ class TestOutputReports(_MainTestCase):
         self.assertIn("Check dependencies", report)
 
     def test_report_names_the_target_under_the_status(self) -> None:
-        """The line under Status says which target ran the build."""
         state = {
             "repo_name": "demo",
             "build_status": "SUCCESS",
@@ -1306,7 +1375,6 @@ class TestOutputReports(_MainTestCase):
     def test_save_porting_outputs_writes_state_recipe_report_and_patches(
         self,
     ) -> None:
-        """Write every output artifact for a completed state."""
         state = create_initial_state(_REPO_URL)
         state.porting_recipe = "# recipe\n"
         state.patches_generated = ["diff --git a/a b/a\n"]
@@ -1328,7 +1396,6 @@ class TestOutputReports(_MainTestCase):
     def test_save_porting_outputs_continues_after_state_json_error(
         self,
     ) -> None:
-        """Still write the report if state serialization fails."""
         state = create_initial_state(_REPO_URL)
         state.save_to_json = mock.MagicMock(side_effect=RuntimeError("bad"))
         output_dir = self.temp_path / "out"
@@ -1346,7 +1413,11 @@ class _FakeApp:
         self.initial_state = None
         self.config = None
 
-    def stream(self, initial_state, config=None):
+    def stream(
+        self,
+        initial_state: AgentState,
+        config: Optional[dict[str, int]] = None,
+    ) -> Iterator[dict[str, object]]:
         """Yield fake graph updates."""
         self.initial_state = initial_state
         self.config = config
@@ -1358,7 +1429,6 @@ class TestRunAgent(_MainTestCase):
     """Tests for the top-level graph runner."""
 
     def test_run_agent_success_with_dict_and_state_updates(self) -> None:
-        """Return zero after a successful graph stream."""
         def stream_factory(state):
             state.build_status = BuildStatus.SUCCESS
             state.artifact_verification = {"status": "verified"}
@@ -1383,15 +1453,15 @@ class TestRunAgent(_MainTestCase):
         self.assertEqual(9, fake_app.initial_state.max_attempts)
         save_outputs.assert_called_once()
 
-    def test_run_agent_verbose_prints_agent_messages(self) -> None:
-        """Exercise verbose message rendering for named agents."""
+    def test_run_agent_working_line_skips_supervisor_node(self) -> None:
         def stream_factory(state):
+            yield {"supervisor_node": {"attempt_count": 1}}
             state.build_status = BuildStatus.SUCCESS
             state.artifact_verification = {"status": "verified"}
-            state.messages = [SimpleNamespace(name="Scout", content="ready")]
-            yield {"Scout": state}
+            yield {"build_fix_subgraph": {"build_status": state.build_status}}
 
         fake_app = _FakeApp(stream_factory)
+        output = io.StringIO()
         with (
             self._patched_main_paths(),
             self._patched_graph(fake_app),
@@ -1400,58 +1470,52 @@ class TestRunAgent(_MainTestCase):
                 return_value=self._profile(),
             ),
             mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(output),
         ):
-            self.assertEqual(0, main.run_agent(_REPO_URL, verbose=True))
-
-    def test_run_agent_verbose_colors_builder_and_fixer_messages(self) -> None:
-        """Exercise verbose role rendering for builder and fixer agents."""
-        def stream_factory(state):
-            state.build_status = BuildStatus.SUCCESS
-            state.artifact_verification = {"status": "verified"}
-            state.messages = [
-                SimpleNamespace(name="Builder", content="built"),
-                SimpleNamespace(name="Fixer", content="fixed"),
-            ]
-            yield {"Builder": state}
-
-        fake_app = _FakeApp(stream_factory)
-        with (
-            self._patched_main_paths(),
-            self._patched_graph(fake_app),
-            mock.patch(
-                "src.platforms.get_active_profile",
-                return_value=self._profile(),
-            ),
-            mock.patch.object(main, "save_porting_outputs"),
-        ):
-            self.assertEqual(0, main.run_agent(_REPO_URL, verbose=True))
-
-    def test_run_agent_truncates_long_verbose_content(self) -> None:
-        """Exercise the defensive long-content truncation branch."""
-        def stream_factory(state):
-            state.build_status = BuildStatus.SUCCESS
-            state.artifact_verification = {"status": "verified"}
-            state.messages = [
-                SimpleNamespace(name="Scout", content="x" * 600),
-            ]
-            yield {"Scout": state}
-
-        fake_app = _FakeApp(stream_factory)
-        with (
-            self._patched_main_paths(),
-            self._patched_graph(fake_app),
-            mock.patch(
-                "src.platforms.get_active_profile",
-                return_value=self._profile(),
-            ),
-            mock.patch.object(main, "save_porting_outputs"),
-        ):
-            code = main.run_agent(_REPO_URL, verbose=_FlippingVerbose())
+            code = main.run_agent(_REPO_URL, verbose=False)
 
         self.assertEqual(0, code)
+        steps = output.getvalue().split("[Step ")[1:]
+        self.assertEqual(2, len(steps))
+        self.assertIn("supervisor_node", steps[0])
+        self.assertNotIn("Working...", steps[0])
+        self.assertIn("build_fix_subgraph", steps[1])
+        self.assertIn("Working...", steps[1])
+
+    def test_run_agent_verbose_prints_no_working_line(self) -> None:
+        # The real graph yields dict updates that carry the whole
+        # messages list. Verbose output must not echo it.
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            yield {
+                "scout_node": {
+                    "messages": list(state.messages),
+                    "build_status": state.build_status,
+                }
+            }
+
+        fake_app = _FakeApp(stream_factory)
+        output = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(fake_app),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main.run_agent(_REPO_URL, verbose=True)
+
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("[Step 1] scout_node", text)
+        self.assertNotIn("Working...", text)
+        self.assertNotIn("Port this repository", text)
 
     def test_run_agent_failure_prints_error_and_audit_trail(self) -> None:
-        """Return one for failed builds and summarize diagnostics."""
         def stream_factory(state):
             state.build_status = BuildStatus.FAILED
             state.add_error(
@@ -1483,7 +1547,6 @@ class TestRunAgent(_MainTestCase):
             self.assertEqual(1, main.run_agent(_REPO_URL))
 
     def test_run_agent_failure_prints_scripted_and_error_audit(self) -> None:
-        """Render non-decision audit events in failed runs."""
         def stream_factory(state):
             state.build_status = BuildStatus.FAILED
             state.audit_trail = [
@@ -1515,7 +1578,6 @@ class TestRunAgent(_MainTestCase):
             self.assertEqual(1, main.run_agent(_REPO_URL))
 
     def test_run_agent_success_packages_artifacts(self) -> None:
-        """Invoke package_build when packaging is requested."""
         package_build = mock.MagicMock(return_value="pkg.zip")
 
         def stream_factory(state):
@@ -1547,7 +1609,6 @@ class TestRunAgent(_MainTestCase):
     def test_run_agent_unverified_success_exits_3_and_still_packages(
         self,
     ) -> None:
-        """No proven riscv64 output: exit 3, zip made with the verdict."""
         package_build = mock.MagicMock(return_value="pkg.zip")
         verdict = {"status": "unverified", "reason": "no ELF output"}
 
@@ -1602,7 +1663,6 @@ class TestRunAgent(_MainTestCase):
         self.assertEqual(2, code)
 
     def test_run_agent_native_packaging_copies_the_tree_first(self) -> None:
-        """On native, a forced mirror copy comes before the zip."""
         order = []
         package_build = mock.MagicMock(
             side_effect=lambda **kwargs: order.append("zip") or "pkg.zip"
@@ -1638,7 +1698,6 @@ class TestRunAgent(_MainTestCase):
         self.assertEqual([("pull", "project", True), "zip"], order)
 
     def test_run_agent_native_zip_name_ends_in_native(self) -> None:
-        """On native, the zip platform name is <profile>-native."""
         package_build = mock.MagicMock(return_value="pkg.zip")
 
         def stream_factory(state):
@@ -1669,7 +1728,6 @@ class TestRunAgent(_MainTestCase):
         )
 
     def test_run_agent_packaging_failure_returns_two(self) -> None:
-        """Treat explicit packaging failures as fatal."""
         package_build = mock.MagicMock(side_effect=RuntimeError("zip bad"))
 
         def stream_factory(state):
@@ -1692,28 +1750,32 @@ class TestRunAgent(_MainTestCase):
             self.assertEqual(2, main.run_agent(_REPO_URL, package=True))
 
     def test_run_agent_keyboard_interrupt_returns_130(self) -> None:
-        """Map KeyboardInterrupt to shell exit code 130."""
         def stream_factory(_state):
             raise KeyboardInterrupt
             yield {}
 
         fake_app = _FakeApp(stream_factory)
-        with self._patched_graph(fake_app), mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=self._profile(),
+        with (
+            self._patched_graph(fake_app),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
         ):
             self.assertEqual(130, main.run_agent(_REPO_URL))
 
     def test_run_agent_unexpected_exception_returns_one(self) -> None:
-        """Map unexpected graph exceptions to exit code one."""
         def stream_factory(_state):
             raise RuntimeError("graph bad")
             yield {}
 
         fake_app = _FakeApp(stream_factory)
-        with self._patched_graph(fake_app), mock.patch(
-            "src.platforms.get_active_profile",
-            return_value=self._profile(),
+        with (
+            self._patched_graph(fake_app),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
         ):
             self.assertEqual(1, main.run_agent(_REPO_URL))
 
@@ -1731,57 +1793,63 @@ class TestCleanupWorkspace(_MainTestCase):
         return workspace
 
     def test_cleanup_workspace_missing_directory_returns(self) -> None:
-        """Handle a missing workspace directory without prompting."""
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(self.temp_path / "missing"),
-        ), mock.patch("builtins.input") as input_mock:
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(self.temp_path / "missing"),
+            ),
+            mock.patch("builtins.input") as input_mock,
+        ):
             main.cleanup_workspace()
             input_mock.assert_not_called()
 
     def test_cleanup_workspace_dry_run_does_not_delete(self) -> None:
-        """Dry-run mode reports sizes without deleting files."""
         workspace = self._make_workspace()
         with mock.patch.object(main, "WORKSPACE_ROOT", str(workspace)):
             main.cleanup_workspace(dry_run=True)
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_handles_eof(self) -> None:
-        """Cancel cleanup when stdin is non-interactive."""
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", side_effect=EOFError):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", side_effect=EOFError),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_invalid_choice_returns(self) -> None:
-        """Reject invalid menu input without deleting files."""
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="x"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="x"),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_quit_choice_returns(self) -> None:
-        """Respect the quit menu option."""
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="q"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="q"),
+        ):
             main.cleanup_workspace()
         self.assertTrue((workspace / "repos" / "file.txt").exists())
 
     def test_cleanup_workspace_cleans_each_single_directory(self) -> None:
-        """Clean each menu option that maps to one directory."""
         choices = [
             ("1", "repos"),
             ("2", "output"),
@@ -1791,30 +1859,34 @@ class TestCleanupWorkspace(_MainTestCase):
         for choice, dirname in choices:
             with self.subTest(choice=choice):
                 workspace = self._make_workspace()
-                with mock.patch.object(
-                    main,
-                    "WORKSPACE_ROOT",
-                    str(workspace),
-                ), mock.patch("builtins.input", return_value=choice):
+                with (
+                    mock.patch.object(
+                        main,
+                        "WORKSPACE_ROOT",
+                        str(workspace),
+                    ),
+                    mock.patch("builtins.input", return_value=choice),
+                ):
                     main.cleanup_workspace()
                 self.assertTrue((workspace / dirname).exists())
                 self.assertFalse((workspace / dirname / "file.txt").exists())
 
     def test_cleanup_workspace_cleans_all_directories(self) -> None:
-        """Clean every managed workspace directory."""
         workspace = self._make_workspace()
-        with mock.patch.object(
-            main,
-            "WORKSPACE_ROOT",
-            str(workspace),
-        ), mock.patch("builtins.input", return_value="5"):
+        with (
+            mock.patch.object(
+                main,
+                "WORKSPACE_ROOT",
+                str(workspace),
+            ),
+            mock.patch("builtins.input", return_value="5"),
+        ):
             main.cleanup_workspace()
         for dirname in ["repos", "output", "logs", ".cache", "patches"]:
             self.assertTrue((workspace / dirname).exists())
             self.assertFalse((workspace / dirname / "file.txt").exists())
 
     def test_cleanup_workspace_reports_rmtree_errors(self) -> None:
-        """Keep going when a directory cannot be removed."""
         workspace = self._make_workspace()
         with (
             mock.patch.object(main, "WORKSPACE_ROOT", str(workspace)),
@@ -1829,7 +1901,6 @@ class TestCleanupContainer(_MainTestCase):
     """Tests for Docker container cleanup."""
 
     def test_cleanup_container_stops_running_container_and_image(self) -> None:
-        """Stop and remove both container and image when requested."""
         client = mock.MagicMock()
         container = mock.MagicMock(status="running")
         client.containers.get.return_value = container
@@ -1841,7 +1912,6 @@ class TestCleanupContainer(_MainTestCase):
         client.close.assert_called_once_with()
 
     def test_cleanup_container_handles_missing_resources(self) -> None:
-        """Report missing Docker resources without raising."""
         client = mock.MagicMock()
         client.containers.get.side_effect = main.docker.errors.NotFound(
             "missing"
@@ -1854,7 +1924,6 @@ class TestCleanupContainer(_MainTestCase):
         client.close.assert_called_once_with()
 
     def test_cleanup_container_reports_image_remove_error(self) -> None:
-        """Catch unexpected image removal errors."""
         client = mock.MagicMock()
         client.containers.get.side_effect = main.docker.errors.NotFound(
             "missing"
@@ -1865,7 +1934,6 @@ class TestCleanupContainer(_MainTestCase):
         client.close.assert_called_once_with()
 
     def test_cleanup_container_handles_docker_client_error(self) -> None:
-        """Catch Docker client creation failures."""
         with mock.patch.object(
             main.docker,
             "from_env",
@@ -1880,21 +1948,23 @@ class TestRebuildSandboxes(_MainTestCase):
     def test_rebuild_all_sandboxes_runs_both_profiles_and_restores_env(
         self,
     ) -> None:
-        """Rebuild both profiles and restore caller environment."""
-        calls: list[str | None] = []
+        calls: list[Optional[str]] = []
 
         def fake_setup() -> bool:
             calls.append(main.os.environ.get("ATESOR_PLATFORM"))
             return True
 
-        with mock.patch.dict(
-            main.os.environ,
-            {"ATESOR_PLATFORM": "original", "ATESOR_CONTAINER": "worker"},
-            clear=True,
-        ), mock.patch.object(
-            main,
-            "setup_docker_environment",
-            side_effect=fake_setup,
+        with (
+            mock.patch.dict(
+                main.os.environ,
+                {"ATESOR_PLATFORM": "original", "ATESOR_CONTAINER": "worker"},
+                clear=True,
+            ),
+            mock.patch.object(
+                main,
+                "setup_docker_environment",
+                side_effect=fake_setup,
+            ),
         ):
             self.assertTrue(main.rebuild_all_sandboxes())
             self.assertEqual(["alpine", "debian"], calls)
@@ -1902,7 +1972,6 @@ class TestRebuildSandboxes(_MainTestCase):
             self.assertEqual("worker", main.os.environ["ATESOR_CONTAINER"])
 
     def test_rebuild_restores_absent_env_on_failure(self) -> None:
-        """Restore absent platform variables after a failed rebuild."""
         with (
             mock.patch.dict(main.os.environ, {}, clear=True),
             mock.patch.object(
@@ -1936,42 +2005,52 @@ class _FakeMachine:
         self.runs_after_create = True
         self.calls = []
 
-    def image_exists(self, image):
+    def image_exists(self, image: str) -> bool:
         """Report whether the image exists."""
         self.calls.append(("image_exists", image))
         return self.image
 
-    def build_image(self, image, text, on_line, timeout):
-        """Record the build and print one line."""
+    def build_image(
+        self,
+        image: str,
+        text: str,
+        on_line: Callable[[str], None],
+        timeout: float,
+    ) -> int:
+        """Record the build and send one line to ``on_line``."""
         self.calls.append(("build_image", image, text, timeout))
         on_line("STEP 1/9: FROM debian")
         return self.build_code
 
-    def inspect_container(self, name):
+    def inspect_container(
+        self, name: str
+    ) -> Optional[main.sandbox.ContainerState]:
         """Return the container state."""
         self.calls.append(("inspect_container", name))
         return self.state
 
-    def create_container(self, name, image, workdir):
+    def create_container(self, name: str, image: str, workdir: str) -> None:
         """Create the container."""
         self.calls.append(("create_container", name, image, workdir))
         status = "running" if self.runs_after_create else "exited"
         self.state = main.sandbox.ContainerState(status, workdir)
 
-    def start_container(self, name):
+    def start_container(self, name: str) -> None:
         """Start the container."""
         self.calls.append(("start_container", name))
         self.state = main.sandbox.ContainerState(
             "running", self.state.workspace_source
         )
 
-    def remove_container(self, name):
+    def remove_container(self, name: str) -> subprocess.CompletedProcess[str]:
         """Remove the container."""
         self.calls.append(("remove_container", name))
         self.state = None
         return _proc()
 
-    def run_in_container(self, container, command, timeout=60):
+    def run_in_container(
+        self, container: str, command: Sequence[str], timeout: float = 60
+    ) -> subprocess.CompletedProcess[str]:
         """Answer the health checks."""
         self.calls.append(("run_in_container", tuple(command)))
         if command[0] == "cat":
@@ -1980,7 +2059,7 @@ class _FakeMachine:
             return _proc(0, self.arch + "\n")
         return _proc(0, "Container ready!\n" if command[0] == "echo" else "")
 
-    def names(self):
+    def names(self) -> list[str]:
         """Return the names of the calls, in order."""
         return [call[0] for call in self.calls]
 
@@ -2041,7 +2120,6 @@ class TestNativeEnvironment(_MainTestCase):
         return main.sandbox.ContainerState("running", source)
 
     def test_ready_machine_reuses_image_and_container(self) -> None:
-        """No build and no create when both exist and match."""
         machine = _FakeMachine(state=self._running())
         ok, out = self._setup(machine)
         self.assertTrue(ok)
@@ -2064,7 +2142,6 @@ class TestNativeEnvironment(_MainTestCase):
         )
 
     def test_setup_names_the_machine(self) -> None:
-        """The first setup line says which machine Atesor uses."""
         from src import target
 
         env = {
@@ -2079,7 +2156,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertIn("on tester@board-1 (host board-os)...", out)
 
     def test_missing_image_builds_dockerfile_native(self) -> None:
-        """The debian profile builds Dockerfile.native on the machine."""
         machine = _FakeMachine(image=False)
         ok, out = self._setup(machine)
         self.assertTrue(ok)
@@ -2098,7 +2174,6 @@ class TestNativeEnvironment(_MainTestCase):
         )
 
     def test_rebuild_flag_builds_an_existing_image(self) -> None:
-        """REBUILD_IMAGE=true builds even when the image exists."""
         machine = _FakeMachine(state=self._running())
         ok, _ = self._setup(machine, env={"REBUILD_IMAGE": "true"})
         self.assertTrue(ok)
@@ -2106,7 +2181,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertNotIn("image_exists", machine.names())
 
     def test_failed_build_stops_the_setup(self) -> None:
-        """A failed build creates no container."""
         machine = _FakeMachine(image=False)
         machine.build_code = 1
         ok, out = self._setup(machine)
@@ -2115,7 +2189,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertNotIn("create_container", machine.names())
 
     def test_build_time_limit_is_reported(self) -> None:
-        """A build that hits the time limit fails with its own message."""
         machine = _FakeMachine(image=False)
         machine.build_code = main.sandbox.BUILD_TIMED_OUT
         ok, out = self._setup(machine)
@@ -2123,7 +2196,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertIn("time limit", out)
 
     def test_stale_mount_recreates_the_container(self) -> None:
-        """A container on another work directory is recreated."""
         machine = _FakeMachine(state=self._running("/home/u/old"))
         ok, _ = self._setup(machine)
         self.assertTrue(ok)
@@ -2133,7 +2205,6 @@ class TestNativeEnvironment(_MainTestCase):
         )
 
     def test_stopped_container_is_started(self) -> None:
-        """An exited container with the right mount is started again."""
         machine = _FakeMachine(
             state=main.sandbox.ContainerState("exited", _WORKDIR)
         )
@@ -2143,7 +2214,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertNotIn("create_container", machine.names())
 
     def test_container_that_never_runs_fails(self) -> None:
-        """Two failed starts end the setup."""
         machine = _FakeMachine(image=True)
         machine.runs_after_create = False
         ok, out = self._setup(machine)
@@ -2152,14 +2222,12 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertIn("Failed to start container after 2 attempts", out)
 
     def test_wrong_distro_fails(self) -> None:
-        """An alpine container is not accepted for the debian platform."""
         machine = _FakeMachine(state=self._running(), distro="alpine")
         ok, out = self._setup(machine)
         self.assertFalse(ok)
         self.assertIn("podman rm -f box", out)
 
     def test_wrong_architecture_fails(self) -> None:
-        """A container that is not riscv64 fails the setup."""
         machine = _FakeMachine(state=self._running())
         machine.arch = "x86_64"
         ok, out = self._setup(machine)
@@ -2167,7 +2235,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertIn("'x86_64'", out)
 
     def test_unreachable_machine_fails_cleanly(self) -> None:
-        """A transport error prints one error line and returns False."""
         machine = _FakeMachine()
         machine.image_exists = mock.Mock(
             side_effect=main.sandbox.SandboxUnavailableError("no route")
@@ -2184,7 +2251,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertIn("rung 10", out)
 
     def test_stop_reports_success_and_hides_failures(self) -> None:
-        """The stop prints on success and never raises."""
         output = io.StringIO()
         with (
             mock.patch("src.platforms.get_container_name", return_value="box"),
@@ -2210,7 +2276,6 @@ class TestNativeEnvironment(_MainTestCase):
         self.assertEqual(1, output.getvalue().count("stopped"))
 
     def test_cleanup_removes_container_and_image(self) -> None:
-        """--clean-image removes the container, then the image."""
         output = io.StringIO()
         with (
             mock.patch("src.platforms.get_container_name", return_value="box"),
@@ -2300,7 +2365,7 @@ class TestNativeDockerfiles(unittest.TestCase):
                 self.assertEqual(native, PROFILES[name].native_dockerfile)
 
     def test_native_dockerfile_keeps_the_toolchains(self) -> None:
-        """Dockerfile.native pins the same Go and Rust as the others."""
+        """Dockerfile.native pins the same Go and Rust as Dockerfile.debian."""
         native = self._read("Dockerfile.native")
         debian = self._read("Dockerfile.debian")
         self.assertIn(
@@ -2319,6 +2384,12 @@ class TestNativeDockerfiles(unittest.TestCase):
         for line in native.splitlines():
             self.assertFalse(line.startswith(("COPY", "ADD")), line)
 
+    def test_native_image_has_the_optimize_toolchain(self) -> None:
+        """--optimize needs clang-19 and its PGO tool in the image."""
+        packages = self._read("Dockerfile.native").split()
+        for name in ("clang-19", "lld-19", "llvm-19", "libclang-rt-19-dev"):
+            self.assertIn(name, packages)
+
     def test_alpine_base_name_is_fully_qualified(self) -> None:
         """Podman needs a full image name without a short-name alias."""
         self.assertIn(
@@ -2330,7 +2401,6 @@ class TestHelpFormatter(_MainTestCase):
     """Tests for compact argparse help formatting."""
 
     def test_formatter_combines_short_and_long_option_metavar(self) -> None:
-        """Render one metavar for short and long options."""
         parser = argparse.ArgumentParser(
             prog="atesor-ai",
             formatter_class=main._CleanHelpFormatter,
@@ -2358,7 +2428,6 @@ class TestMainCli(_MainTestCase):
     """Tests for the argparse-driven CLI dispatcher."""
 
     def test_cli_without_repo_or_infra_flag_returns_one(self) -> None:
-        """Require a repo unless an infrastructure-only flag is present."""
         code, patches = self._call_cli([])
 
         self.assertEqual(1, code)
@@ -2366,7 +2435,6 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_not_called()
 
     def test_cli_rejects_invalid_repository_url(self) -> None:
-        """Reject unsafe repository URLs before configuring logging."""
         code, patches = self._call_cli(["--repo", "ssh://example/repo"])
 
         self.assertEqual(1, code)
@@ -2374,7 +2442,6 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_not_called()
 
     def test_cli_setup_only_sets_up_sandbox(self) -> None:
-        """Run sandbox setup without checking keys or running the agent."""
         code, patches = self._call_cli(["--setup-only"])
 
         self.assertEqual(0, code)
@@ -2383,14 +2450,12 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_not_called()
 
     def test_cli_setup_only_failure_returns_one(self) -> None:
-        """Return one when setup-only provisioning fails."""
         code, patches = self._call_cli(["--setup-only"], setup_result=False)
 
         self.assertEqual(1, code)
         patches["setup"].assert_called_once_with()
 
     def test_cli_clean_workspace_dispatches_and_exits(self) -> None:
-        """Run workspace cleanup without provisioning Docker."""
         code, patches = self._call_cli(["--clean-workspace"])
 
         self.assertEqual(0, code)
@@ -2398,7 +2463,6 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_not_called()
 
     def test_cli_cleanup_dispatches_and_exits(self) -> None:
-        """Run container cleanup without repository work."""
         code, patches = self._call_cli(["--cleanup"])
 
         self.assertEqual(0, code)
@@ -2408,17 +2472,13 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_not_called()
 
     def test_cli_clean_image_implies_cleanup(self) -> None:
-        """Remove the image even when --cleanup is omitted."""
         code, patches = self._call_cli(["--clean-image"])
 
         self.assertEqual(0, code)
-        patches["cleanup_container"].assert_called_once_with(
-            remove_image=True
-        )
+        patches["cleanup_container"].assert_called_once_with(remove_image=True)
         patches["setup"].assert_not_called()
 
     def test_cli_cleanup_with_repo_exits_before_porting(self) -> None:
-        """Let cleanup flags win over repository execution."""
         code, patches = self._call_cli(["--cleanup", "--repo", _REPO_URL])
 
         self.assertEqual(0, code)
@@ -2428,7 +2488,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_not_called()
 
     def test_cli_rebuild_without_repo_rebuilds_all_profiles(self) -> None:
-        """Run dual-profile rebuild for --rebuild alone."""
         code, patches = self._call_cli(["--rebuild"])
 
         self.assertEqual(0, code)
@@ -2436,7 +2495,6 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_not_called()
 
     def test_cli_rebuild_failure_returns_one(self) -> None:
-        """Propagate failure from dual-profile rebuild."""
         code, patches = self._call_cli(
             ["--rebuild"],
             rebuild_result=False,
@@ -2446,7 +2504,6 @@ class TestMainCli(_MainTestCase):
         patches["rebuild"].assert_called_once_with()
 
     def test_cli_rebuild_single_platform_uses_setup(self) -> None:
-        """Use one active profile when --platform is explicit."""
         code, patches = self._call_cli(["--rebuild", "--platform", "alpine"])
 
         self.assertEqual(0, code)
@@ -2454,7 +2511,6 @@ class TestMainCli(_MainTestCase):
         patches["setup"].assert_called_once_with()
 
     def test_cli_cache_hit_short_circuits_before_keys_and_docker(self) -> None:
-        """Materialize a cached recipe without provisioning the sandbox."""
         cached = {
             "build_system": "cmake",
             "last_built": "today",
@@ -2481,7 +2537,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_not_called()
 
     def test_cli_cache_hit_reports_materialization_failure(self) -> None:
-        """Return success even if writing the cached recipe fails."""
         cached = {
             "build_system": "make",
             "last_built": "yesterday",
@@ -2526,7 +2581,6 @@ class TestMainCli(_MainTestCase):
                 patches["run_agent"].assert_not_called()
 
     def test_cli_force_bypasses_cache_and_runs_agent(self) -> None:
-        """Run the full pipeline when --force is present."""
         code, patches = self._call_cli(
             [
                 "--repo",
@@ -2552,7 +2606,6 @@ class TestMainCli(_MainTestCase):
         )
 
     def test_cli_key_failure_stops_before_setup(self) -> None:
-        """Do not provision Docker when API keys are invalid."""
         code, patches = self._call_cli(
             ["--repo", _REPO_URL],
             key_result=False,
@@ -2564,7 +2617,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_not_called()
 
     def test_cli_setup_failure_stops_before_agent(self) -> None:
-        """Do not invoke the graph when Docker setup fails."""
         code, patches = self._call_cli(
             ["--repo", _REPO_URL],
             setup_result=False,
@@ -2575,7 +2627,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_not_called()
 
     def test_cli_returns_run_agent_exit_code(self) -> None:
-        """Propagate the graph runner's exit code."""
         code, patches = self._call_cli(
             ["--repo", _REPO_URL],
             agent_code=2,
@@ -2587,8 +2638,7 @@ class TestMainCli(_MainTestCase):
     def test_cli_platform_and_container_overrides_are_set_before_setup(
         self,
     ) -> None:
-        """Set ATESOR overrides before sandbox setup runs."""
-        captured: dict[str, str | None] = {}
+        captured: dict[str, Optional[str]] = {}
 
         def fake_setup() -> bool:
             captured["platform"] = main.os.environ.get("ATESOR_PLATFORM")
@@ -2615,8 +2665,7 @@ class TestMainCli(_MainTestCase):
     def test_cli_rebuild_with_repo_sets_rebuild_image_and_runs_agent(
         self,
     ) -> None:
-        """Set REBUILD_IMAGE for repository rebuilds."""
-        captured: dict[str, str | None] = {}
+        captured: dict[str, Optional[str]] = {}
 
         def fake_setup() -> bool:
             captured["rebuild"] = main.os.environ.get("REBUILD_IMAGE")
@@ -2632,7 +2681,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_called_once()
 
     def test_cli_cleanup_rebuild_with_repo_continues_to_port(self) -> None:
-        """Allow cleanup plus rebuild to proceed into repository work."""
         code, patches = self._call_cli(
             ["--cleanup", "--rebuild", "--repo", _REPO_URL, "--force"]
         )
@@ -2643,7 +2691,6 @@ class TestMainCli(_MainTestCase):
         patches["run_agent"].assert_called_once()
 
     def test_cli_sets_per_repo_llm_log(self) -> None:
-        """Switch the LLM log to the derived repository name."""
         code, patches = self._call_cli(["--repo", _REPO_URL, "--force"])
 
         self.assertEqual(0, code)
@@ -2654,21 +2701,18 @@ class TestMainCli(_MainTestCase):
         )
 
     def test_cli_help_exits_zero(self) -> None:
-        """Let argparse handle --help with SystemExit(0)."""
         with mock.patch("sys.argv", ["atesor-ai", "--help"]):
             with self.assertRaises(SystemExit) as caught:
                 main.main()
         self.assertEqual(0, caught.exception.code)
 
     def test_cli_version_exits_zero(self) -> None:
-        """Let argparse handle --version with SystemExit(0)."""
         with mock.patch("sys.argv", ["atesor-ai", "--version"]):
             with self.assertRaises(SystemExit) as caught:
                 main.main()
         self.assertEqual(0, caught.exception.code)
 
     def test_cli_bad_platform_exits_two(self) -> None:
-        """Let argparse reject unsupported platform choices."""
         with mock.patch(
             "sys.argv",
             ["atesor-ai", "--setup-only", "--platform", "fedora"],
@@ -2678,7 +2722,6 @@ class TestMainCli(_MainTestCase):
         self.assertEqual(2, caught.exception.code)
 
     def test_cli_bad_max_attempts_exits_two(self) -> None:
-        """Let argparse reject non-integer max attempts."""
         with mock.patch(
             "sys.argv",
             ["atesor-ai", "--repo", _REPO_URL, "--max-attempts", "x"],
@@ -2688,7 +2731,6 @@ class TestMainCli(_MainTestCase):
         self.assertEqual(2, caught.exception.code)
 
     def test_module_entrypoint_loads_atesor_home_env_and_exits(self) -> None:
-        """Exercise top-level env loading and __main__ dispatch."""
         atesor_home = str(self.temp_path / "atesor-home")
         with (
             mock.patch.dict(
@@ -2703,6 +2745,7 @@ class TestMainCli(_MainTestCase):
                 runpy.run_path(str(Path(main.__file__)), run_name="__main__")
 
         self.assertEqual(0, caught.exception.code)
+        # Call 0 is the bare load_dotenv(); the candidate paths follow.
         env_paths = [call.args[0] for call in load_dotenv.call_args_list[1:]]
         self.assertEqual(os.path.join(atesor_home, ".env"), env_paths[0])
 
@@ -2711,7 +2754,6 @@ class TestReportDataclassShapes(_MainTestCase):
     """Tests report rendering with AgentState-derived shapes."""
 
     def test_report_handles_build_plan_dataclass_dict_shape(self) -> None:
-        """Render a report from AgentState.to_dict()-style values."""
         state = create_initial_state(_REPO_URL)
         state.build_status = BuildStatus.SUCCESS
         state.build_plan = BuildPlan(
@@ -2744,6 +2786,510 @@ class TestReportDataclassShapes(_MainTestCase):
         self.assertIn("Build System**: make", report)
         self.assertIn("make", report)
         self.assertIn("zlib-dev", report)
+
+
+class TestPerformanceMode(_MainTestCase):
+    """--optimize, --emulate-cpu and --probe from the CLI to the zip."""
+
+    def _optimization(self) -> dict:
+        return {
+            "status": "accepted",
+            "kind": "native",
+            "reason": "Tune-3 (GCC -O3) takes 10.0% less time than the "
+            "verified build (time ratio 0.9)",
+            "accepted": "tune3",
+            "accepted_label": "Tune-3",
+            "accepted_title": "GCC -O3",
+            "accepted_ratio": 0.9,
+            "accepted_dir": "/workspace/repos/project.opt/accepted",
+            "duration_seconds": 1200.0,
+            "budget_seconds": 3600,
+            "package": {
+                "kind": "library",
+                "language": "c",
+                "build_system": "cmake",
+                "libraries": ["build/libdemo.so.1"],
+                "programs": [],
+            },
+            "baseline": {
+                "build_seconds": 31.0,
+                "same_code": 1,
+                "artifacts": 1,
+            },
+            "workload": {
+                "mode": "harness",
+                "command": "{bin} {input}",
+                "description": "sum the input",
+                "origin": "agent",
+                "source_language": "c",
+                "iterations": 12,
+                "run_seconds": 1.9,
+                "files": {
+                    ".atesor/bench/harness.c": "int main(void) { return 0; }\n"
+                },
+            },
+            "warnings": ["cpufreq governor is ondemand"],
+            "notes": ["not repeated: apt-get install -y cmake"],
+            "variants": [
+                {
+                    "variant": {
+                        "vid": "tune1",
+                        "label": "Tune-1",
+                        "technique": "core tuning",
+                        "value": "-mtune=sifive-p550",
+                        "compiler": "gcc",
+                        "flags": ["-mtune=sifive-p550"],
+                        "env": {},
+                    },
+                    "verdict": "no change",
+                    "ratio": 0.99,
+                    "reason": "median time ratio 0.99",
+                },
+                {
+                    "variant": {
+                        "vid": "tune3",
+                        "label": "Tune-3",
+                        "technique": "optimization level",
+                        "value": "-O3",
+                        "compiler": "gcc",
+                        "flags": ["-O3"],
+                        "env": {},
+                    },
+                    "verdict": "faster",
+                    "ratio": 0.9,
+                    "measurement": {
+                        "comparison": {"ci_low": 0.89, "ci_high": 0.91}
+                    },
+                    "reason": "median time ratio 0.9 | p=0.001",
+                },
+                {
+                    "variant": {
+                        "vid": "tune4",
+                        "label": "Tune-4",
+                        "technique": "link-time optimization",
+                        "value": "-flto=auto",
+                        "compiler": "gcc",
+                        "flags": ["-O3", "-flto=auto"],
+                        "env": {},
+                    },
+                    "verdict": "same as tune3",
+                    "same_as_label": "Tune-3",
+                    "ratio": 0.9,
+                    "reason": "result reused",
+                },
+            ],
+        }
+
+    def test_optimize_builds_from_a_verified_cached_recipe(self) -> None:
+        """--optimize skips the fast path and builds the cached recipe."""
+        cached = {
+            "build_system": "cmake",
+            "last_built": "2026-10-02",
+            "verification": {"status": "verified"},
+        }
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--optimize", "--emulate-cpu", "rva22u64"],
+            cache=cached,
+        )
+        self.assertEqual(0, code)
+        patches["materialize"].assert_not_called()
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+            cached_recipe=cached,
+            emulate_cpu="rva22u64",
+        )
+
+    def test_optimize_plans_again_without_a_verified_recipe(self) -> None:
+        """An unverified entry, or --force, means a full port."""
+        for args, cache in (
+            (
+                ["--optimize"],
+                {
+                    "build_system": "cmake",
+                    "verification": {"status": "unverified"},
+                },
+            ),
+            (["--optimize"], None),
+            (
+                ["--optimize", "--force"],
+                {
+                    "build_system": "cmake",
+                    "verification": {"status": "verified"},
+                },
+            ),
+        ):
+            with self.subTest(args=args, cache=bool(cache)):
+                code, patches = self._call_cli(
+                    ["--repo", _REPO_URL] + args, cache=cache
+                )
+                self.assertEqual(0, code)
+                patches["run_agent"].assert_called_once_with(
+                    repo_url=_REPO_URL,
+                    max_attempts=5,
+                    verbose=False,
+                    package=False,
+                    optimize=True,
+                )
+                if "--force" in args:
+                    patches["get_cached"].assert_not_called()
+
+    def test_bad_model_and_probe_with_repo_stop_early(self) -> None:
+        for model in ("max;reboot", "2"):
+            with self.subTest(model=model):
+                code, patches = self._call_cli(
+                    ["--repo", _REPO_URL, "--optimize", "--emulate-cpu", model]
+                )
+                self.assertEqual(1, code)
+                patches["run_agent"].assert_not_called()
+        code, patches = self._call_cli(["--probe", "--repo", _REPO_URL])
+        self.assertEqual(1, code)
+        patches["setup"].assert_not_called()
+
+    def test_emulate_cpu_falls_back_to_the_environment(self) -> None:
+        with mock.patch.dict(os.environ, {"ATESOR_QEMU_CPU": " rva22u64 "}):
+            self.assertEqual(main._emulate_cpu_value(None), "rva22u64")
+            self.assertEqual(main._emulate_cpu_value("rv64"), "rv64")
+        with mock.patch.dict(os.environ, {"ATESOR_QEMU_CPU": ""}):
+            self.assertIsNone(main._emulate_cpu_value(None))
+
+    def test_model_only_matters_for_performance_mode(self) -> None:
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--emulate-cpu", "2"]
+        )
+        self.assertEqual(0, code)
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+        )
+
+    def test_probe_needs_no_api_key(self) -> None:
+        with mock.patch.object(main, "_run_probe", return_value=0) as probe:
+            code, patches = self._call_cli(["--probe"])
+        self.assertEqual(0, code)
+        probe.assert_called_once()
+        patches["check_keys"].assert_not_called()
+        patches["run_agent"].assert_not_called()
+
+    def test_run_probe_prints_and_saves_the_profile(self) -> None:
+        import json
+
+        from src.machine import MachineProfile
+
+        profile = MachineProfile(
+            kind="qemu",
+            emulated_cpu="rva22u64",
+            extensions=["a", "c", "d", "f", "i", "m", "zba", "zbb", "zbs"],
+            label="rv64gc+zba+zbb+zbs",
+        )
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            mock.patch.object(
+                main, "setup_docker_environment", return_value=True
+            ),
+            mock.patch(
+                "src.machine.probe_machine", return_value=(profile, None)
+            ) as probe,
+            contextlib.redirect_stdout(out),
+        ):
+            code = main._run_probe(
+                argparse.Namespace(emulate_cpu="rva22u64"), native=False
+            )
+            saved = os.path.join(main.OUTPUT_DIR, "machine_profile_qemu.json")
+            with open(saved) as handle:
+                data = json.load(handle)
+        self.assertEqual(0, code)
+        probe.assert_called_once_with("qemu", "rva22u64")
+        self.assertIn("ISA label:   rv64gc+zba+zbb+zbs", out.getvalue())
+        self.assertEqual(data["emulated_cpu"], "rva22u64")
+
+    def test_native_probe_failure_still_stops_the_container(self) -> None:
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                main, "setup_native_environment", return_value=True
+            ),
+            mock.patch.object(main, "stop_native_container") as stop,
+            mock.patch(
+                "src.machine.probe_machine",
+                return_value=(None, "exit 1: boom"),
+            ) as probe,
+            contextlib.redirect_stdout(out),
+        ):
+            code = main._run_probe(
+                argparse.Namespace(emulate_cpu="rva22u64"), native=True
+            )
+        self.assertEqual(1, code)
+        stop.assert_called_once_with()
+        probe.assert_called_once_with("native", None)
+        self.assertIn("ignored on the native target", out.getvalue())
+        self.assertIn("boom", out.getvalue())
+
+    def test_native_run_removes_the_variant_trees(self) -> None:
+        args = argparse.Namespace(
+            repo=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+            emulate_cpu=None,
+            setup_only=False,
+            rebuild=False,
+        )
+        with (
+            mock.patch.object(
+                main, "setup_native_environment", return_value=True
+            ),
+            mock.patch.object(main, "run_agent", return_value=0) as run,
+            mock.patch.object(main, "remove_native_repo") as remove,
+            mock.patch.object(main, "stop_native_container"),
+            mock.patch.object(
+                main, "_verified_cached_recipe", return_value=None
+            ),
+        ):
+            self.assertEqual(0, main._run_native(args, infra_only=False))
+        run.assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+        )
+        self.assertEqual(
+            remove.call_args_list,
+            [mock.call("project"), mock.call("project.opt")],
+        )
+
+    def test_report_has_the_performance_section(self) -> None:
+        """The report lists every tune; without --optimize, nothing."""
+        state = {
+            "repo_name": "demo",
+            "build_status": "SUCCESS",
+            "artifact_verification": {"status": "verified"},
+            "optimization": self._optimization(),
+            "machine_profile": {
+                "kind": "native",
+                "label": "rv64gc+zba+zbb",
+                "core_name": "sifive-p550",
+                "misaligned": "slow",
+                "misaligned_source": "timing test",
+            },
+        }
+        report = main.generate_detailed_report(state)
+        self.assertIn("## Performance Mode (--optimize)", report)
+        self.assertIn(
+            "**Optimized**: YES: Tune-3 (GCC -O3) is 10.0% faster than the "
+            "verified build",
+            report,
+        )
+        self.assertIn(
+            "**Result**: accepted: Tune-3 (GCC -O3) takes 10.0% less time",
+            report,
+        )
+        self.assertIn(
+            "core sifive-p550, misaligned access slow (source: timing "
+            "test)",
+            report,
+        )
+        self.assertIn(
+            "**Package**: library (c, cmake); libraries: "
+            "build/libdemo.so.1; programs: none",
+            report,
+        )
+        self.assertIn("rebuilt in a copy in 31.0s; 1 of 1 riscv64", report)
+        self.assertIn(
+            "**Workload**: C harness by the optimizer agent: sum the "
+            "input, N=12, 1.90 s per run",
+            report,
+        )
+        self.assertIn(
+            "| Tune-3 | optimization level | gcc -O3 | 10.0% faster | "
+            "0.9 (0.89-0.91) | median time ratio 0.9 / p=0.001 |",
+            report,
+        )
+        self.assertIn(
+            "| Tune-4 | link-time optimization | gcc -O3 "
+            "-flto=auto | same code as Tune-3, 10.0% faster |",
+            report,
+        )
+        self.assertIn("### Workload source: `.atesor/bench/harness.c`", report)
+        self.assertIn("```c\nint main(void) { return 0; }\n```", report)
+        self.assertIn("- not repeated: apt-get install -y cmake", report)
+        self.assertIn("## Machine Profile", report)
+        self.assertIn("ISA label:   rv64gc+zba+zbb", report)
+        self.assertLess(
+            report.index("## Machine Profile"),
+            report.index("## Performance Mode"),
+        )
+        plain = main.generate_detailed_report(
+            {"repo_name": "demo", "build_status": "SUCCESS"}
+        )
+        self.assertNotIn("Performance Mode", plain)
+        self.assertNotIn("Machine Profile", plain)
+
+    def test_optimize_step_prints_its_header_first(self) -> None:
+        """The optimize step header prints first, and only with --optimize."""
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            yield {"finish_node": state}
+            if state.optimize_requested:
+                print("   Tune-1   : core tuning = -mtune=x", flush=True)
+                state.optimization = {
+                    "status": "no gain",
+                    "reason": "nothing",
+                    "variants": [],
+                }
+                yield {"optimize_node": state}
+
+        from src.graph import route_finish_to_next
+
+        for optimize in (True, False):
+            out = io.StringIO()
+            # The real routing rule decides whether the optimize step
+            # follows.
+            fake_graph = SimpleNamespace(
+                app=_FakeApp(stream_factory),
+                route_finish_to_next=route_finish_to_next,
+            )
+            with (
+                self.subTest(optimize=optimize),
+                self._patched_main_paths(),
+                mock.patch.dict(sys.modules, {"src.graph": fake_graph}),
+                mock.patch(
+                    "src.platforms.get_active_profile",
+                    return_value=self._profile(),
+                ),
+                mock.patch.object(main, "save_porting_outputs"),
+                contextlib.redirect_stdout(out),
+            ):
+                code = main.run_agent(_REPO_URL, optimize=optimize)
+            self.assertEqual(0, code)
+            text = out.getvalue()
+            self.assertIn("[Step 1] finish_node", text)
+            if optimize:
+                header = text.index("[Step 2] optimize_node")
+                self.assertLess(header, text.index("Status: OPTIMIZING"))
+                self.assertLess(
+                    text.index("Status: OPTIMIZING"),
+                    text.index("Tune-1   : core tuning"),
+                )
+                self.assertEqual(text.count("[Step 2]"), 1)
+                self.assertNotIn("[Step 3]", text)
+                self.assertIn(
+                    "Optimized: NO: no tune was clearly faster than the "
+                    "verified build",
+                    text,
+                )
+                self.assertIn("Why: nothing", text)
+            else:
+                self.assertNotIn("optimize_node", text)
+                self.assertNotIn("OPTIMIZING", text)
+
+    def test_run_agent_packages_the_accepted_variant(self) -> None:
+        package_build = mock.MagicMock(return_value="pkg.zip")
+        record = self._optimization()
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            state.optimization = record
+            state.machine_profile = {"kind": "qemu"}
+            yield {"Finish": state}
+
+        fake_packager = SimpleNamespace(package_build=package_build)
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(_FakeApp(stream_factory)),
+            mock.patch.dict(sys.modules, {"src.packager": fake_packager}),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile("debian"),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(out),
+        ):
+            code = main.run_agent(_REPO_URL, package=True, optimize=True)
+            repos_dir = main.REPOS_DIR
+
+        self.assertEqual(0, code)
+        kwargs = package_build.call_args.kwargs
+        self.assertEqual(
+            kwargs["optimized_dir"],
+            os.path.join(repos_dir, "project.opt", "accepted"),
+        )
+        self.assertEqual(kwargs["optimization"], record)
+        self.assertEqual(kwargs["machine"], {"kind": "qemu"})
+        text = out.getvalue()
+        self.assertIn("Optimize:    yes", text)
+        self.assertIn(
+            "Optimized: YES: Tune-3 (GCC -O3) is 10.0% faster than the "
+            "verified build",
+            text,
+        )
+        self.assertNotIn("Why:", text)
+        self.assertRegex(
+            text,
+            r"Tune-3 +optimization level +-O3 +10\.0% faster  " r"<- accepted",
+        )
+        self.assertRegex(
+            text,
+            r"Tune-1 +core tuning +-mtune=sifive-p550 +1\.0% faster "
+            r"\(inside the noise\)",
+        )
+        self.assertRegex(
+            text,
+            r"Tune-4 +link-time optimization +-flto=auto +same code "
+            r"as Tune-3, 10\.0% faster",
+        )
+        self.assertIn(
+            "Optimized files: /workspace/repos/project.opt/accepted",
+            text,
+        )
+
+    def test_header_names_the_cached_recipe(self) -> None:
+        def stream_factory(state):
+            self.assertEqual(state.cached_recipe["build_system"], "cmake")
+            state.build_status = BuildStatus.SUCCESS
+            state.artifact_verification = {"status": "verified"}
+            yield {"Finish": state}
+
+        cached = {
+            "build_system": "cmake",
+            "last_built": "2026-10-02T15:35:35",
+            "verification": {
+                "status": "verified",
+                "source_commit": "767c4c947852e143f58",
+            },
+        }
+        out = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(_FakeApp(stream_factory)),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            contextlib.redirect_stdout(out),
+        ):
+            code = main.run_agent(
+                _REPO_URL, optimize=True, cached_recipe=cached
+            )
+        self.assertEqual(0, code)
+        self.assertIn(
+            "Recipe:      from the cache (verified run of "
+            "2026-10-02T15:35:35, commit 767c4c947852); no new planning",
+            out.getvalue(),
+        )
 
 
 if __name__ == "__main__":

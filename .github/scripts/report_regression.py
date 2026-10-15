@@ -5,14 +5,16 @@ Reads ``results-<category>.xml`` JUnit files and the matching
 ``paths-<category>.txt`` file lists produced by the regression-tests
 workflow matrix, then:
 
-    1. Writes a Markdown results table to ``$GITHUB_STEP_SUMMARY``
-       (falls back to stdout when unset).
+    1. Prints a Markdown results table to stdout and also appends it
+       to ``$GITHUB_STEP_SUMMARY`` when that variable is set (it is
+       set on GitHub Actions runners, unset locally).
     2. Verifies every ``tests/test_*.py`` file in the repository is
        claimed by exactly one category, so new test files cannot
        silently escape CI.
 
-Exits non-zero when any category reports failures or errors, or when
-a test file is uncategorized or double-categorized.
+Exits non-zero when any category reports failures or errors, when a
+test file is uncategorized or double-categorized, when a category
+claims a missing file, or when no ``results-*.xml`` file exists.
 
 Example::
 
@@ -68,7 +70,7 @@ def collect_categories(
     pattern = os.path.join(results_dir, "results-*.xml")
     for xml_path in sorted(glob.glob(pattern)):
         base = os.path.basename(xml_path)
-        category = base[len("results-"):-len(".xml")]
+        category = base[len("results-") : -len(".xml")]
         paths_file = os.path.join(results_dir, f"paths-{category}.txt")
         claimed: List[str] = []
         if os.path.exists(paths_file):
@@ -84,6 +86,8 @@ def check_coverage(
 ) -> List[str]:
     """Verify every test file is claimed by exactly one category.
 
+    A claimed path that does not exist is also a problem.
+
     Args:
         rows: Output of :func:`collect_categories`.
         tests_dir: Repository directory containing ``test_*.py`` files.
@@ -95,9 +99,7 @@ def check_coverage(
     claims: Dict[str, List[str]] = {}
     for category, _, claimed in rows:
         for path in claimed:
-            claims.setdefault(os.path.normpath(path), []).append(
-                category
-            )
+            claims.setdefault(os.path.normpath(path), []).append(category)
     repo_files = sorted(
         os.path.normpath(p)
         for p in glob.glob(os.path.join(tests_dir, "test_*.py"))
@@ -105,9 +107,7 @@ def check_coverage(
     for path in repo_files:
         owners = claims.get(path, [])
         if not owners:
-            problems.append(
-                f"`{path}` is not part of any workflow category"
-            )
+            problems.append(f"`{path}` is not part of any workflow category")
         elif len(owners) > 1:
             problems.append(
                 f"`{path}` is claimed by multiple categories: "
@@ -116,8 +116,7 @@ def check_coverage(
     for path, owners in sorted(claims.items()):
         if path not in repo_files:
             problems.append(
-                f"category {owners[0]} references missing file "
-                f"`{path}`"
+                f"category {owners[0]} references missing file " f"`{path}`"
             )
     return problems
 
@@ -167,10 +166,7 @@ def build_summary(
             f"| {totals['time']:.1f} |"
         )
     grand_passed = (
-        grand["tests"]
-        - grand["failures"]
-        - grand["errors"]
-        - grand["skipped"]
+        grand["tests"] - grand["failures"] - grand["errors"] - grand["skipped"]
     )
     lines.append(
         f"| **Total** | **{int(grand['tests'])}** "

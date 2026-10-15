@@ -22,7 +22,9 @@ Profiles are auto-detected from the active container's
 ``ATESOR_PLATFORM`` env var or the ``--platform`` CLI flag (handled in
 main.py).
 
-Adding a new profile = one PROFILES entry; nothing else changes.
+Adding a new profile needs one PROFILES entry, a Dockerfile, and the
+profile name in the ``--platform`` choices in main.py and in
+``target.NATIVE_PLATFORMS``.
 """
 
 from __future__ import annotations
@@ -38,9 +40,7 @@ from .target import NATIVE, target_name_from_env
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------------------------------------------------------
 # Profile dataclass
-# ----------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class PlatformProfile:
     """Distro-specific knowledge needed to install packages and build code."""
 
     # Identity
-    name: str  # "alpine", "debian", "ubuntu"
+    name: str  # "alpine", "debian"
     display_name: str  # human-readable, used in prompts
     libc: str  # "musl", "glibc"
     target_triplet: str  # e.g. "riscv64-alpine-linux-musl"
@@ -74,7 +74,7 @@ class PlatformProfile:
     # Free-form notes appended to the system_knowledge prompt block
     extra_notes: List[str] = field(default_factory=list)
 
-    # -- convenience helpers --------------------------------------------------
+    # Convenience helpers
 
     def install_cmd(self, packages: List[str]) -> str:
         """Return a one-shot ``update && install`` command.
@@ -100,9 +100,7 @@ class PlatformProfile:
         return self.package_map.get(canonical, canonical)
 
 
-# ----------------------------------------------------------------------------
 # Profile definitions
-# ----------------------------------------------------------------------------
 
 ALPINE_RISCV = PlatformProfile(
     name="alpine",
@@ -448,9 +446,7 @@ PROFILES: Dict[str, PlatformProfile] = {
 }
 
 
-# ----------------------------------------------------------------------------
 # Detection & access
-# ----------------------------------------------------------------------------
 
 _DEFAULT_PROFILE = ALPINE_RISCV
 _cached_profile: Optional[PlatformProfile] = None
@@ -464,12 +460,14 @@ def detect_platform(container_name: Optional[str] = None) -> PlatformProfile:
     ``ATESOR_PLATFORM`` (the ``--platform`` flag) wins over any
     container: batch passes ``--platform`` and ``--container`` together,
     and a new worker container does not exist yet when the profile is
-    chosen. On native nothing is inspected, because the container runs
-    on the machine and a local ``docker exec`` cannot see it.
+    chosen. On native, the function inspects nothing and returns
+    ALPINE_RISCV, because the container runs on the machine and a local
+    ``docker exec`` cannot see it.
 
     Args:
-        container_name: Container to inspect. Defaults to the active
-            container when ``None``.
+        container_name: Container to inspect. When ``None``, the
+            function uses ``ATESOR_CONTAINER`` or the Alpine profile's
+            default container name.
 
     Returns:
         The detected platform profile.
@@ -567,7 +565,11 @@ def get_container_name() -> str:
 def set_active_profile(
     profile_or_name: Union[str, PlatformProfile],
 ) -> PlatformProfile:
-    """Manually set the cached active profile (used by CLI override).
+    """Manually set the cached active profile.
+
+    ``rebuild_all_sandboxes`` in main.py uses it to switch platforms.
+    The ``--platform`` flag does not call it; the flag sets
+    ``ATESOR_PLATFORM`` instead.
 
     Args:
         profile_or_name: A profile object, or a profile key in PROFILES.

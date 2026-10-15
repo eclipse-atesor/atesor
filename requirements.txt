@@ -6,6 +6,7 @@ langchain>=0.1.0
 langchain-core>=0.1.0
 langchain-openai>=0.0.5
 langchain-google-genai>=0.0.6
+langchain-anthropic>=1.7.6
 langgraph>=0.0.40
 
 # LLM Providers

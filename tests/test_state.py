@@ -1,4 +1,4 @@
-"""Aggressive tests for src/state.py.
+"""Tests for src/state.py.
 
 src/state.py is the single source of truth for agent state.
 
@@ -6,7 +6,8 @@ These cover:
   * AgentState construction + mutation helpers (add_error,
     add_fix_attempt, caches, audit trail, command-key collisions).
   * Enum stability (string serialization, no accidental renames).
-  * classify_error: parametrized over every known pattern, including:
+  * classify_error: parametrized over a sample message for every
+    branch, including:
       - ordering hazards ("rate limit" must beat "timeout"),
       - Go-specific signatures,
       - Python exception class names → CONFIGURATION,
@@ -48,16 +49,13 @@ from src.state import (
     should_escalate,
 )
 
-# ===========================================================================
-# create_initial_state + AgentState construction
-# ===========================================================================
+# create_initial_state and AgentState construction
 
 
 class TestInitialState(unittest.TestCase):
-    """Tests for InitialState."""
+    """Tests for create_initial_state."""
 
     def test_initial_state_basic(self) -> None:
-        """Test initial state basic."""
         state = create_initial_state("https://github.com/madler/zlib")
         self.assertEqual(state.repo_name, "zlib")
         self.assertEqual(state.repo_path, "/workspace/repos/zlib")
@@ -69,22 +67,34 @@ class TestInitialState(unittest.TestCase):
         self.assertEqual(state.current_phase, "initialization")
 
     def test_repo_name_strips_dot_git(self) -> None:
-        """Test repo name strips dot git."""
         state = create_initial_state("https://github.com/foo/bar.git")
         self.assertEqual(state.repo_name, "bar")
         self.assertEqual(state.repo_path, "/workspace/repos/bar")
 
     def test_repo_name_strips_trailing_slash(self) -> None:
-        """Test repo name strips trailing slash."""
         state = create_initial_state("https://github.com/foo/bar/")
         self.assertEqual(state.repo_name, "bar")
 
     def test_custom_max_attempts_honored(self) -> None:
-        """Test custom max attempts honored."""
         state = create_initial_state(
             "https://github.com/foo/bar", max_attempts=12
         )
         self.assertEqual(state.max_attempts, 12)
+
+    def test_performance_mode_fields(self) -> None:
+        """--optimize and --emulate-cpu reach the state; off by default."""
+        plain = create_initial_state("https://github.com/foo/bar")
+        self.assertFalse(plain.optimize_requested)
+        self.assertIsNone(plain.emulate_cpu)
+        self.assertIsNone(plain.optimization)
+        self.assertIsNone(plain.machine_profile)
+        state = create_initial_state(
+            "https://github.com/foo/bar",
+            optimize=True,
+            emulate_cpu="rva22u64",
+        )
+        self.assertTrue(state.optimize_requested)
+        self.assertEqual(state.emulate_cpu, "rva22u64")
 
     def test_history_collections_are_independent_instances(self) -> None:
         """Regression: mutable defaults must use field(default_factory)."""
@@ -100,20 +110,16 @@ class TestInitialState(unittest.TestCase):
         )
 
 
-# ===========================================================================
-# add_error / log_api_call / cache / audit trail
-# ===========================================================================
+# add_error, log_api_call, caches and the audit trail
 
 
 class TestStateMutation(unittest.TestCase):
-    """Tests for StateMutation."""
+    """Tests for AgentState mutation helpers."""
 
     def setUp(self) -> None:
-        """Set up test fixtures."""
         self.state = create_initial_state("https://github.com/x/y")
 
     def test_add_error_updates_all_fields_and_attempt(self) -> None:
-        """Test add error updates all fields and attempt."""
         err = create_error_record(
             "Permission denied", ErrorCategory.PERMISSION
         )
@@ -129,7 +135,6 @@ class TestStateMutation(unittest.TestCase):
         self.assertEqual(len(self.state.error_history), 1)
 
     def test_consecutive_add_error_increments_attempts(self) -> None:
-        """Test consecutive add error increments attempts."""
         for i in range(4):
             self.state.add_error(
                 create_error_record(f"err {i}", ErrorCategory.COMPILATION)
@@ -138,7 +143,6 @@ class TestStateMutation(unittest.TestCase):
         self.assertEqual(len(self.state.error_history), 4)
 
     def test_log_api_call_accumulates_cost(self) -> None:
-        """Test log api call accumulates cost."""
         self.state.log_api_call(cost=0.01)
         self.state.log_api_call(cost=0.005)
         self.state.log_api_call()  # default 0
@@ -146,18 +150,15 @@ class TestStateMutation(unittest.TestCase):
         self.assertAlmostEqual(self.state.api_cost_usd, 0.015)
 
     def test_command_cache_stores_and_retrieves(self) -> None:
-        """Test command cache stores and retrieves."""
         cr = CommandResult("ls -la", 0, "out", "", 0.1)
         self.state.cache_command_result("ls -la", cr)
         got = self.state.get_cached_command_result("ls -la")
         self.assertIs(got, cr)
 
     def test_command_cache_miss_returns_none(self) -> None:
-        """Test command cache miss returns none."""
         self.assertIsNone(self.state.get_cached_command_result("never-run"))
 
     def test_command_cache_keyed_by_hash_avoids_collisions(self) -> None:
-        """Test command cache keyed by hash avoids collisions."""
         a = CommandResult("a", 0, "A", "", 0.1)
         b = CommandResult("b", 0, "B", "", 0.1)
         self.state.cache_command_result("a", a)
@@ -166,7 +167,6 @@ class TestStateMutation(unittest.TestCase):
         self.assertEqual(self.state.get_cached_command_result("b").stdout, "B")
 
     def test_log_event_records_agent_and_timestamp(self) -> None:
-        """Test log event records agent and timestamp."""
         self.state.current_agent = AgentRole.SCOUT
         self.state.log_event("test_event", {"foo": 1})
         events = self.state.get_last_audit_events(limit=1)
@@ -174,11 +174,9 @@ class TestStateMutation(unittest.TestCase):
         self.assertEqual(events[0]["event"], "test_event")
         self.assertEqual(events[0]["agent"], "scout")
         self.assertEqual(events[0]["data"], {"foo": 1})
-        # ISO timestamp present
         self.assertIn("T", events[0]["timestamp"])
 
     def test_get_last_audit_events_limit(self) -> None:
-        """Test get last audit events limit."""
         for i in range(10):
             self.state.log_event(f"e{i}", {})
         self.assertEqual(len(self.state.get_last_audit_events(limit=3)), 3)
@@ -187,14 +185,12 @@ class TestStateMutation(unittest.TestCase):
         )
 
     def test_log_agent_decision_writes_decision_record(self) -> None:
-        """Test log agent decision writes decision record."""
         self.state.log_agent_decision(AgentRole.SUPERVISOR, "SCOUT", "because")
         last = self.state.audit_trail[-1]
         self.assertEqual(last["event"], "decision")
         self.assertEqual(last["data"]["action"], "SCOUT")
 
     def test_add_build_artifact_records_metadata(self) -> None:
-        """Test add build artifact records metadata."""
         self.state.add_build_artifact(
             "/p/binary", "binary", architecture="RISC-V"
         )
@@ -205,16 +201,13 @@ class TestStateMutation(unittest.TestCase):
         self.assertEqual(art["architecture"], "RISC-V")
 
 
-# ===========================================================================
 # Error loop detection
-# ===========================================================================
 
 
 class TestErrorLoop(unittest.TestCase):
-    """Tests for ErrorLoop."""
+    """Tests for is_in_error_loop."""
 
     def test_not_a_loop_with_fewer_than_three(self) -> None:
-        """Test not a loop with fewer than three."""
         state = create_initial_state("https://github.com/a/b")
         for _ in range(2):
             state.add_error(
@@ -223,7 +216,6 @@ class TestErrorLoop(unittest.TestCase):
         self.assertFalse(state.is_in_error_loop())
 
     def test_loop_when_three_consecutive_same_signature(self) -> None:
-        """Test loop when three consecutive errors have same signature."""
         state = create_initial_state("https://github.com/a/b")
         for _ in range(3):
             state.add_error(
@@ -260,7 +252,6 @@ class TestErrorLoop(unittest.TestCase):
         self.assertTrue(state.is_in_error_loop())
 
     def test_mixed_categories_not_a_loop(self) -> None:
-        """Test mixed categories not a loop."""
         state = create_initial_state("https://github.com/a/b")
         state.add_error(create_error_record("a", ErrorCategory.COMPILATION))
         state.add_error(create_error_record("b", ErrorCategory.LINKING))
@@ -268,7 +259,6 @@ class TestErrorLoop(unittest.TestCase):
         self.assertFalse(state.is_in_error_loop())
 
     def test_loop_examines_only_last_three(self) -> None:
-        """Older errors must not prevent loop detection on the last 3."""
         state = create_initial_state("https://github.com/a/b")
         state.add_error(create_error_record("old", ErrorCategory.NETWORK))
         for _ in range(3):
@@ -278,16 +268,15 @@ class TestErrorLoop(unittest.TestCase):
         self.assertTrue(state.is_in_error_loop())
 
 
-# ===========================================================================
-# classify_error — exhaustive parametrized tests
-# ===========================================================================
+# classify_error
 
 
 class TestClassifyError(unittest.TestCase):
-    """Tests for ClassifyError."""
+    """Tests for classify_error."""
 
-    # (message, expected category) tuples — covers every branch in
-    # state.classify_error.
+    # (message, expected category) tuples. With the cases in
+    # TestRiscvToolchainClassification and TestUncoveredHelperBranches,
+    # they reach every return in state.classify_error.
     CASES = [
         # Rate limiting (must beat network "timeout" check)
         ("HTTP 429 Too Many Requests", ErrorCategory.RATE_LIMIT),
@@ -312,8 +301,9 @@ class TestClassifyError(unittest.TestCase):
             ErrorCategory.CONFIGURATION,
         ),
         ("autoreconf: error: aclocal failed", ErrorCategory.CONFIGURATION),
-        # Compilation
+        # Linking is checked before compilation.
         ("undefined reference to 'main'", ErrorCategory.LINKING),
+        # Compilation
         ("error: 'foo' undeclared", ErrorCategory.COMPILATION),
         ("implicit declaration of function", ErrorCategory.COMPILATION),
         ("PATH_MAX unset, refusing to compile", ErrorCategory.COMPILATION),
@@ -386,7 +376,6 @@ class TestClassifyError(unittest.TestCase):
     ]
 
     def test_all_known_patterns(self) -> None:
-        """Test all known patterns."""
         for msg, expected in self.CASES:
             with self.subTest(msg=msg):
                 self.assertEqual(
@@ -403,7 +392,6 @@ class TestClassifyError(unittest.TestCase):
         )
 
     def test_classify_is_case_insensitive(self) -> None:
-        """Test classify is case insensitive."""
         self.assertEqual(
             classify_error("CMAKE: NOT FOUND"), ErrorCategory.MISSING_TOOLS
         )
@@ -515,7 +503,7 @@ class TestRiscvToolchainClassification(unittest.TestCase):
             ErrorCategory.DEPENDENCY,
         ),
         ("ERROR: Unable to lock database", ErrorCategory.DEPENDENCY),
-        ("#error \"Unsupported architecture\"", ErrorCategory.ARCHITECTURE),
+        ('#error "Unsupported architecture"', ErrorCategory.ARCHITECTURE),
         ("No space left on device", ErrorCategory.DISK_SPACE),
         ("Error: unrecognized opcode `rdtsc'", ErrorCategory.ARCHITECTURE),
         (
@@ -559,16 +547,13 @@ class TestRiscvToolchainClassification(unittest.TestCase):
                 self.assertEqual(classify_error(message), expected)
 
 
-# ===========================================================================
 # infer_failure_severity
-# ===========================================================================
 
 
 class TestInferFailureSeverity(unittest.TestCase):
-    """Tests for InferFailureSeverity."""
+    """Tests for infer_failure_severity."""
 
     def test_which_probe_is_low(self) -> None:
-        """Test which probe is low."""
         self.assertEqual(
             infer_failure_severity(
                 ErrorCategory.MISSING_TOOLS, command="which ninja"
@@ -577,7 +562,6 @@ class TestInferFailureSeverity(unittest.TestCase):
         )
 
     def test_high_categories_always_high(self) -> None:
-        """Test high categories always high."""
         for cat in [
             ErrorCategory.LICENSE_INCOMPATIBLE,
             ErrorCategory.REQUIRES_HARDWARE,
@@ -591,7 +575,6 @@ class TestInferFailureSeverity(unittest.TestCase):
                 )
 
     def test_clone_pull_apk_high(self) -> None:
-        """Test clone pull apk high."""
         for cmd in [
             "git clone --depth 1 https://x/y",
             "git pull origin main",
@@ -607,7 +590,6 @@ class TestInferFailureSeverity(unittest.TestCase):
                 )
 
     def test_build_failure_medium(self) -> None:
-        """Test build failure medium."""
         for cat in [
             ErrorCategory.CONFIGURATION,
             ErrorCategory.DEPENDENCY,
@@ -625,30 +607,25 @@ class TestInferFailureSeverity(unittest.TestCase):
                 )
 
     def test_unknown_category_medium(self) -> None:
-        """Test unknown category medium."""
         self.assertEqual(
             infer_failure_severity(ErrorCategory.UNKNOWN),
             FailureSeverity.MEDIUM,
         )
 
 
-# ===========================================================================
-# create_error_record auto-classify path
-# ===========================================================================
+# create_error_record
 
 
 class TestCreateErrorRecord(unittest.TestCase):
-    """Tests for CreateErrorRecord."""
+    """Tests for create_error_record."""
 
     def test_auto_classification(self) -> None:
-        """Test auto classification."""
         rec = create_error_record("cannot find -lssl")
         self.assertEqual(rec.category, ErrorCategory.LINKING)
         # LINKING with non-clone command -> MEDIUM
         self.assertEqual(rec.severity, FailureSeverity.MEDIUM)
 
     def test_explicit_overrides_take_precedence(self) -> None:
-        """Test explicit overrides take precedence."""
         rec = create_error_record(
             "anything",
             category=ErrorCategory.NETWORK,
@@ -662,29 +639,25 @@ class TestCreateErrorRecord(unittest.TestCase):
         self.assertEqual(rec.attempt_number, 4)
 
 
-# ===========================================================================
 # should_escalate
-# ===========================================================================
 
 
 class TestShouldEscalate(unittest.TestCase):
-    """Tests for ShouldEscalate."""
+    """Tests for should_escalate."""
 
     def _state(self, **kw) -> AgentState:
-        """State."""
+        """Return an initial state with the given attributes overridden."""
         s = create_initial_state("https://github.com/a/b")
         for k, v in kw.items():
             setattr(s, k, v)
         return s
 
     def test_no_escalation_on_empty_state(self) -> None:
-        """Test no escalation on empty state."""
         ok, reason = should_escalate(self._state())
         self.assertFalse(ok)
         self.assertEqual(reason, "")
 
     def test_escalate_when_max_attempts_reached(self) -> None:
-        """Test escalate when max attempts reached."""
         s = self._state(max_attempts=3)
         for _ in range(3):
             s.add_error(create_error_record("x", ErrorCategory.COMPILATION))
@@ -693,7 +666,6 @@ class TestShouldEscalate(unittest.TestCase):
         self.assertIn("Maximum attempts", reason)
 
     def test_escalate_on_error_loop(self) -> None:
-        """Test escalate on error loop."""
         s = self._state(max_attempts=99)  # ensure attempts aren't the trigger
         for _ in range(3):
             s.add_error(create_error_record("x", ErrorCategory.NETWORK))
@@ -702,7 +674,6 @@ class TestShouldEscalate(unittest.TestCase):
         self.assertIn("error loop", reason)
 
     def test_escalate_on_fundamental_blocker(self) -> None:
-        """Test escalate on fundamental blocker."""
         s = self._state()
         s.last_error_category = ErrorCategory.LICENSE_INCOMPATIBLE
         ok, reason = should_escalate(s)
@@ -734,7 +705,6 @@ class TestShouldEscalate(unittest.TestCase):
                 self.assertEqual(reason, "")
 
     def test_escalate_when_cost_exceeded(self) -> None:
-        """Test escalate when cost exceeded."""
         s = self._state()
         s.api_cost_usd = 1.5
         ok, reason = should_escalate(s)
@@ -742,32 +712,27 @@ class TestShouldEscalate(unittest.TestCase):
         self.assertIn("cost limit", reason)
 
 
-# ===========================================================================
-# get_next_action_recommendation — decision tree
-# ===========================================================================
+# get_next_action_recommendation
 
 
 class TestNextAction(unittest.TestCase):
-    """Tests for NextAction."""
+    """Tests for get_next_action_recommendation."""
 
     def _state(self) -> AgentState:
-        """State."""
+        """Return a fresh initial state."""
         return create_initial_state("https://github.com/a/b")
 
     def test_plan_first(self) -> None:
-        """Test plan first."""
         self.assertEqual(
             get_next_action_recommendation(self._state()), Action.PLAN
         )
 
     def test_scout_when_task_plan_but_no_build_plan(self) -> None:
-        """Test scout when task plan but no build plan."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         self.assertEqual(get_next_action_recommendation(s), Action.SCOUT)
 
     def test_builder_when_pending_with_plan(self) -> None:
-        """Test builder when pending with plan."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         s.build_plan = BuildPlan(
@@ -780,7 +745,6 @@ class TestNextAction(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(s), Action.BUILDER)
 
     def test_fixer_when_failed_non_dependency(self) -> None:
-        """Test fixer when failed non dependency."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         s.build_plan = BuildPlan(
@@ -794,7 +758,6 @@ class TestNextAction(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(s), Action.FIXER)
 
     def test_scout_when_failed_dependency(self) -> None:
-        """Test scout when failed dependency."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         s.build_plan = BuildPlan(
@@ -808,7 +771,6 @@ class TestNextAction(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(s), Action.SCOUT)
 
     def test_scout_when_failed_unknown(self) -> None:
-        """UNKNOWN failures should trigger replanning first."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         s.build_plan = BuildPlan(
@@ -822,7 +784,6 @@ class TestNextAction(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(s), Action.SCOUT)
 
     def test_finish_after_success_with_tests(self) -> None:
-        """Test finish after success with tests."""
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
         s.build_plan = BuildPlan(
@@ -841,9 +802,8 @@ class TestNextAction(unittest.TestCase):
         Regression: previously returned BUILDER on SUCCESS+!tests_run
         which created an infinite supervisor↔builder loop on the
         cost-optimized routing path (chisel/gum/csvtk/+20 batch
-        timeouts on 2026-05-23). builder_node doesn't actually run
-        tests today — it only re-verifies artifacts — so the loop
-        burned the full 1h batch timeout.
+        timeouts on 2026-05-23). builder_node runs no tests, so the
+        loop burned the full 1h batch timeout.
         """
         s = self._state()
         s.task_plan = TaskPlan(phases=[])
@@ -858,46 +818,37 @@ class TestNextAction(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(s), Action.FINISH)
 
     def test_escalate_short_circuits_decision_tree(self) -> None:
-        """Test escalate short circuits decision tree."""
         s = self._state()
         s.api_cost_usd = 2.0
         self.assertEqual(get_next_action_recommendation(s), Action.ESCALATE)
 
 
-# ===========================================================================
-# CommandResult convenience props
-# ===========================================================================
+# CommandResult convenience properties
 
 
 class TestCommandResult(unittest.TestCase):
     """Tests for CommandResult."""
 
     def test_success_property(self) -> None:
-        """Test success property."""
         self.assertTrue(CommandResult("c", 0, "", "", 0.1).success)
         self.assertFalse(CommandResult("c", 1, "", "", 0.1).success)
 
     def test_failed_property(self) -> None:
-        """Test failed property."""
         self.assertTrue(CommandResult("c", 1, "", "", 0.1).failed)
         self.assertFalse(CommandResult("c", 0, "", "", 0.1).failed)
 
     def test_negative_one_is_failed(self) -> None:
-        # execute_command uses -1 for timeout/exception sentinels
-        """Test negative one is failed."""
+        """execute_command uses -1 as the timeout/exception sentinel."""
         self.assertTrue(CommandResult("c", -1, "", "", 0.1).failed)
 
 
-# ===========================================================================
 # Enum stability
-# ===========================================================================
 
 
 class TestEnumStability(unittest.TestCase):
-    """Guard enum names that callers read via state.to_dict()."""
+    """Guard enum names and values against accidental renames."""
 
     def test_build_status_values(self) -> None:
-        """Test build status values."""
         expected = {
             "PENDING",
             "PLANNING",
@@ -911,7 +862,6 @@ class TestEnumStability(unittest.TestCase):
         self.assertEqual({s.value for s in BuildStatus}, expected)
 
     def test_error_category_values_complete(self) -> None:
-        """Test error category values complete."""
         # These are referenced by classify_error + should_escalate +
         # supervisor routing.
         for cat_name in [
@@ -936,7 +886,6 @@ class TestEnumStability(unittest.TestCase):
             )
 
     def test_agent_role_values(self) -> None:
-        """Test agent role values."""
         expected = {
             "planner",
             "supervisor",
@@ -948,23 +897,19 @@ class TestEnumStability(unittest.TestCase):
         self.assertEqual({r.value for r in AgentRole}, expected)
 
     def test_action_values(self) -> None:
-        """Test action values."""
         self.assertEqual(
             {a.value for a in Action},
             {"PLAN", "SCOUT", "BUILDER", "FIXER", "ESCALATE", "FINISH"},
         )
 
 
-# ===========================================================================
 # Serialization
-# ===========================================================================
 
 
 class TestSerialization(unittest.TestCase):
-    """Tests for Serialization."""
+    """Tests for to_dict and save_to_json."""
 
     def test_to_dict_includes_core_fields(self) -> None:
-        """Test to dict includes core fields."""
         s = create_initial_state("https://github.com/x/y")
         s.log_api_call(cost=0.01)
         d = s.to_dict()
@@ -975,7 +920,6 @@ class TestSerialization(unittest.TestCase):
         self.assertIsInstance(d["build_status"], str)
 
     def test_to_dict_serializes_nested_enums(self) -> None:
-        """Test to dict serializes nested enums."""
         s = create_initial_state("https://github.com/x/y")
         s.add_error(create_error_record("permission denied"))
         d = s.to_dict()
@@ -987,7 +931,6 @@ class TestSerialization(unittest.TestCase):
     def test_save_to_json_writes_valid_json(
         self,
     ) -> None:
-        """Test save to json writes valid json."""
         s = create_initial_state("https://github.com/x/y")
         s.log_api_call(cost=0.02)
         s.add_error(create_error_record("network down"))
@@ -1011,18 +954,15 @@ class TestUncoveredHelperBranches(unittest.TestCase):
     """Cover helper methods and classifier branches missed elsewhere."""
 
     def setUp(self) -> None:
-        """Create a fresh state."""
         self.state = create_initial_state("https://github.com/o/r")
 
     def test_error_history_trimmed_to_cap(self) -> None:
-        """Test error history trimmed to cap."""
         for i in range(MAX_ERROR_HISTORY + 5):
             self.state.add_error(create_error_record(f"boom {i}"))
         self.assertEqual(len(self.state.error_history), MAX_ERROR_HISTORY)
         self.assertIn("boom 5", self.state.error_history[0].message)
 
     def test_add_fix_attempt_records(self) -> None:
-        """Test add fix attempt records."""
         fix = FixAttempt(
             error_category=ErrorCategory.COMPILATION,
             strategy="patch include",
@@ -1033,20 +973,17 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         self.assertEqual(self.state.fixes_attempted, [fix])
 
     def test_log_scripted_op_increments_counter(self) -> None:
-        """Test log scripted op increments counter."""
         before = self.state.scripted_ops_count
         self.state.log_scripted_op("clone")
         self.assertEqual(self.state.scripted_ops_count, before + 1)
         self.assertEqual(self.state.audit_trail[-1]["event"], "scripted_op")
 
     def test_audit_trail_trimmed_to_cap(self) -> None:
-        """Test audit trail trimmed to cap."""
         for i in range(MAX_AUDIT_EVENTS + 3):
             self.state.log_event("tick", {"i": i})
         self.assertEqual(len(self.state.audit_trail), MAX_AUDIT_EVENTS)
 
     def test_cache_file_content(self) -> None:
-        """Test cache file content."""
         self.state.cache_file_content("/workspace/repos/r/a.c", "int x;")
         self.assertEqual(
             self.state.file_content_cache["/workspace/repos/r/a.c"],
@@ -1054,14 +991,11 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         )
 
     def test_get_execution_duration_non_negative(self) -> None:
-        """Test get execution duration non negative."""
         self.assertGreaterEqual(self.state.get_execution_duration(), 0.0)
 
     def test_to_dict_serializes_arbitrary_object(self) -> None:
-        """Test to dict serializes arbitrary object."""
-
         class Marker:
-            """Marker."""
+            """An arbitrary object; the serializer falls back to __dict__."""
 
             def __init__(self) -> None:
                 self.x = 1
@@ -1071,7 +1005,6 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         self.assertEqual(data["context_cache"]["marker"], {"x": 1})
 
     def test_derive_repo_name_ambiguous_prefixes_owner(self) -> None:
-        """Test derive repo name ambiguous prefixes owner."""
         self.assertEqual(
             derive_repo_name("https://github.com/cli/cli"), "cli-cli"
         )
@@ -1081,33 +1014,27 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         )
 
     def test_derive_repo_name_dotted_owner_falls_back(self) -> None:
-        """Test derive repo name dotted owner falls back."""
         self.assertEqual(
             derive_repo_name("https://gitlab.com/foo.bar/cli"), "cli"
         )
 
     def test_create_initial_state_rejects_bad_url(self) -> None:
-        """Test create initial state rejects bad url."""
         with self.assertRaises(ValueError):
             create_initial_state("git@github.com:o/r.git")
 
     def test_classify_clone_auth_as_network(self) -> None:
-        """Test classify clone auth as network."""
         msg = "fatal: could not read Username for 'https://github.com'"
         self.assertEqual(classify_error(msg), ErrorCategory.NETWORK)
 
     def test_classify_repo_not_found_as_configuration(self) -> None:
-        """Test classify repo not found as configuration."""
         msg = "fatal: repository 'https://github.com/x/y/' not found"
         self.assertEqual(classify_error(msg), ErrorCategory.CONFIGURATION)
 
     def test_classify_empty_repository_as_configuration(self) -> None:
-        """Test classify empty repository as configuration."""
         msg = "warning: remote HEAD refers to an empty repository"
         self.assertEqual(classify_error(msg), ErrorCategory.CONFIGURATION)
 
     def test_severity_which_probe_not_found_is_low(self) -> None:
-        """Test severity which probe not found is low."""
         severity = infer_failure_severity(
             ErrorCategory.UNKNOWN,
             command=None,
@@ -1128,7 +1055,6 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         return state
 
     def test_replan_failure_recommends_scout(self) -> None:
-        """Test replan failure recommends scout."""
         state = self._plan_state()
         state.build_status = BuildStatus.FAILED
         state.last_error_category = ErrorCategory.COMPILATION
@@ -1136,12 +1062,9 @@ class TestUncoveredHelperBranches(unittest.TestCase):
         self.assertEqual(get_next_action_recommendation(state), Action.SCOUT)
 
     def test_default_action_is_builder(self) -> None:
-        """Test default action is builder."""
         state = self._plan_state()
         state.build_status = BuildStatus.FIXING
-        self.assertEqual(
-            get_next_action_recommendation(state), Action.BUILDER
-        )
+        self.assertEqual(get_next_action_recommendation(state), Action.BUILDER)
 
 
 if __name__ == "__main__":

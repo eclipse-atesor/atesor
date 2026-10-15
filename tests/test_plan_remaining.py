@@ -10,7 +10,9 @@ Covers ``.github/scripts/plan_remaining.py``:
 Also covers the polymorphic loader in
 ``.github/scripts/missing_pkgs.py``: it must accept BOTH the
 ``full.json`` schema (list of ``{name: ...}`` dicts) AND the
-``remaining-<platform>.json`` schema (list of plain strings).
+``remaining-<platform>.json`` schema (list of plain strings). Other
+tests cover the missing_pkgs zip matching and the ``slice_pkgs.py``
+shard slices.
 """
 
 import importlib.util
@@ -58,7 +60,7 @@ def _entry_tuple(entry):
 
 
 class TestReleasedNames(unittest.TestCase):
-    """``_released_names`` extracts package names from asset filenames."""
+    """``_released_names`` extracts zip stems from asset filenames."""
 
     def test_basic_match(self) -> None:
         """Matching alpine asset filenames yield their package names."""
@@ -99,7 +101,6 @@ class TestReleasedNames(unittest.TestCase):
         self.assertEqual(names, {"AnalyticsRelationships"})
 
     def test_malformed_filename_ignored(self) -> None:
-        """Malformed filenames are ignored while valid assets are kept."""
         names = plan_remaining._released_names(
             [
                 "foo.zip",  # no pattern
@@ -113,7 +114,6 @@ class TestReleasedNames(unittest.TestCase):
         self.assertEqual(names, {"good"})
 
     def test_empty_input(self) -> None:
-        """Empty asset inputs return an empty released-name set."""
         self.assertEqual(
             plan_remaining._released_names([], "alpine"),
             set(),
@@ -124,7 +124,6 @@ class TestReleasedNames(unittest.TestCase):
         )
 
     def test_unknown_platform_not_matched(self) -> None:
-        """Unknown-platform assets do not match another platform."""
         names = plan_remaining._released_names(
             ["foo-20260601-150000-windows.zip"],
             "alpine",
@@ -136,7 +135,7 @@ class TestComputePlan(unittest.TestCase):
     """``compute_plan`` skips released names + computes shard count."""
 
     def test_preserves_declared_order(self) -> None:
-        """Remaining packages keep declared order after released names skip."""
+        """Released names are skipped without reordering the rest."""
         declared = ["c", "a", "b", "d"]
         released = {"a"}
         remaining, total, groups = plan_remaining.compute_plan(
@@ -202,7 +201,6 @@ class TestComputePlan(unittest.TestCase):
         self.assertEqual(groups, [0])
 
     def test_everything_released_yields_zero_shards(self) -> None:
-        """All released packages yield no remaining packages or shards."""
         declared = ["a", "b"]
         released = {"a", "b"}
         remaining, total, groups = plan_remaining.compute_plan(
@@ -229,14 +227,12 @@ class TestComputePlan(unittest.TestCase):
         self.assertEqual(groups, [0, 1, 2, 3])
 
     def test_invalid_group_size(self) -> None:
-        """Zero or negative group sizes raise ValueError."""
         with self.assertRaises(ValueError):
             plan_remaining.compute_plan(["a"], set(), group_size=0)
         with self.assertRaises(ValueError):
             plan_remaining.compute_plan(["a"], set(), group_size=-1)
 
     def test_released_not_in_declared_is_noop(self) -> None:
-        """Released names outside declared packages do not affect planning."""
         # Spurious assets (e.g. a package no longer on the list)
         # must not affect the remaining computation.
         declared = ["a", "b"]
@@ -262,7 +258,6 @@ class TestLoadReleasedAssets(unittest.TestCase):
         )
 
     def test_strips_blanks(self) -> None:
-        """Released asset loading strips blank lines from files."""
         with tempfile.NamedTemporaryFile(
             "w",
             suffix=".txt",
@@ -298,10 +293,10 @@ class TestMissingPkgsPolymorphicLoader(unittest.TestCase):
         return fh.name
 
     def test_loads_dict_schema(self) -> None:
-        """Dict package entries load as (name, url-derived-stem) pairs."""
-        # .github/packages/*.json shape. The zip stem comes from the
-        # URL basename, not the name field (they differ for 91/705
-        # full.json entries).
+        """Dict package entries take their zip stems from the URL."""
+        # .github/packages/*.json shape. The name field is not a stem: the
+        # URL basename differs from the name for 82 of 698 full.json
+        # entries.
         path = self._write_json(
             {
                 "packages": [
@@ -350,7 +345,6 @@ class TestMissingPkgsPolymorphicLoader(unittest.TestCase):
             os.unlink(path)
 
     def test_skips_entries_without_name(self) -> None:
-        """Package entries without names are skipped during loading."""
         path = self._write_json(
             {
                 "packages": [
@@ -377,7 +371,6 @@ class TestPlanRemainingWritesArtifact(unittest.TestCase):
     """End-to-end: ``_write_remaining`` + reload via missing_pkgs."""
 
     def test_roundtrip(self) -> None:
-        """Written remaining packages round-trip through the loader."""
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "remaining-alpine.json")
             plan_remaining._write_remaining(
@@ -412,7 +405,7 @@ class TestPlanRemainingWritesArtifact(unittest.TestCase):
                     },
                 },
             )
-            # And the loader missing-pkgs uses must see the same names
+            # And the loader missing_pkgs uses must see the same names
             # plus the divergent stem for zip matching.
             self.assertEqual(
                 [_entry_tuple(e) for e in missing_pkgs._load_packages(out)],
@@ -432,15 +425,22 @@ class TestMissingPkgsBuiltMatching(unittest.TestCase):
         built = {"hetznercloud-cli", "zlib", "cli"}
         cases = [
             (missing_pkgs.PackageEntry("hc", "hetznercloud-cli"), True),
-            (missing_pkgs.PackageEntry("z", "madler-zlib", "zlib", True),
-             True),
-            (missing_pkgs.PackageEntry("cli-a", "owner-a-cli", "cli",
-                                       False), False),
+            (
+                missing_pkgs.PackageEntry("z", "madler-zlib", "zlib", True),
+                True,
+            ),
+            (
+                missing_pkgs.PackageEntry(
+                    "cli-a", "owner-a-cli", "cli", False
+                ),
+                False,
+            ),
         ]
         for entry, expected in cases:
             with self.subTest(entry=entry):
-                self.assertEqual(missing_pkgs._is_built(entry, built),
-                                 expected)
+                self.assertEqual(
+                    missing_pkgs._is_built(entry, built), expected
+                )
 
     def test_built_names_extracts_new_owner_repo_stem(self) -> None:
         """Built-name parsing keeps the owner-repo stem intact."""
@@ -457,14 +457,12 @@ class TestSlicePkgs(unittest.TestCase):
     """slice_pkgs must match the canonical ceil-division chunking."""
 
     def test_total_one_returns_full_list(self) -> None:
-        """A single shard returns the full package list."""
         self.assertEqual(
             slice_pkgs.apply_shard(["a", "b", "c"], 0, 1),
             ["a", "b", "c"],
         )
 
     def test_partitions_cover_every_name_exactly_once(self) -> None:
-        """Shard partitions rebuild every package name exactly once."""
         names = [f"p{i}" for i in range(173)]
         for total in [1, 2, 4, 7]:
             with self.subTest(total=total):
@@ -476,7 +474,6 @@ class TestSlicePkgs(unittest.TestCase):
                 self.assertEqual(rebuilt, names)
 
     def test_matches_missing_pkgs_apply_shard(self) -> None:
-        """slice_pkgs sharding matches missing_pkgs sharding."""
         names = [f"p{i}" for i in range(50)]
         for total in [1, 2, 3, 7]:
             for idx in range(total):

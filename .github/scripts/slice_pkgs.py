@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Slice a remaining-package JSON down to a single shard's chunk.
 
-Used by the per-shard jobs in ``batch-port`` and ``batch-port-retry``
-to turn a ``{"packages": [...]}`` plan (produced by
+Used by the per-shard jobs in ``batch-port`` (``batch-port-retry``
+slices with ``missing_pkgs.py`` instead) to turn a
+``{"packages": [...]}`` plan (produced by
 ``plan_remaining.py``) into the exact positional package list that
 ``batch_test.py --package`` should run for shard ``--shard-index`` of
 ``--shard-total``.
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Optional
 
 
 def _load(path: str) -> list[str]:
@@ -44,7 +46,10 @@ def apply_shard(
     shard_index: int,
     shard_total: int,
 ) -> list[str]:
-    """Contiguous ceil(N/total) chunking, mirroring batch_test."""
+    """Return the contiguous chunk of ``names`` for one shard.
+
+    The chunks have ``ceil(N/total)`` names, mirroring batch_test.
+    """
     if shard_total <= 1:
         return list(names)
     n = len(names)
@@ -54,8 +59,13 @@ def apply_shard(
     return list(names[start:end])
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the CLI entry point."""
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the CLI entry point.
+
+    Returns:
+        Process exit code: 0 on success, 2 on an invalid shard index or
+        shard total.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--from",

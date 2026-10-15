@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from typing import List, Union
 from unittest import mock
 
 from src import config, mirror, target
@@ -56,7 +57,9 @@ class _MirrorCase(unittest.TestCase):
         target.reset_target_cache()
         target.set_remote_workdir(_WORKDIR)
 
-    def rsync(self, results):
+    def rsync(
+        self, results: List[Union[subprocess.CompletedProcess, Exception]]
+    ) -> mock.MagicMock:
         """Replace rsync with canned results and return the mock."""
         patcher = mock.patch("src.mirror.subprocess.run", side_effect=results)
         run = patcher.start()
@@ -132,7 +135,6 @@ class TestPull(_MirrorCase):
         self.assertTrue(mirror.is_stale("zlib"))
 
     def test_other_exits_raise_without_the_address(self) -> None:
-        """Any other failure stops the run, and hides the address."""
         self.rsync([_done(12, "rsync: connection closed (10.0.0.5)")])
         with self.assertRaises(SandboxUnavailableError) as ctx:
             mirror.pull("zlib")
@@ -141,7 +143,6 @@ class TestPull(_MirrorCase):
         self.assertTrue(mirror.is_stale("zlib"))
 
     def test_missing_repo_removes_the_local_copy(self) -> None:
-        """A tree that is gone on the machine is also gone locally."""
         local = mirror.mirror_dir("zlib")
         os.makedirs(local)
         open(os.path.join(local, "old.c"), "w").close()
@@ -150,7 +151,6 @@ class TestPull(_MirrorCase):
         self.assertFalse(os.path.exists(local))
 
     def test_timeout_raises(self) -> None:
-        """A copy that runs too long stops the run."""
         self.rsync([subprocess.TimeoutExpired("rsync", 1)])
         with self.assertRaises(SandboxUnavailableError):
             mirror.pull("zlib")
@@ -164,7 +164,6 @@ class TestPull(_MirrorCase):
         run.assert_not_called()
 
     def test_unsafe_physical_work_directory_raises(self) -> None:
-        """An unsafe physical workdir is refused before rsync runs."""
         target.set_remote_workdir("/home/tester/atesor ai")
         run = self.rsync([_done()])
         with self.assertRaises(SandboxUnavailableError) as ctx:
@@ -196,7 +195,6 @@ class TestToHostPath(_MirrorCase):
         self.assertEqual(1, run.call_count)
 
     def test_other_paths_do_not_copy(self) -> None:
-        """Paths outside a repository never start rsync."""
         run = self.rsync([])
         config.to_host_path("/workspace/output/zlib_recipe.md")
         config.to_host_path("/workspace/repos")

@@ -165,7 +165,7 @@
         "actions": [
           {
             "type": "command",
-            "command": "grep -r 'package main' /workspace/repos/{repo_name} --include='*.go' | head -n 5"
+            "command": "grep -rl 'package main' /workspace/repos/{repo_name} --include='*.go'"
           }
         ],
         "corrected_command": "go build -buildvcs=false -o {binary} ./cmd/{name}"
@@ -189,7 +189,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apk update && apk add go"
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add go"
           }
         ]
       },
@@ -344,7 +348,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends autoconf automake libtool"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends autoconf automake libtool"
           },
           {
             "type": "command",
@@ -376,7 +384,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apk update && apk add automake autoconf libtool"
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add automake autoconf libtool"
           },
           {
             "type": "command",
@@ -410,24 +422,48 @@
       "sandbox": "debian-riscv64"
     },
     {
-      "name": "Auto: gogo - Remove broken local replacement for gith",
+      "name": "Auto: doggo - Install a newer Go toolchain (1.26.4) th",
       "tags": [
         "go",
         "auto-fix"
       ],
       "build_system": "go",
-      "repo_name": "gogo",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/tinygo\\ \\(exit\\ 1\\)\\ \\-\\ stat\\ /wor",
+      "repo_name": "doggo",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ go\\.mod\\ requires\\ go\\ >=\\ 1\\.26\\.4\\ \\(r",
       "fix": {
-        "strategy": "Remove broken local replacement for github.com/chainreactors/rem in go.mod",
+        "strategy": "Install a newer Go toolchain (1.26.4) that satisfies go.mod requirement",
         "actions": [
           {
             "type": "command",
-            "command": "if [ -f go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' go.mod; fi; if [ -f v2/go.mod ]; then sed -i '/github.com\\/chainreactors\\/rem.*=>/d' v2/go.mod; fi"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends wget ca-certificates"
+          },
+          {
+            "type": "command",
+            "command": "wget -q https://go.dev/dl/go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "tar -C /usr/local -xzf go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "rm go1.26.4.linux-riscv64.tar.gz"
+          },
+          {
+            "type": "command",
+            "command": "go version"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
           }
         ]
       },
-      "reasoning": "Auto-learned fix from gogo.",
+      "reasoning": "Auto-learned fix from doggo.",
       "id": "fixer-auto-004",
       "source": "auto",
       "timestamp": "2026-07-06",
@@ -447,44 +483,16 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpcap-dev"
           }
         ]
       },
       "reasoning": "Auto-learned fix from ksubdomain.",
       "id": "fixer-auto-005",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: doggo - Install a newer Go toolchain (1.26.4) th",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "doggo",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ go\\.mod\\ requires\\ go\\ >=\\ 1\\.26\\.4\\ \\(r",
-      "fix": {
-        "strategy": "Install a newer Go toolchain (1.26.4) that satisfies go.mod requirement",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends wget ca-certificates"
-          },
-          {
-            "type": "command",
-            "command": "wget -q https://go.dev/dl/go1.26.4.linux-riscv64.tar.gz && tar -C /usr/local -xzf go1.26.4.linux-riscv64.tar.gz && rm go1.26.4.linux-riscv64.tar.gz"
-          },
-          {
-            "type": "command",
-            "command": "export PATH=/usr/local/go/bin:$PATH && go version && go mod tidy"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from doggo.",
-      "id": "fixer-auto-004",
       "source": "auto",
       "timestamp": "2026-07-06",
       "sandbox": "debian-riscv64"
@@ -560,7 +568,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libncurses-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libncurses-dev"
           },
           {
             "type": "command",
@@ -588,7 +600,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends git"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends git"
           }
         ]
       },
@@ -612,7 +628,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends bison flex"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends bison flex"
           }
         ]
       },
@@ -636,7 +656,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libpcap-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpcap-dev"
           }
         ]
       },
@@ -660,7 +684,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends libyuv-dev"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libyuv-dev"
           }
         ]
       },
@@ -684,7 +712,11 @@
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update && apt-get install -y --no-install-recommends gettext"
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends gettext"
           }
         ]
       },
@@ -693,6 +725,265 @@
       "source": "auto",
       "timestamp": "2026-07-07",
       "sandbox": "debian-riscv64"
+    },
+    {
+      "name": "Auto: grep - Install autotools, gettext, git and rela",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "grep",
+      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 128\\)\\ \\-\\ fatal:\\ Unable\\ to\\ find\\ current\\ rev",
+      "fix": {
+        "strategy": "Install autotools, gettext, git and related tools, then run ./bootstrap so it can fetch gnulib and generate configure, then run ./configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends git autoconf automake libtool gettext autopoint pkg-config make gcc libc6-dev perl texinfo rsync wget xz-utils bison gperf m4"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from grep.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-015",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: less - Install the ncurses development package ",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)\\ \\-\\ checking\\ for\\ gcc\\.\\.\\.\\ gcc\\\nchecking\\ wh",
+      "fix": {
+        "strategy": "Install the ncurses development package so configure can find a terminal library, then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libncurses-dev"
+          },
+          {
+            "type": "command",
+            "command": "./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-016",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: make - Install autotools/gettext, clone gnulib,",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "make",
+      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 2\\)\\ \\-\\ autogen\\.sh:\\ 1088:\\ cannot\\ open\\ gnuli",
+      "fix": {
+        "strategy": "Install autotools/gettext, clone gnulib, run bootstrap using local gnulib, then configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends git ca-certificates autoconf automake libtool gettext autopoint pkg-config texinfo wget m4 perl"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf gnulib"
+          },
+          {
+            "type": "command",
+            "command": "git clone --depth 1 https://git.savannah.gnu.org/git/gnulib.git gnulib"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from make.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-017",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: overlayfs-tools - Install sudo and attr so meson find_prog",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "overlayfs-tools",
+      "error_pattern": "Build\\ command\\ failed:\\ cd\\ /workspace/repos/overlayfs\\-tools\\ \\&\\&\\ meson\\ setup\\ build\\ \\(",
+      "fix": {
+        "strategy": "Install sudo and attr so meson find_program succeeds, then reconfigure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends sudo attr tar"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          },
+          {
+            "type": "command",
+            "command": "meson setup build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from overlayfs-tools.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-018",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: go-sandbox - Add riscv64 ptracer Context implementati",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "go-sandbox",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/runprog\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github",
+      "fix": {
+        "strategy": "Add riscv64 ptracer Context implementation (registers a0-a5, a7) with getIovec and skipSyscall",
+        "actions": []
+      },
+      "reasoning": "Auto-learned fix from go-sandbox.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-019",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: mbedtls - Install git, fetch all submodules recurs",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "mbedtls",
+      "error_pattern": "Build\\ command\\ failed:\\ cmake\\ \\-S\\ \\.\\ \\-B\\ build\\ \\-DCMAKE_BUILD_TYPE=Release\\ \\-DENABLE_TE",
+      "fix": {
+        "strategy": "Install git, fetch all submodules recursively, then rerun cmake configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add git"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mbedtls.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-020",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: libjpeg-turbo - Rebuild with low parallelism (-j2) to av",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "libjpeg-turbo",
+      "error_pattern": "Build\\ command\\ failed:\\ cmake\\ \\-\\-build\\ build\\ \\-j\\$\\(nproc\\)\\ \\(exit\\ 137\\)\\ \\-\\ \\[\\ \\ 0%\\]\\ Buildin",
+      "fix": {
+        "strategy": "Rebuild with low parallelism (-j2) to avoid OOM kill (exit 137)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cmake --build build -j2"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from libjpeg-turbo.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-021",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: dav1d - Reconfigure meson to build both shared a",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "dav1d",
+      "error_pattern": "Build\\ command\\ failed:\\ ls\\ \\-la\\ build/src/libdav1d\\.so\\ build/src/libdav1d\\.a\\ build/to",
+      "fix": {
+        "strategy": "Reconfigure meson to build both shared and static libraries, then recompile",
+        "actions": [
+          {
+            "type": "command",
+            "command": "meson setup build --reconfigure --default-library=both"
+          },
+          {
+            "type": "command",
+            "command": "meson compile -C build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from dav1d.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-022",
+      "source": "auto",
+      "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: msgpack-c - Fetch c_master with an explicit refspec ",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "msgpack-c",
+      "error_pattern": "Build\\ command\\ failed:\\ git\\ fetch\\ origin\\ c_master\\ \\&\\&\\ git\\ checkout\\ \\-B\\ c_master\\ orig",
+      "fix": {
+        "strategy": "Fetch c_master with an explicit refspec so origin/c_master exists, then check it out",
+        "actions": [
+          {
+            "type": "command",
+            "command": "git fetch origin +refs/heads/c_master:refs/remotes/origin/c_master"
+          },
+          {
+            "type": "command",
+            "command": "git checkout -B c_master origin/c_master"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from msgpack-c.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-023",
+      "source": "auto",
+      "timestamp": "2026-10-13"
     }
   ]
 }

@@ -24,21 +24,28 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 
-# ============================================================================
-# ENUMS
-# ============================================================================
-
-
 # Growth caps for the append-only run records (MEM-03). Both lists are
 # serialized wholesale into `<repo>_state_*.json`, so an escalated run
 # that walks the 120-step recursion limit would otherwise balloon both
-# memory and the artifact. Only the tail is ever read back.
+# memory and the artifact. The caps drop the oldest entries. The error
+# loop check reads the last 3 errors, and the end-of-run console summary
+# reads the last 10 audit events (get_last_audit_events). The Markdown
+# report lists every error that the cap keeps.
 MAX_AUDIT_EVENTS = 2000
 MAX_ERROR_HISTORY = 200
 
 
+# Enums
+
+
 class BuildStatus(str, Enum):
-    """Current status of the build process."""
+    """Lifecycle status of the port; routing and reports key on it.
+
+    The values are a serialized contract: ``to_dict`` writes them into
+    ``<repo>_state_*.json`` and ``main.py`` matches the plain strings
+    (e.g. ``"SUCCESS"``) when rendering the report, so renaming a
+    value breaks those readers.
+    """
 
     PENDING = "PENDING"
     PLANNING = "PLANNING"
@@ -51,7 +58,16 @@ class BuildStatus(str, Enum):
 
 
 class ErrorCategory(str, Enum):
-    """Classification of errors encountered."""
+    """Classification of a recorded error; drives routing choices.
+
+    Produced by ``classify_error``. The supervisor re-scouts on
+    ``DEPENDENCY``/``MISSING_TOOLS``, and ``should_escalate`` treats
+    the license, hardware, impossible-architecture, permission and
+    disk categories as fundamental blockers — reclassifying a message
+    changes the path a run takes. No code sets
+    ``LICENSE_INCOMPATIBLE``, ``REQUIRES_HARDWARE`` or
+    ``ARCHITECTURE_IMPOSSIBLE``.
+    """
 
     UNKNOWN = "UNKNOWN"
     DEPENDENCY = "DEPENDENCY"
@@ -70,7 +86,7 @@ class ErrorCategory(str, Enum):
 
 
 class FailureSeverity(str, Enum):
-    """Severity level for command and execution failures."""
+    """Severity of a failure; inferred by ``infer_failure_severity``."""
 
     LOW = "low"
     MEDIUM = "medium"
@@ -78,7 +94,12 @@ class FailureSeverity(str, Enum):
 
 
 class AgentRole(str, Enum):
-    """Roles of different agents in the system."""
+    """Roles of the graph's agents.
+
+    Every node declares one via ``@agent_node(AgentRole.X)`` (see
+    ``src/graph.py``), and the active role is recorded on each
+    audit-trail event.
+    """
 
     PLANNER = "planner"
     SUPERVISOR = "supervisor"
@@ -89,7 +110,11 @@ class AgentRole(str, Enum):
 
 
 class Action(str, Enum):
-    """Available actions for the supervisor."""
+    """Return vocabulary of ``get_next_action_recommendation``.
+
+    The compiled graph never routes on these values; the per-node
+    routing functions in ``src/graph.py`` return node-name strings.
+    """
 
     PLAN = "PLAN"
     SCOUT = "SCOUT"
@@ -99,9 +124,7 @@ class Action(str, Enum):
     FINISH = "FINISH"
 
 
-# ============================================================================
-# DATA CLASSES
-# ============================================================================
+# Data classes
 
 
 @dataclass
@@ -163,7 +186,7 @@ class ArchSpecificCode:
     file: str
     line: int
     code_snippet: str
-    arch_type: str  # "x86", "arm", "simd", etc.
+    arch_type: str  # e.g. "inline_asm", "intrinsic_header".
     severity: str  # "low", "medium", "high", "critical"
     suggested_fix: Optional[str] = None
 
@@ -220,7 +243,12 @@ class TaskPhase:
 
 @dataclass
 class TaskPlan:
-    """High-level decomposition of the porting task."""
+    """High-level decomposition of the porting task.
+
+    A structural record only: the sole producer is
+    ``create_default_plan()`` in ``src/graph.py`` — no LLM call
+    generates one.
+    """
 
     phases: List[TaskPhase]
     can_parallelize: List[List[int]] = field(
@@ -276,47 +304,54 @@ class PackageAnalysis:
 
 @dataclass
 class AgentState:
-    """Comprehensive state for the RISC-V porting agent.
+    """The single state object threaded through every graph node.
 
-    All agents read from and write to this shared state object.
+    Invariant: nodes mutate this instance in place and never
+    substitute a fresh ``AgentState`` mid-run. Routing functions and
+    later nodes read the accumulated error history, fix attempts,
+    caches and audit trail; a replacement would silently drop them.
     """
 
-    # ========== Repository Information ==========
+    # Repository information
     repo_url: str
     repo_name: str
     repo_path: str = "/workspace/repos"
-    repo_tree: str = ""  # Optimized tree output for initial context
+    # Compact tree from quick_analysis, injected into prompts.
+    repo_tree: str = ""
 
-    # ========== Task Planning ==========
+    # Task planning
     task_plan: Optional[TaskPlan] = None
     package_analysis: Optional[PackageAnalysis] = None
+    # Display-only progress string; routing reads real state fields.
     current_phase: str = "initialization"
 
-    # ========== Build Information ==========
+    # Build information
     build_system_info: Optional[BuildSystemInfo] = None
     build_plan: Optional[BuildPlan] = None
     build_status: BuildStatus = BuildStatus.PENDING
+    # Unused flag: no code reads it. The package test record lives in
+    # ``package_tests``.
     tests_run: bool = False
 
-    # ========== Dependencies ==========
+    # Dependencies
     dependencies: Optional[DependencyInfo] = None
 
-    # ========== Architecture Analysis ==========
+    # Architecture analysis
     arch_specific_code: List[ArchSpecificCode] = field(default_factory=list)
 
-    # ========== Execution Tracking ==========
+    # Execution tracking
     attempt_count: int = 0
     max_attempts: int = 5
     last_successful_phase: int = 0
 
-    # ========== Error Handling ==========
+    # Error handling
     last_error: Optional[str] = None
     last_error_category: Optional[ErrorCategory] = None
     last_error_severity: Optional[FailureSeverity] = None
     error_history: List[ErrorRecord] = field(default_factory=list)
     fixes_attempted: List[FixAttempt] = field(default_factory=list)
 
-    # ========== Performance Tracking ==========
+    # Performance tracking
     api_calls_made: int = 0
     api_cost_usd: float = 0.0
     api_tokens_in: int = 0
@@ -324,27 +359,29 @@ class AgentState:
     scripted_ops_count: int = 0
     execution_start_time: datetime = field(default_factory=datetime.now)
 
-    # ========== Caching & Memory ==========
+    # Caching and memory
     context_cache: Dict[str, Any] = field(default_factory=dict)
     file_content_cache: Dict[str, str] = field(default_factory=dict)
     command_results_cache: Dict[str, CommandResult] = field(
         default_factory=dict
     )
 
-    # ========== Parallel Scout Results ==========
+    # Scout facts recorded by heuristic_plan_node
     scout_build_system_result: Optional[Dict[str, Any]] = None
     scout_deps_result: Optional[Dict[str, Any]] = None
     scout_arch_issues_result: Optional[Dict[str, Any]] = None
 
-    # ========== Subgraph status (read by the parent graph) ==========
+    # Build-fix subgraph outcome, meant for the parent graph. Nothing
+    # reads or writes it: subgraph routing inspects ``build_status``
+    # and ``attempt_count`` directly.
     subgraph_outcome: Optional[str] = (
         None  # "success" | "failure" | "fix_needed"
     )
 
-    # ========== Agent Communication ==========
+    # Agent communication
     messages: List[BaseMessage] = field(default_factory=list)
 
-    # ========== Output Artifacts ==========
+    # Output artifacts
     patches_generated: List[str] = field(default_factory=list)
     porting_recipe: Optional[str] = None
     build_artifacts: List[Dict[str, Any]] = field(
@@ -363,11 +400,25 @@ class AgentState:
     # duration and the output tail. None until finish_node runs it.
     package_tests: Optional[Dict[str, Any]] = None
 
-    # ========== Debugging & Audit ==========
+    # Performance mode (--optimize)
+    # Set from the CLI. optimize_node runs only when optimize_requested
+    # is True; emulate_cpu is the QEMU_CPU model for QEMU runs.
+    optimize_requested: bool = False
+    emulate_cpu: Optional[str] = None
+    # A verified recipe-cache entry for this package (--optimize only):
+    # cached_recipe_node turns it into the build plan, so the port
+    # builds again without the planning LLM calls.
+    cached_recipe: Optional[Dict[str, Any]] = None
+    # The machine probe (MachineProfile.to_dict) and the optimization
+    # record (src.optimize.run_optimization). None until optimize_node.
+    machine_profile: Optional[Dict[str, Any]] = None
+    optimization: Optional[Dict[str, Any]] = None
+
+    # Debugging and audit
     audit_trail: List[Dict[str, Any]] = field(default_factory=list)
     current_agent: Optional[AgentRole] = None
 
-    # ========== Metadata ==========
+    # Metadata
     created_at: datetime = field(default_factory=datetime.now)
     last_updated: datetime = field(default_factory=datetime.now)
 
@@ -376,10 +427,13 @@ class AgentState:
         self.last_updated = datetime.now()
 
     def add_error(self, error: ErrorRecord) -> None:
-        """Add an error to history and update state.
+        """Record an error and count it against the attempt budget.
 
         History is capped at ``MAX_ERROR_HISTORY`` (MEM-03); the
-        escalation logic only inspects recent errors.
+        escalation logic only inspects recent errors. Note the side
+        effect: every recorded error increments ``attempt_count``,
+        which ``max_attempts`` and the routing functions compare
+        against.
         """
         self.error_history.append(error)
         if len(self.error_history) > MAX_ERROR_HISTORY:
@@ -409,7 +463,8 @@ class AgentState:
             tokens_in: Billed prompt tokens.
             tokens_out: Billed completion tokens.
             calls: Number of LLM invocations this covers (a validated
-                call may retry several times).
+                call may retry several times). A value below 1 counts
+                as 1.
         """
         self.api_calls_made += max(1, calls)
         self.api_cost_usd += cost
@@ -431,8 +486,8 @@ class AgentState:
         by :meth:`to_dict`/``save_to_json``, so an escalated run that
         walks the 120-step recursion limit would otherwise grow the
         in-memory list and the state JSON without bound (MEM-03).
-        Oldest events are dropped first; the report only ever reads the
-        tail via :meth:`get_last_audit_events`.
+        Oldest events are dropped first; the end-of-run console summary
+        only ever reads the tail via :meth:`get_last_audit_events`.
         """
         self.audit_trail.append(
             {
@@ -507,7 +562,13 @@ class AgentState:
         )
 
     def is_in_error_loop(self) -> bool:
-        """Check if we're stuck in an error loop."""
+        """Return True when the last three errors share one signature.
+
+        Signatures come from ``_error_signature`` — category plus the
+        first meaningful error line with paths and numbers normalized
+        away — so the same failure recurring at a different path or
+        line still counts as a loop.
+        """
         if len(self.error_history) < 3:
             return False
 
@@ -525,9 +586,9 @@ class AgentState:
         """Record a build artifact that was successfully created."""
         artifact = {
             "filepath": filepath,
-            # e.g. "library", "binary", "test", "header".
+            # e.g. "binary", "library_shared", "library_static".
             "type": artifact_type,
-            "architecture": architecture,  # e.g. "RISC-V", "x86_64".
+            "architecture": architecture,  # e.g. "riscv64".
             "timestamp": datetime.now().isoformat(),
         }
         self.build_artifacts.append(artifact)
@@ -538,8 +599,8 @@ class AgentState:
         from dataclasses import asdict
 
         # We need a custom converter for Enums and Datetime. Enums give
-        # their value ("SUCCESS"): str() gave "BuildStatus.SUCCESS" on
-        # Python 3.10, which no reader matched.
+        # their value ("SUCCESS"): str() gives "BuildStatus.SUCCESS",
+        # which no reader matches.
         def custom_serializer(obj: Any) -> Any:
             if isinstance(obj, Enum):
                 return obj.value
@@ -567,9 +628,7 @@ class AgentState:
         return self.audit_trail[-limit:]
 
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+# Module-level helpers
 
 
 def sanitize_repo_name(raw: str) -> str:
@@ -607,7 +666,9 @@ def is_valid_repo_url(repo_url: str) -> bool:
 #
 # Kept deliberately small. Every name added here changes the cache key
 # for its packages (invalidating any existing cached recipe), so only
-# add a basename once a real collision is observed.
+# add a basename once a real collision is observed. src/packager.py
+# keeps a copy (_LEGACY_AMBIGUOUS_BASENAMES); tests/test_packager.py
+# fails when the two sets differ.
 _AMBIGUOUS_BASENAMES = frozenset(
     {"cli", "core", "src", "app", "main", "client", "server", "lib"}
 )
@@ -617,9 +678,10 @@ def derive_repo_name(repo_url: str) -> str:
     """Derive the canonical ``repo_name`` key for a repository URL.
 
     The single source of truth for this derivation: the recipe cache,
-    the clone directory, the per-repo log files and the release asset
-    name are all keyed on the result, so any divergence between callers
-    makes cache lookups miss forever.
+    the clone directory and the per-repo log files are all keyed on
+    the result, so any divergence between callers makes cache lookups
+    miss forever. Release zips use ``src.packager.package_stem``
+    (``<owner>-<repo>``) instead.
 
     Normally the URL basename, EXCEPT when that basename is generic
     (see ``_AMBIGUOUS_BASENAMES``), in which case the owner segment is
@@ -646,8 +708,26 @@ def derive_repo_name(repo_url: str) -> str:
     return sanitize_repo_name(basename)
 
 
-def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
+def create_initial_state(
+    repo_url: str,
+    max_attempts: int = 5,
+    optimize: bool = False,
+    emulate_cpu: Optional[str] = None,
+    cached_recipe: Optional[Dict[str, Any]] = None,
+) -> AgentState:
     """Create initial state for a new porting task.
+
+    Args:
+        repo_url: The repository URL.
+        max_attempts: Recorded errors (``attempt_count``) allowed
+            before escalation.
+        optimize: True to run performance mode after a verified build.
+        emulate_cpu: The QEMU_CPU model for performance mode under QEMU.
+        cached_recipe: A verified recipe-cache entry to build from
+            instead of planning again (performance mode), or None.
+
+    Returns:
+        A fresh ``AgentState`` for the repository.
 
     Raises:
         ValueError: If ``repo_url`` is not a plain http(s) URL. URLs
@@ -669,6 +749,9 @@ def create_initial_state(repo_url: str, max_attempts: int = 5) -> AgentState:
         repo_name=repo_name,
         repo_path=f"/workspace/repos/{repo_name}",
         max_attempts=max_attempts,
+        optimize_requested=optimize,
+        emulate_cpu=emulate_cpu,
+        cached_recipe=cached_recipe,
     )
 
 
@@ -679,7 +762,13 @@ _NUMBER_RE = re.compile(r"\b\d+\b")
 
 
 def _first_meaningful_error_line(message: str) -> str:
-    """Extract the first diagnostic line worth comparing."""
+    """Return the first line worth feeding to the error signature.
+
+    Progress noise (``make:``, ``ninja:``, ``[``, ``warning:``,
+    ``note:``, …) is skipped unless the same line also carries an
+    error marker; with no marker anywhere, the first non-empty line
+    is the fallback.
+    """
     fallback = ""
     noisy_prefixes = (
         "make:",
@@ -725,7 +814,12 @@ def _first_meaningful_error_line(message: str) -> str:
 
 
 def _normalize_error_line(line: str) -> str:
-    """Normalize volatile paths and numbers from an error line."""
+    """Strip volatile tokens so one failure keeps a stable signature.
+
+    Absolute paths, ``:line[:col]`` refs, hex numbers and plain
+    numbers all become placeholders; the result is lowercased,
+    space-collapsed and truncated to 200 chars.
+    """
     normalized = _ABSOLUTE_PATH_RE.sub("<path>", line)
     normalized = _LINE_COLUMN_RE.sub(":<n>", normalized)
     normalized = _HEX_RE.sub("<hex>", normalized)
@@ -735,7 +829,7 @@ def _normalize_error_line(line: str) -> str:
 
 
 def _error_signature(error: ErrorRecord) -> tuple[ErrorCategory, str]:
-    """Build a stable signature for loop detection."""
+    """Build the signature ``is_in_error_loop`` compares across errors."""
     line = _first_meaningful_error_line(error.message or "")
     return error.category, _normalize_error_line(line)
 
@@ -743,7 +837,11 @@ def _error_signature(error: ErrorRecord) -> tuple[ErrorCategory, str]:
 def classify_error(error_message: str) -> ErrorCategory:
     """Classify an error message into a category.
 
-    Uses ordered pattern matching on common build failure substrings.
+    Ordered substring/regex matching — the first matching rule wins.
+    Specific signatures (rate limits, disk space, RISC-V relocations,
+    x86 intrinsics) must stay ahead of the generic catch-alls near the
+    bottom (``"not found"`` → DEPENDENCY, ``"configure error"`` →
+    CONFIGURATION), or real failures get misfiled.
 
     Args:
         error_message: The raw error text to classify.
@@ -795,9 +893,7 @@ def classify_error(error_message: str) -> ErrorCategory:
     ) or has_any(("timed out", "command timeout", "command timed out")):
         return ErrorCategory.NETWORK
 
-    if re.search(
-        r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower
-    ):
+    if re.search(r"repository\s+['\"][^'\"]+['\"]\s+not\s+found", error_lower):
         return ErrorCategory.CONFIGURATION
 
     if has_any(
@@ -840,7 +936,7 @@ def classify_error(error_message: str) -> ErrorCategory:
         "asm\\",
     )
     arch_terms = (
-        "#error \"unsupported architecture\"",
+        '#error "unsupported architecture"',
         "#error unsupported architecture",
         "unsupported architecture",
         "unsupported goos/goarch pair linux/riscv64",
@@ -848,9 +944,9 @@ def classify_error(error_message: str) -> ErrorCategory:
         "unknown value 'native' for '-march'",
         "unknown value \"native\" for '-march'",
         "unknown value 'native' for -march",
-        "unknown value \"native\" for -march",
+        'unknown value "native" for -march',
         "'asm' operand has impossible constraints",
-        "\"asm\" operand has impossible constraints",
+        '"asm" operand has impossible constraints',
         "invalid instruction mnemonic",
         "unknown mnemonic",
         "unrecognized opcode",
@@ -866,8 +962,7 @@ def classify_error(error_message: str) -> ErrorCategory:
         or has_any(arch_terms)
         or re.search(option_pattern, error_lower)
         or re.search(
-            r"\b(architecture|sse\d?|avx\d*|neon|simd"
-            r"|x86[-_]64|amd64)\b",
+            r"\b(architecture|sse\d?|avx\d*|neon|simd" r"|x86[-_]64|amd64)\b",
             error_lower,
         )
     ):
@@ -898,25 +993,23 @@ def classify_error(error_message: str) -> ErrorCategory:
     ):
         return ErrorCategory.LINKING
 
-    if (
-        "cmake error" in error_lower
-        and re.search(r"could\s+not\s+find\s+\w+", error_lower)
+    if "cmake error" in error_lower and re.search(
+        r"could\s+not\s+find\s+\w+", error_lower
     ):
         return ErrorCategory.DEPENDENCY
 
-    if (
-        re.search(r"\bno package ['`\"]?[^'`\"\n]+['`\"]? found", error_lower)
-        or has_any(
-            (
-                "package not found",
-                "missing dependency",
-                "failed to select a version",
-                "unable to select packages",
-                "no such package",
-                "unable to locate package",
-                "broken packages",
-                "has no installation candidate",
-            )
+    if re.search(
+        r"\bno package ['`\"]?[^'`\"\n]+['`\"]? found", error_lower
+    ) or has_any(
+        (
+            "package not found",
+            "missing dependency",
+            "failed to select a version",
+            "unable to select packages",
+            "no such package",
+            "unable to locate package",
+            "broken packages",
+            "has no installation candidate",
         )
     ):
         return ErrorCategory.DEPENDENCY
@@ -1049,7 +1142,19 @@ def create_error_record(
     command: Optional[str] = None,
     attempt_number: int = 0,
 ) -> ErrorRecord:
-    """Create an error record with automatic classification."""
+    """Create an error record, inferring what the caller leaves out.
+
+    Args:
+        message: The raw error text.
+        category: Preclassified category; classified from ``message``
+            via ``classify_error`` when None.
+        severity: Inferred via ``infer_failure_severity`` when None.
+        command: The command that failed; used in severity inference.
+        attempt_number: The run's attempt counter at failure time.
+
+    Returns:
+        The populated ``ErrorRecord``.
+    """
     if category is None:
         category = classify_error(message)
     if severity is None:
@@ -1136,21 +1241,23 @@ def infer_failure_severity(
 def should_escalate(state: AgentState) -> tuple[bool, str]:
     """Determine whether the task should be escalated to a human.
 
+    Escalates on any of: the attempt ceiling, an error loop with no
+    progress, a fundamental error category (license, hardware,
+    impossible architecture, permission, disk space), or the hard
+    per-package cost cap.
+
     Args:
         state: The current agent state.
 
     Returns:
         A ``(should_escalate, reason)`` tuple.
     """
-    # Max attempts reached
     if state.attempt_count >= state.max_attempts:
         return True, f"Maximum attempts ({state.max_attempts}) reached"
 
-    # Stuck in error loop
     if state.is_in_error_loop():
         return True, "Stuck in error loop with no progress"
 
-    # Fundamental blockers
     fundamental_categories = {
         ErrorCategory.LICENSE_INCOMPATIBLE,
         ErrorCategory.REQUIRES_HARDWARE,
@@ -1162,8 +1269,8 @@ def should_escalate(state: AgentState) -> tuple[bool, str]:
     if state.last_error_category in fundamental_categories:
         return True, f"Fundamental blocker: {state.last_error_category.value}"
 
-    # Cost limit (if set)
-    cost_limit = 1.0  # $1 USD limit
+    # Hard per-package spend cap, in USD.
+    cost_limit = 1.0
     if state.api_cost_usd > cost_limit:
         return True, f"API cost limit (${cost_limit}) exceeded"
 
@@ -1171,9 +1278,12 @@ def should_escalate(state: AgentState) -> tuple[bool, str]:
 
 
 def get_next_action_recommendation(state: AgentState) -> Action:
-    """Recommend the next action based on the current state.
+    """Recommend the next action for the current state.
 
-    This is a helper for the Supervisor agent.
+    Standalone helper for the supervisor role. The compiled graph does
+    not call it: routing lives in the per-node routing functions in
+    ``src/graph.py`` (``route_supervisor_to_next`` and friends), which
+    return node-name strings rather than ``Action`` values.
 
     Args:
         state: The current agent state.
@@ -1181,24 +1291,19 @@ def get_next_action_recommendation(state: AgentState) -> Action:
     Returns:
         The recommended ``Action``.
     """
-    # Check for escalation first
     should_esc, _ = should_escalate(state)
     if should_esc:
         return Action.ESCALATE
 
-    # Initial planning
     if not state.task_plan:
         return Action.PLAN
 
-    # Initial scouting
     if not state.build_plan:
         return Action.SCOUT
 
-    # Build execution
     if state.build_status == BuildStatus.PENDING:
         return Action.BUILDER
 
-    # Error recovery
     if state.build_status == BuildStatus.FAILED:
         if state.last_error_category in {
             ErrorCategory.DEPENDENCY,
@@ -1209,12 +1314,11 @@ def get_next_action_recommendation(state: AgentState) -> Action:
         if _looks_like_replan_failure(state.last_error or ""):
             return Action.SCOUT
         else:
-            return Action.FIXER  # Try to fix
+            return Action.FIXER
 
     if state.build_status == BuildStatus.SUCCESS:
         return Action.FINISH
 
-    # Default to builder
     return Action.BUILDER
 
 

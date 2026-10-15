@@ -52,7 +52,7 @@ class TestAgentExample:
     """Tests for AgentExample dataclass."""
 
     def test_example_creation(self) -> None:
-        """Test creating an example with new fields."""
+        """An example stores the structured build fields."""
         example = AgentExample(
             id="test-001",
             name="Test Example",
@@ -69,7 +69,7 @@ class TestAgentExample:
         assert example.repo_name == "my-repo"
 
     def test_example_creation_legacy(self) -> None:
-        """Test creating an example with legacy context field."""
+        """The legacy context dict is kept as-is."""
         example = AgentExample(
             id="test-002",
             name="Legacy Example",
@@ -80,7 +80,7 @@ class TestAgentExample:
         assert example.context["build_system"] == "go"
 
     def test_scout_prompt_format(self) -> None:
-        """Test formatting example as Scout prompt (new format)."""
+        """The scout prompt text carries the trigger and the plan."""
         example = AgentExample(
             id="scout-001",
             name="Test Scout",
@@ -100,7 +100,7 @@ class TestAgentExample:
         assert "go build ." in text
 
     def test_scout_prompt_format_legacy(self) -> None:
-        """Test formatting example as Scout prompt (legacy format)."""
+        """The scout prompt renders legacy context and expected_output."""
         example = AgentExample(
             id="scout-002",
             name="Legacy Scout",
@@ -117,7 +117,7 @@ class TestAgentExample:
         assert "go build ." in text
 
     def test_fixer_prompt_format(self) -> None:
-        """Test formatting example as Fixer prompt (new format)."""
+        """The fixer prompt text carries the strategy and its actions."""
         example = AgentExample(
             id="fixer-001",
             name="Test Fixer",
@@ -142,7 +142,7 @@ class TestAgentExample:
         assert "apk add go" in text
 
     def test_builder_prompt_format(self) -> None:
-        """Test formatting example as Builder prompt (new format)."""
+        """The builder prompt text carries phases and the timeout hint."""
         example = AgentExample(
             id="builder-001",
             name="Test Builder",
@@ -158,7 +158,6 @@ class TestAgentExample:
         assert "60s" in text
 
     def test_to_dict(self) -> None:
-        """Test serialization to dict."""
         example = AgentExample(
             id="test-003",
             name="Serialize Test",
@@ -182,31 +181,29 @@ class TestAgentMemory:
     """Tests for AgentMemory class."""
 
     def test_load_scout_examples(self) -> None:
-        """Test loading scout examples from file (new v2.0 format)."""
+        """Bundled scout examples load with build-system fields."""
         memory = AgentMemory("scout")
         assert len(memory.examples) > 0
         assert all(isinstance(ex, AgentExample) for ex in memory.examples)
-        # Check new fields are populated
         for ex in memory.examples:
             assert ex.build_system != ""
 
     def test_load_fixer_examples(self) -> None:
-        """Test loading fixer examples from file."""
+        """Some bundled fixer examples carry an error pattern."""
         memory = AgentMemory("fixer")
         assert len(memory.examples) > 0
-        # Check error_pattern is populated for manual examples
         has_pattern = any(ex.error_pattern for ex in memory.examples)
         assert has_pattern
 
     def test_load_builder_examples(self) -> None:
-        """Test loading builder examples from file."""
+        """Some bundled builder examples carry phases."""
         memory = AgentMemory("builder")
         assert len(memory.examples) > 0
         has_phases = any(ex.phases for ex in memory.examples)
         assert has_phases
 
     def test_get_relevant_examples(self) -> None:
-        """Test getting relevant examples based on context."""
+        """Relevance filtering matches the build system in the context."""
         memory = AgentMemory("scout")
         context = {"build_system": "go", "has_main": True}
         examples = memory.get_relevant_examples(context, max_examples=2)
@@ -228,11 +225,9 @@ class TestAgentMemory:
 
         assert len(examples_go) > 0
         assert len(examples_cmake) > 0
-        # Go examples should be first for go context
         assert examples_go[0].build_system == "go"
 
     def test_relevance_scoring_error_pattern(self) -> None:
-        """Test regex error_pattern matching in fixer relevance scoring."""
         memory = AgentMemory("fixer")
         context = {
             "build_system": "go",
@@ -245,7 +240,7 @@ class TestAgentMemory:
         assert any("Go" in name or "command" in name.lower() for name in names)
 
     def test_format_examples_for_prompt(self) -> None:
-        """Test formatting examples for prompt."""
+        """Formatted output gets the few-shot header and stays near the cap."""
         memory = AgentMemory("scout")
         context = {"build_system": "go"}
         examples = memory.get_relevant_examples(context, max_examples=2)
@@ -254,7 +249,7 @@ class TestAgentMemory:
         assert len(formatted) <= 1200
 
     def test_reload(self) -> None:
-        """Test reloading examples from disk."""
+        """Reload keeps the same example count."""
         memory = AgentMemory("scout")
         initial_count = len(memory.examples)
         memory.reload()
@@ -269,7 +264,6 @@ class TestAutoLearning:
         self.tmp_dir = _make_test_dir("auto-learning")
         self.examples_dir = self.tmp_dir / "examples"
         self.examples_dir.mkdir()
-        # Write a minimal examples file
         test_file = self.examples_dir / "scout_examples.json"
         test_file.write_text(
             json.dumps(
@@ -303,7 +297,7 @@ class TestAutoLearning:
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_save_learned_example(self) -> None:
-        """Test saving a new auto-learned example."""
+        """A learned example gets the next auto id and source 'auto'."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
         assert len(memory.examples) == 1
 
@@ -328,7 +322,6 @@ class TestAutoLearning:
         assert new_ex.source == "auto"
 
     def test_save_duplicate_rejected(self) -> None:
-        """Test that duplicate examples are rejected."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
 
         result = memory.save_learned_example(
@@ -344,7 +337,6 @@ class TestAutoLearning:
         assert len(memory.examples) == 1
 
     def test_save_missing_fields_rejected(self) -> None:
-        """Test that examples without required fields are rejected."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
 
         result = memory.save_learned_example(
@@ -355,9 +347,8 @@ class TestAutoLearning:
         assert result is False
 
     def test_prune_oldest_auto(self) -> None:
-        """Test pruning removes oldest auto-learned first."""
+        """Pruning overflow drops auto examples; manual ones survive."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
-        # Manually add many auto examples to test pruning
         data = memory._read_json_file()
         for i in range(105):
             data["examples"].append(
@@ -373,7 +364,6 @@ class TestAutoLearning:
             )
         pruned = memory._prune_examples_list(data["examples"])
         assert len(pruned) <= 100
-        # Manual example should survive
         assert any(e.get("source", "manual") == "manual" for e in pruned)
 
     def test_concurrent_duplicate_save_lands_once(self) -> None:
@@ -386,9 +376,7 @@ class TestAutoLearning:
             # A command of its own: the fixture example already holds
             # "go build .", and scout dedupe matches on commands.
             "plan": {
-                "phases": [
-                    {"name": "build", "commands": ["go build ./cmd/x"]}
-                ]
+                "phases": [{"name": "build", "commands": ["go build ./cmd/x"]}]
             },
             "reasoning": "same payload",
         }
@@ -419,21 +407,19 @@ class TestAutoLearning:
 
 
 class TestFormatFewShotExamples:
-    """Tests for the convenience function."""
+    """Tests for format_few_shot_examples."""
 
     def setup_method(self) -> None:
         """Clear cached instances for clean tests."""
         MEMORY_INSTANCES.clear()
 
     def test_format_scout_examples(self) -> None:
-        """Test formatting scout examples."""
         context = {"build_system": "go", "has_main": True, "main_path": "."}
         result = format_few_shot_examples("scout", context, max_examples=2)
         assert "# Few-Shot Examples" in result
         assert "scout" in result.lower()
 
     def test_format_fixer_examples(self) -> None:
-        """Test formatting fixer examples."""
         context = {
             "build_system": "go",
             "error_message": "go: command not found",
@@ -443,13 +429,11 @@ class TestFormatFewShotExamples:
         assert "fixer" in result.lower()
 
     def test_format_builder_examples(self) -> None:
-        """Test formatting builder examples."""
         context = {"build_system": "go"}
         result = format_few_shot_examples("builder", context, max_examples=2)
         assert isinstance(result, str)
 
     def test_empty_context(self) -> None:
-        """Test with empty context."""
         result = format_few_shot_examples("scout", {}, max_examples=2)
         assert isinstance(result, str)
 
@@ -458,17 +442,15 @@ class TestMemoryCaching:
     """Tests for memory instance caching."""
 
     def setup_method(self) -> None:
-        """Set up the test by clearing cached memory instances."""
+        """Clear cached instances for clean tests."""
         MEMORY_INSTANCES.clear()
 
     def test_get_agent_memory_caching(self) -> None:
-        """Test that memory instances are cached."""
         memory1 = get_agent_memory("scout")
         memory2 = get_agent_memory("scout")
         assert memory1 is memory2
 
     def test_different_agents_different_memory(self) -> None:
-        """Test that different agents have different memory."""
         scout_memory = get_agent_memory("scout")
         fixer_memory = get_agent_memory("fixer")
         assert scout_memory is not fixer_memory
@@ -476,11 +458,10 @@ class TestMemoryCaching:
         assert fixer_memory.agent_type == "fixer"
 
     def test_reload_agent_memory(self) -> None:
-        """Test force reloading memory."""
+        """Reload leaves a usable memory with examples."""
         get_agent_memory("scout")
         reload_agent_memory("scout")
         memory2 = get_agent_memory("scout")
-        # After reload, should have fresh examples
         assert len(memory2.examples) > 0
 
 
@@ -509,7 +490,6 @@ class TestRecipeCache:
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_load_empty_cache(self) -> None:
-        """Test loading when cache is empty."""
         self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
@@ -518,7 +498,7 @@ class TestRecipeCache:
         assert cache["packages"] == {}
 
     def test_save_and_get_recipe(self) -> None:
-        """Test saving and retrieving a recipe."""
+        """A saved recipe round-trips; absent verification stays absent."""
         self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
@@ -578,7 +558,6 @@ class TestRecipeCache:
         }
 
     def test_get_nonexistent_recipe(self) -> None:
-        """Test cache miss returns None."""
         self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
@@ -586,7 +565,7 @@ class TestRecipeCache:
         assert cached is None
 
     def test_upsert_recipe(self) -> None:
-        """Test that saving again updates the entry."""
+        """Saving the same repo again overwrites the entry."""
         self.cache_path.write_text(
             json.dumps({"version": "1.0", "packages": {}})
         )
@@ -633,14 +612,20 @@ class TestRecipeCache:
             build_duration_seconds=1.0,
         )
 
-        assert get_cached_recipe(
-            "cli",
-            repo_url="https://github.com/cli/cli",
-        ) is None
-        assert get_cached_recipe(
-            "cli",
-            repo_url="https://GITHUB.com/hetznercloud/CLI/",
-        ) is not None
+        assert (
+            get_cached_recipe(
+                "cli",
+                repo_url="https://github.com/cli/cli",
+            )
+            is None
+        )
+        assert (
+            get_cached_recipe(
+                "cli",
+                repo_url="https://GITHUB.com/hetznercloud/CLI/",
+            )
+            is not None
+        )
         assert get_cached_recipe("cli") is not None
 
     def test_recipe_write_error_keeps_original_cache(self) -> None:
@@ -673,7 +658,6 @@ class TestRecipeMaterialization:
     """Tests for rendering and writing cached recipes to disk."""
 
     def test_render_reconstructs_from_structured_data(self) -> None:
-        """Renderer builds Markdown from structured cache fields."""
         recipe = {
             "repo_url": "https://github.com/madler/zlib",
             "build_system": "cmake",
@@ -698,7 +682,6 @@ class TestRecipeMaterialization:
         assert "Reconstructed from the recipe cache" in md
 
     def test_render_uses_stored_markdown_verbatim(self) -> None:
-        """Stored recipe_markdown is returned without reconstruction."""
         recipe = {
             "build_system": "cmake",
             "recipe_markdown": "# Exact Guide\n\nVerbatim body.\n",
@@ -708,7 +691,6 @@ class TestRecipeMaterialization:
         assert "Reconstructed" not in md
 
     def test_save_persists_recipe_markdown(self) -> None:
-        """save_to_recipe_cache stores recipe_markdown when provided."""
         import src.memory as memory
 
         test_dir = _make_test_dir("recipe-markdown")
@@ -756,7 +738,6 @@ class TestRecipeMaterialization:
             shutil.rmtree(test_dir, ignore_errors=True)
 
     def test_materialize_returns_none_without_recipe(self) -> None:
-        """Materialize returns None when no recipe is available."""
         test_dir = _make_test_dir("materialize-miss")
         try:
             out = materialize_cached_recipe("absent-pkg", str(test_dir), {})
@@ -786,7 +767,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         return AgentMemory(agent_type, examples_dir=self.examples_dir)
 
     def test_seed_bundled_data_copies_examples_and_cache(self) -> None:
-        """Bundled examples and cache are copied into writable paths."""
         import src.memory as memory
 
         bundled_dir = self.test_dir / "bundled"
@@ -804,8 +784,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
             with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
-                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
-                                       target_cache):
+                with mock.patch.object(
+                    memory, "RECIPE_CACHE_PATH", target_cache
+                ):
                     memory._seed_bundled_data()
 
         self.assertTrue((target_examples / "scout_examples.json").exists())
@@ -825,8 +806,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
 
         with mock.patch.object(memory, "_BUNDLED_DATA_DIR", bundled_dir):
             with mock.patch.object(memory, "EXAMPLES_DIR", target_examples):
-                with mock.patch.object(memory, "RECIPE_CACHE_PATH",
-                                       target_cache):
+                with mock.patch.object(
+                    memory, "RECIPE_CACHE_PATH", target_cache
+                ):
                     memory._seed_bundled_data()
 
         self.assertEqual(
@@ -835,12 +817,10 @@ class TestMemoryEdgeCases(unittest.TestCase):
         )
 
     def test_unknown_prompt_type_returns_empty(self) -> None:
-        """Unknown example prompt types return an empty string."""
         example = AgentExample(id="ex", name="Example", tags=[])
         self.assertEqual(example.to_prompt_text("supervisor"), "")
 
     def test_fixer_prompt_formats_create_file_and_patch(self) -> None:
-        """Fixer examples include create-file and patch actions."""
         example = AgentExample(
             id="fixer-extra",
             name="Fixer Extra",
@@ -862,7 +842,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertIn("Patch build glue", text)
 
     def test_to_dict_includes_all_optional_fields(self) -> None:
-        """Serialization preserves every optional payload field."""
         example = AgentExample(
             id="full",
             name="Full Example",
@@ -900,13 +879,11 @@ class TestMemoryEdgeCases(unittest.TestCase):
                 self.assertIn(key, data)
 
     def test_missing_example_file_loads_empty_memory(self) -> None:
-        """A missing examples file logs and leaves memory empty."""
         memory = AgentMemory("missing", examples_dir=self.examples_dir)
         self.assertEqual(memory.examples, [])
         self.assertEqual(memory._read_json_file()["examples"], [])
 
     def test_invalid_example_file_loads_empty_memory(self) -> None:
-        """Invalid JSON is caught during example loading."""
         path = self.examples_dir / "fixer_examples.json"
         path.write_text("{not-json")
 
@@ -915,7 +892,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(memory.examples, [])
 
     def test_atomic_example_write_keeps_original_on_json_error(self) -> None:
-        """A failed JSON dump leaves the original examples file intact."""
         import src.memory as memory_module
 
         original = {"version": "2.0", "examples": []}
@@ -941,11 +917,11 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(list(self.examples_dir.glob("*.tmp")), [])
 
     def test_empty_memory_has_no_relevant_examples_or_prompt(self) -> None:
-        """Empty memories return no matches and no prompt section."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
 
-        self.assertEqual(memory.get_relevant_examples({"build_system": "go"}),
-                         [])
+        self.assertEqual(
+            memory.get_relevant_examples({"build_system": "go"}), []
+        )
         self.assertEqual(memory.format_examples_for_prompt([]), "")
 
     def test_profile_failure_still_scores_examples(self) -> None:
@@ -976,7 +952,7 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(len(examples), 1)
 
     def test_wrong_sandbox_returns_no_examples(self) -> None:
-        """Examples from a different sandbox are hard-filtered."""
+        """A build-system match cannot surface a wrong-sandbox example."""
         memory = self._memory_with_examples(
             "scout",
             [
@@ -997,7 +973,7 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(examples, [])
 
     def test_relevance_handles_regex_and_bonus_edges(self) -> None:
-        """Relevance scoring handles regex errors and extra bonuses."""
+        """The ``[`` pattern is an invalid regex; scoring must skip it."""
         memory = AgentMemory("fixer", examples_dir=self.examples_dir)
         example = AgentExample(
             id="fixer",
@@ -1058,7 +1034,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(memory.examples[-1].id, "scout-auto-001")
 
     def test_save_learned_example_returns_false_on_lock_error(self) -> None:
-        """File-lock failures make save_learned_example return False."""
         memory = self._memory_with_examples("scout", [])
 
         with mock.patch(
@@ -1072,7 +1047,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertFalse(result)
 
     def test_duplicate_checks_sandbox_error_pattern_and_commands(self) -> None:
-        """Duplicate detection respects sandbox, patterns, and commands."""
         scout = self._memory_with_examples(
             "scout",
             [
@@ -1136,16 +1110,13 @@ class TestMemoryEdgeCases(unittest.TestCase):
             builder._is_duplicate(
                 {
                     "build_system": "go",
-                    "phases": [
-                        {"name": "build", "commands": ["go build"]}
-                    ],
+                    "phases": [{"name": "build", "commands": ["go build"]}],
                     "sandbox": "alpine-riscv64",
                 }
             )
         )
 
     def test_duplicate_profile_failure_falls_back(self) -> None:
-        """Duplicate checks tolerate active-profile lookup failures."""
         memory = self._memory_with_examples("scout", [])
 
         with mock.patch(
@@ -1174,7 +1145,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(memory._extract_commands({}), "")
 
     def test_prune_drops_auto_when_overflow_exceeds_auto_count(self) -> None:
-        """If overflow is larger than auto examples, all autos drop."""
         memory = AgentMemory("scout", examples_dir=self.examples_dir)
         examples = [
             {
@@ -1198,7 +1168,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertFalse(any(e.get("source") == "auto" for e in pruned))
 
     def test_migrate_legacy_cache_skips_non_dict_and_wraps_flat(self) -> None:
-        """Legacy cache migration skips junk and wraps flat entries."""
         import src.memory as memory
 
         cache = {
@@ -1299,7 +1268,6 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertEqual(qemu_recipe, entries["debian-riscv64"])
 
     def test_get_cached_recipe_respects_architecture(self) -> None:
-        """Recipes for a different architecture do not match."""
         import src.memory as memory
 
         cache = {
@@ -1312,8 +1280,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(memory, "load_recipe_cache",
-                               return_value=cache):
+        with mock.patch.object(
+            memory, "load_recipe_cache", return_value=cache
+        ):
             recipe = memory.get_cached_recipe(
                 "pkg", architecture="riscv64", sandbox="alpine-riscv64"
             )
@@ -1321,7 +1290,12 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertIsNone(recipe)
 
     def test_save_to_recipe_cache_preserves_legacy_entry(self) -> None:
-        """Saving over a flat legacy entry preserves its sandbox copy."""
+        """Saving over a flat legacy entry preserves its sandbox copy.
+
+        The mock returns the cache unmigrated. The real
+        load_recipe_cache migrates flat entries, so the legacy branch
+        of save_to_recipe_cache runs only with this mock.
+        """
         import src.memory as memory
 
         cache_file = self.test_dir / "legacy_cache.json"
@@ -1336,8 +1310,9 @@ class TestMemoryEdgeCases(unittest.TestCase):
         }
 
         with mock.patch.object(memory, "RECIPE_CACHE_PATH", cache_file):
-            with mock.patch.object(memory, "load_recipe_cache",
-                                   return_value=legacy_cache):
+            with mock.patch.object(
+                memory, "load_recipe_cache", return_value=legacy_cache
+            ):
                 saved = memory.save_to_recipe_cache(
                     repo_name="pkg",
                     repo_url="https://github.com/test/pkg",
@@ -1356,20 +1331,19 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertIn("debian-riscv64", data["packages"]["pkg"])
 
     def test_reload_agent_memory_creates_uncached_memory(self) -> None:
-        """Reloading an uncached agent creates a new memory instance."""
         import src.memory as memory
 
         fake_memory = object()
         memory.MEMORY_INSTANCES.clear()
-        with mock.patch.object(memory, "AgentMemory",
-                               return_value=fake_memory) as mock_agent:
+        with mock.patch.object(
+            memory, "AgentMemory", return_value=fake_memory
+        ) as mock_agent:
             memory.reload_agent_memory("fresh")
 
         self.assertIs(memory.MEMORY_INSTANCES["fresh"], fake_memory)
         mock_agent.assert_called_once_with("fresh")
 
     def test_save_to_recipe_cache_returns_false_on_lock_error(self) -> None:
-        """Recipe-cache lock failures return False."""
         import src.memory as memory
 
         cache_file = self.test_dir / "lock_cache.json"
@@ -1394,24 +1368,24 @@ class TestMemoryEdgeCases(unittest.TestCase):
         self.assertFalse(saved)
 
     def test_materialize_fetches_recipe_when_none(self) -> None:
-        """Materialization fetches a cached recipe when omitted."""
         import src.memory as memory
 
         output_dir = self.test_dir / "output"
         recipe = {"build_system": "go", "build_plan": {"phases": []}}
-        with mock.patch.object(memory, "get_cached_recipe",
-                               return_value=recipe):
+        with mock.patch.object(
+            memory, "get_cached_recipe", return_value=recipe
+        ):
             path = memory.materialize_cached_recipe("pkg", str(output_dir))
 
         self.assertIsNotNone(path)
         self.assertTrue((output_dir / "pkg_recipe.md").exists())
 
     def test_materialize_returns_none_on_write_error(self) -> None:
-        """Materialization returns None when the output write fails."""
         import src.memory as memory
 
-        with mock.patch.object(memory.os, "makedirs",
-                               side_effect=OSError("denied")):
+        with mock.patch.object(
+            memory.os, "makedirs", side_effect=OSError("denied")
+        ):
             path = memory.materialize_cached_recipe(
                 "pkg", str(self.test_dir / "blocked"), {"build_system": "go"}
             )
@@ -1435,3 +1409,125 @@ class TestMemoryEdgeCases(unittest.TestCase):
         fake_memory.save_learned_example.assert_called_once_with(
             {"name": "New", "build_system": "go"}
         )
+
+
+class TestRecordOptimization(unittest.TestCase):
+    """Tests for record_optimization (per-machine results in the cache)."""
+
+    def setUp(self) -> None:
+        """Seed a cache with one zlib entry that has a build plan."""
+        import src.memory as memory
+
+        self.tmp_dir = _make_test_dir("record-optimization")
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        self.cache_path = self.tmp_dir / "recipe_cache.json"
+        entry = {"build_plan": {"phases": []}, "build_system": "cmake"}
+        self.cache_path.write_text(
+            json.dumps(
+                {
+                    "version": "2.0",
+                    "packages": {"zlib": {"debian-riscv64": entry}},
+                }
+            )
+        )
+        patch = mock.patch.object(memory, "RECIPE_CACHE_PATH", self.cache_path)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _result(self, **overrides):
+        result = {
+            "status": "accepted",
+            "kind": "native",
+            "workload": {"description": "compress"},
+            "accepted": "v6-pgo",
+            "accepted_ratio": 0.88,
+            "variants": [
+                {
+                    "variant": {
+                        "vid": "v6-pgo",
+                        "label": "Tune-6",
+                        "technique": "profile-guided optimization",
+                        "title": "GCC -O3 + PGO",
+                        "compiler": "gcc",
+                        "flags": [
+                            "-O3",
+                            "-fprofile-use=/w/x.opt/pgo",
+                            "-fprofile-prefix-path=/w/x.opt/v6-pgo",
+                        ],
+                        "env": {"CCACHE_DISABLE": "1"},
+                        "pgo": "use",
+                    }
+                }
+            ],
+        }
+        result.update(overrides)
+        return result
+
+    def test_native_result_is_stored_per_core(self) -> None:
+        """The accepted settings stay; PGO paths do not."""
+        from src.memory import record_optimization
+
+        machine = {"core_name": "sifive-p550", "label": "rv64gc+zba+zbb"}
+        self.assertTrue(
+            record_optimization(
+                "zlib", self._result(), machine, sandbox="debian-riscv64"
+            )
+        )
+        cache = json.loads(self.cache_path.read_text())
+        stored = cache["packages"]["zlib"]["debian-riscv64"]
+        record = stored["optimizations"]["sifive-p550"]
+        self.assertEqual(record["accepted"], "v6-pgo")
+        self.assertEqual(record["status"], "accepted")
+        self.assertEqual(record["ratio"], 0.88)
+        self.assertEqual(record["variant"]["label"], "Tune-6")
+        self.assertEqual(
+            record["variant"]["technique"], "profile-guided optimization"
+        )
+        self.assertEqual(record["variant"]["flags"], ["-O3"])
+        self.assertEqual(record["variant"]["env"], {})
+        self.assertTrue(record["variant"]["pgo"])
+        self.assertEqual(stored["build_system"], "cmake")
+
+    def test_unmeasured_or_unknown_results_are_not_stored(self) -> None:
+        """QEMU runs, missing workloads and unknown entries are skipped.
+
+        Statuses other than ``accepted`` and ``no gain`` are skipped too.
+        """
+        from src.memory import record_optimization
+
+        before = self.cache_path.read_text()
+        cases = (
+            ("zlib", self._result(kind="qemu")),
+            ("zlib", self._result(workload=None)),
+            ("zlib", self._result(status="error")),
+            ("zlib", self._result(status="not measured")),
+            ("zlib", self._result(status="checked")),
+            ("other", self._result()),
+            ("zlib", None),
+        )
+        for name, result in cases:
+            self.assertFalse(
+                record_optimization(name, result, {}, sandbox="debian-riscv64")
+            )
+        self.assertEqual(self.cache_path.read_text(), before)
+
+    def test_result_without_accepted_variant(self) -> None:
+        """A measured run that accepted nothing is still recorded."""
+        from src.memory import record_optimization
+
+        self.assertTrue(
+            record_optimization(
+                "zlib",
+                self._result(
+                    status="no gain", accepted=None, accepted_ratio=None
+                ),
+                {"label": "rv64gc"},
+                sandbox="debian-riscv64",
+            )
+        )
+        cache = json.loads(self.cache_path.read_text())
+        record = cache["packages"]["zlib"]["debian-riscv64"]["optimizations"][
+            "rv64gc"
+        ]
+        self.assertIsNone(record["accepted"])
+        self.assertNotIn("variant", record)

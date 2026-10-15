@@ -9,11 +9,15 @@
 # SPDX-License-Identifier: MIT
 #############################################################################
 
-"""LLM provider management, model configuration, and cost tracking.
+"""LLM provider plumbing: per-role models, fallbacks, and call pricing.
 
-Handles interactions with the OpenAI, Gemini, and OpenRouter providers.
+``create_llm`` builds one chat model for an agent role from
+``MODEL_CONFIG``; ``create_llm_pool`` adds the OpenRouter fallback
+chain; ``cost_for_usage`` prices a call from its token usage via
+``MODEL_PRICES_PER_MTOK``.
 """
 
+import importlib.util
 import logging
 import os
 from enum import Enum
@@ -28,6 +32,8 @@ from .state import AgentRole
 logger = logging.getLogger(__name__)
 
 
+# Read once at import time; main.py loads .env before importing this
+# module, so later os.environ edits do not reach these constants.
 _DEFAULT_MAX_TOKENS = int(os.getenv("ATESOR_MAX_OUTPUT_TOKENS", "8192"))
 LLM_REQUEST_TIMEOUT = int(os.getenv("ATESOR_LLM_TIMEOUT", "120"))
 
@@ -38,9 +44,9 @@ class ModelProvider(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     OPENROUTER = "openrouter"
+    ANTHROPIC = "anthropic"
 
 
-# Model configurations per provider
 MODEL_CONFIG = {
     # gpt-4 / gpt-3.5-turbo are legacy models (worse AND more expensive
     # than the current mini tier). 4o-mini covers the cheap roles;
@@ -67,8 +73,8 @@ MODEL_CONFIG = {
             "temperature": 0.1,
         },
     },
-
-    # NOTE: ``openrouter/free`` is now an official Free Models Router
+    # Free-tier slugs with per-role diversity: an outage at one
+    # upstream provider does not starve every role at once.
     "openrouter": {
         "supervisor": {
             "model": "qwen/qwen3-coder:free",
@@ -95,11 +101,56 @@ MODEL_CONFIG = {
             "temperature": 0.1,
         },
     },
+    # Claude Haiku 5.5 ($0.10/$0.50 per MTok) takes the planning,
+    # extraction and summary roles. Claude Sonnet 5.5 ($2/$10) takes the
+    # two code roles: the fixer, and the builder, whose model writes the
+    # optimizer harness. Both models reject `temperature`, so it is None
+    # (not sent); `effort` (low|medium|high|xhigh|max) sets the depth
+    # of their adaptive thinking and is sent as `output_config`.
+    "anthropic": {
+        "supervisor": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "low",
+        },
+        "planner": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "scout": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "builder": {
+            "model": "claude-sonnet-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "fixer": {
+            "model": "claude-sonnet-5-5",
+            "temperature": None,
+            "effort": "medium",
+        },
+        "summarizer": {
+            "model": "claude-haiku-5-5",
+            "temperature": None,
+            "effort": "low",
+        },
+    },
 }
 
 
 def check_api_keys() -> Tuple[bool, str, str]:
-    """Verify required API keys are set for the selected provider."""
+    """Check that the selected provider's API key is set.
+
+    The placeholder value ``your_key_here`` counts as missing.
+
+    Returns:
+        ``(ok, message, provider)``: whether the key is usable, a
+        human-readable verdict, and the active provider id.
+    """
     provider = os.getenv("LLM_PROVIDER", ModelProvider.GEMINI.value).lower()
 
     if provider == ModelProvider.OPENAI.value:
@@ -124,6 +175,25 @@ def check_api_keys() -> Tuple[bool, str, str]:
             )
         return True, "OpenRouter API key verified", provider
 
+    elif provider == ModelProvider.ANTHROPIC.value:
+        key = os.getenv("ANTHROPIC_API_KEY")
+        if not key or key == "your_key_here":
+            return (
+                False,
+                "ANTHROPIC_API_KEY not found in environment",
+                provider,
+            )
+        # The package is optional for the other providers, so a missing
+        # install fails here, before the first agent call.
+        if importlib.util.find_spec("langchain_anthropic") is None:
+            return (
+                False,
+                "langchain-anthropic is not installed "
+                "(pip install -r requirements.txt)",
+                provider,
+            )
+        return True, "Anthropic API key verified", provider
+
     return False, f"Unknown provider: {provider}", provider
 
 
@@ -136,12 +206,20 @@ OPENROUTER_FREE_ROUTER = "openrouter/free"
 
 # USD per 1M tokens (input, output) for the paid models this project
 # can be configured with. Free-tier models resolve to $0 via
-# ``cost_for_usage`` regardless of this table.
+# ``cost_for_usage`` regardless of this table. Keep the table current
+# when adding a paid model; sources:
+# https://platform.openai.com/docs/pricing,
+# https://ai.google.dev/gemini-api/docs/pricing and
+# https://platform.claude.com/docs/en/about-claude/pricing
 MODEL_PRICES_PER_MTOK = {
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gemini-flash-lite-latest": (0.10, 0.40),
     "gemini-flash-latest": (0.30, 2.50),
+    # Haiku 5.5 bills $0.50/$2.50 for a prompt over 100K tokens. Atesor
+    # prompts stay below 10K tokens, so the table keeps the base price.
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
 }
 
 # Conservative default for paid models missing from the table, so an
@@ -159,11 +237,11 @@ def is_free_model(model_id: str) -> bool:
 def cost_for_usage(
     model_id: str, input_tokens: int, output_tokens: int
 ) -> float:
-    """Compute the real USD cost of one LLM call from its token usage.
+    """Compute the USD cost of one LLM call from its token usage.
 
-    Replaces the old hardcoded $0.01-per-call fiction: free-tier models
-    cost $0, paid models are priced from ``MODEL_PRICES_PER_MTOK``
-    (falling back to a conservative default for unknown paid models).
+    Free-tier models cost $0; paid models are priced from
+    ``MODEL_PRICES_PER_MTOK`` (falling back to a conservative default
+    for unknown paid models).
 
     Args:
         model_id: Provider model id (e.g. ``gpt-4o``,
@@ -185,7 +263,15 @@ def cost_for_usage(
 
 
 def create_llm(role: AgentRole) -> BaseChatModel:
-    """Create an LLM instance for a specific agent role."""
+    """Create the primary chat model for an agent role.
+
+    Args:
+        role: The agent role; selects the model and temperature from
+            ``MODEL_CONFIG`` for the active ``LLM_PROVIDER``.
+
+    Returns:
+        The configured chat model.
+    """
     return _create_llm_with_model(role, _resolve_model_name(role))
 
 
@@ -193,9 +279,10 @@ def _openrouter_fallback_ids() -> List[str]:
     """Return the ordered OpenRouter fallback model ids.
 
     Reads ``OPENROUTER_FALLBACK_MODELS`` (comma-separated) when set,
-    else uses the curated defaults. ``openrouter/free`` is always
-    appended as the terminal entry so a fully rate-limited pool
-    degrades to "any available free model" instead of failing.
+    else uses the curated defaults. ``openrouter/free`` is appended as
+    the terminal entry when the list does not already hold it, so a
+    fully rate-limited pool degrades to "any available free model"
+    instead of failing.
 
     NOTE: ``openrouter/auto`` is deliberately NOT in the defaults — the
     Auto Router selects from PAID models only, so on a zero-credit
@@ -226,15 +313,15 @@ def create_llm_pool(role: AgentRole) -> List[BaseChatModel]:
     """Return ``[primary_llm, *fallback_llms]`` for the given role.
 
     Fallbacks are read from ``OPENROUTER_FALLBACK_MODELS`` (a
-    comma-separated list of model ids) when the active provider is
-    OpenRouter -- the most failure-prone of the three because the free
-    tier returns 404 when upstream models go down. For OpenAI and Gemini
-    only the primary is returned (those providers' SDKs already retry
-    transient errors transparently).
+    comma-separated list of model ids; the curated defaults when unset)
+    when the active provider is OpenRouter -- the most failure-prone of
+    the three because the free tier returns 404 when upstream models go
+    down. For OpenAI, Gemini and Anthropic only the primary is returned
+    (those providers' SDKs already retry transient errors
+    transparently).
 
-    A lightweight health-check runs each fallback model with a tiny
-    prompt at pool-creation time; models that return 404/429 are skipped
-    so the pool only contains reachable models.
+    Fallbacks are constructed, not probed; per-call rotation in
+    ``llm_call_with_validation`` handles failures.
 
     Callers that want resilience to ``Model not found`` / 404 from the
     primary pass this list into
@@ -244,8 +331,9 @@ def create_llm_pool(role: AgentRole) -> List[BaseChatModel]:
         role: The agent role to build the model pool for.
 
     Returns:
-        A list whose first element is the primary model, followed by any
-        reachable fallback models.
+        A list whose first element is the primary model, followed by
+        the configured fallback models. The list skips the primary's
+        model id and each fallback that fails to build (with a warning).
     """
     primary = create_llm(role)
     provider = os.getenv("LLM_PROVIDER", ModelProvider.GEMINI.value).lower()
@@ -272,6 +360,12 @@ def create_llm_pool(role: AgentRole) -> List[BaseChatModel]:
 
 
 def _resolve_model_name(role: AgentRole) -> str:
+    """Return the configured model id for ``role``.
+
+    An unknown provider falls back to the Gemini config and an unknown
+    role to the supervisor entry, so a misconfiguration never raises
+    here.
+    """
     provider = os.getenv("LLM_PROVIDER", ModelProvider.GEMINI.value).lower()
     if provider not in MODEL_CONFIG:
         provider = ModelProvider.GEMINI.value
@@ -286,7 +380,7 @@ def _create_llm_with_model(role: AgentRole, model_name: str) -> BaseChatModel:
 
     Temperature comes from MODEL_CONFIG[provider][role]. Provider plumbing
     (api key, base_url) is identical across the role's primary and fallback
-    models — only the model id changes.
+    models — only the model id and the OpenRouter ``models`` list change.
     """
     provider = os.getenv("LLM_PROVIDER", ModelProvider.GEMINI.value).lower()
     if provider not in MODEL_CONFIG:
@@ -349,11 +443,26 @@ def _create_llm_with_model(role: AgentRole, model_name: str) -> BaseChatModel:
             # still be requested per-call by wrapping the LLM.
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
+    elif provider == ModelProvider.ANTHROPIC.value:
+        # Imported here: the other providers must keep working when the
+        # langchain-anthropic package is not installed.
+        from langchain_anthropic import ChatAnthropic
+
+        effort = MODEL_CONFIG[provider][role_key].get("effort")
+        # ChatAnthropic reads ANTHROPIC_API_KEY itself. max_tokens also
+        # covers the adaptive-thinking tokens of the reply.
+        return ChatAnthropic(
+            model=model_name,
+            temperature=temperature,
+            timeout=LLM_REQUEST_TIMEOUT,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            output_config={"effort": effort} if effort else None,
+        )
     raise ValueError(f"Unsupported provider: {provider}")
 
 
 def print_model_info() -> None:
-    """Print information about the selected provider and models."""
+    """Print the provider and the supervisor/planner/builder model ids."""
     provider = os.getenv("LLM_PROVIDER", ModelProvider.GEMINI.value).lower()
     print(f"   Provider: {provider}")
     if provider in MODEL_CONFIG:
@@ -364,7 +473,6 @@ def print_model_info() -> None:
         print(f"   Models: {supervisor} (S), {planner} (P), " f"{builder} (B)")
 
 
-# Export functions
 __all__ = [
     "create_llm",
     "create_llm_pool",

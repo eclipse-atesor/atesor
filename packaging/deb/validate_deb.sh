@@ -133,8 +133,8 @@ PY
     [ -n "${pkg}" ] \
         || { echo "FAIL: no debian seed recipe in bundled cache"; exit 1; }
     echo "    seed package: ${pkg} (${url})"
-    # Exit 0: the entry holds a verified verdict. Exit 3: the entry was
-    # recorded before artifact verification existed.
+    # Exit 0: the entry holds a verified verdict. Exit 3: the entry holds
+    # another verdict, or none because it predates artifact verification.
     rc=0
     atesor-ai --repo "${url}" --platform debian </dev/null || rc=$?
     [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ] \
@@ -158,7 +158,8 @@ PY
     echo "--- [8/9] bundled deps import ---"
     /opt/atesor-ai/venv/bin/python3 -c \
         "import langchain, langgraph, docker, pydantic, \
-google.generativeai; print(\"bundled deps import OK\")"
+google.generativeai, langchain_anthropic; \
+print(\"bundled deps import OK\")"
 
     echo "--- [9/9] clean removal ---"
     dpkg -r atesor-ai >/dev/null 2>&1

@@ -21,12 +21,12 @@ on:
         description: "Packages per shard for the full-list retry (must match the main run for shard parity)."
         type: string
         required: false
-        default: "50"
+        default: "25"
       llm_provider:
         description: "LLM provider to run with (preflight gates on this)"
         type: choice
-        default: openrouter
-        options: [openrouter, gemini, openai]
+        default: anthropic
+        options: [openrouter, gemini, openai, anthropic]
 
 permissions:
   contents: write   # publish assets to the monthly release
@@ -35,8 +35,11 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   PYTHONUNBUFFERED: "1"
-  LLM_PROVIDER: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
-  # SHA of the main run we are retrying for, so all 4 jobs agree on parity.
+  # Retries are the hard cases, so they default to Anthropic (Sonnet
+  # fixer); RETRY_LLM_PROVIDER_CHAIN changes the automatic order.
+  LLM_PROVIDER: ${{ inputs.llm_provider || 'anthropic' }}
+  # ID and head SHA of the main run we are retrying for, so all 4 jobs
+  # agree on parity. A manual run uses its own commit SHA.
   MAIN_RUN_ID: >-
     ${{ github.event.workflow_run.id || github.event.inputs.main_run_id }}
   MAIN_HEAD_SHA: >-
@@ -44,33 +47,37 @@ env:
 
 concurrency:
   # Serialize per main-run to avoid two retry runs racing the same
-  # monthly tag (release create/upload are not strictly atomic).
+  # monthly tag (release create/upload are not strictly atomic). A manual
+  # run keys on its own run ID, so the group does not serialize it with
+  # other retries of the same main run.
   group: batch-port-retry-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  # ------------------------------------------------------------------------- #
   # preflight — is the selected LLM provider usable?
   #
   # A retry against a dead provider is strictly wasted compute: the
   # packages being retried already failed once, and with no working LLM
   # every one of them re-escalates without producing a diagnosis.
-  # ------------------------------------------------------------------------- #
   preflight:
-    name: preflight (${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }})
+    name: preflight (${{ inputs.llm_provider || 'anthropic' }})
     uses: ./.github/workflows/llm-health.yml
     secrets: inherit
     with:
-      provider: ${{ inputs.llm_provider || vars.LLM_PROVIDER || 'openrouter' }}
+      provider: ${{ inputs.llm_provider || 'anthropic' }}
+      # An automatic retry takes the first healthy provider of the chain;
+      # a manual retry stays on the provider it picked.
+      provider_chain: >-
+        ${{ github.event_name == 'workflow_run'
+            && (vars.RETRY_LLM_PROVIDER_CHAIN || 'anthropic,openrouter')
+            || '' }}
       fail_on_unavailable: >-
         ${{ github.event_name == 'workflow_dispatch' && 'false' || 'true' }}
 
-  # ------------------------------------------------------------------------- #
   # retry-smoke (matrix: platform)
   #
   # Smoke list is small and the main smoke job is unsharded, so the
   # retry is also unsharded — one job per platform.
-  # ------------------------------------------------------------------------- #
   retry-smoke:
     name: retry-${{ matrix.platform }}-smoke
     needs: preflight
@@ -166,10 +173,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -198,7 +206,7 @@ jobs:
           # run's zips for this platform/list; batch_test only runs
           # packages explicitly named via positional args, so it won't
           # rebuild what already succeeded.
-          # shellcheck disable=SC2086  -- intentional word-splitting
+          # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
             --workers 2 \
@@ -226,7 +234,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # ------------------------------------------------------------------------- #
   # plan-retry-full
   #
   # Recompute the shard plan from the SAME per-platform "remaining"
@@ -234,7 +241,6 @@ jobs:
   # uploaded by the main run's `plan-full` job, then run
   # `plan_shards.py` once per platform against the platform-specific
   # remaining JSON — so retry shards line up 1:1 with main shards.
-  # ------------------------------------------------------------------------- #
   plan-retry-full:
     name: plan-retry-full
     needs: preflight
@@ -255,7 +261,7 @@ jobs:
       alpine_groups: ${{ steps.plan.outputs.alpine_groups }}
       alpine_total:  ${{ steps.plan.outputs.alpine_total }}
     env:
-      GROUP_SIZE: ${{ github.event.inputs.group_size || '50' }}
+      GROUP_SIZE: ${{ github.event.inputs.group_size || '25' }}
     steps:
       - name: Checkout main run's SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -297,7 +303,6 @@ jobs:
               >> "$GITHUB_OUTPUT"
           done
 
-  # ------------------------------------------------------------------------- #
   # retry-debian-full / retry-alpine-full  (matrix: shard)
   #
   # Mirrors the main workflow's atesor-{platform}-full layout: one job
@@ -313,10 +318,9 @@ jobs:
   #      declared set.
   #   3. Computes missing = (this shard's expected) - (built by main).
   #   4. Re-runs only those packages and publishes via release-zips.
-  # ------------------------------------------------------------------------- #
   retry-debian-full:
     name: retry-debian-full (shard ${{ matrix.shard }}/${{ needs.plan-retry-full.outputs.debian_total }})
-    needs: plan-retry-full
+    needs: [preflight, plan-retry-full]
     if: >-
       needs.plan-retry-full.outputs.debian_total != '0' &&
       (
@@ -421,10 +425,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -439,7 +444,7 @@ jobs:
         env:
           MISSING: ${{ steps.missing.outputs.missing }}
         run: |
-          # shellcheck disable=SC2086  -- intentional word-splitting
+          # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
             --workers 2 \
@@ -469,7 +474,7 @@ jobs:
 
   retry-alpine-full:
     name: retry-alpine-full (shard ${{ matrix.shard }}/${{ needs.plan-retry-full.outputs.alpine_total }})
-    needs: plan-retry-full
+    needs: [preflight, plan-retry-full]
     if: >-
       needs.plan-retry-full.outputs.alpine_total != '0' &&
       (
@@ -574,10 +579,11 @@ jobs:
         run: |
           umask 077
           cat > .env <<'EOF'
-          LLM_PROVIDER=${{ env.LLM_PROVIDER }}
+          LLM_PROVIDER=${{ needs.preflight.outputs.provider || env.LLM_PROVIDER }}
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
           LANGCHAIN_API_KEY=${{ secrets.LANGCHAIN_API_KEY }}
           LANGCHAIN_TRACING_V2=${{ vars.LANGCHAIN_TRACING_V2 || 'false' }}
           OPENROUTER_FALLBACK_MODELS=${{ vars.OPENROUTER_FALLBACK_MODELS }}
@@ -592,7 +598,7 @@ jobs:
         env:
           MISSING: ${{ steps.missing.outputs.missing }}
         run: |
-          # shellcheck disable=SC2086  -- intentional word-splitting
+          # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
             --workers 2 \

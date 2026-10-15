@@ -47,7 +47,7 @@ class FakeMachine:
         self.free = ("graph=/dev/root 29360128", "work=/dev/root 29360128")
         self.calls = []
 
-    def run(self, argv, **kwargs):
+    def run(self, argv: list, **kwargs: object) -> subprocess.CompletedProcess:
         """Return what the board prints for the script in argv[-1]."""
         script = argv[-1]
         self.calls.append(list(argv))
@@ -147,10 +147,9 @@ class _PreflightCase(unittest.TestCase):
 
 
 class TestPreflightLadder(_PreflightCase):
-    """Tests for the stop rules and the pass path."""
+    """Tests for the ladder: stop rules, the pass path, and ssh calls."""
 
     def test_report_names_the_machine(self) -> None:
-        """Rung 1 names the ssh destination, and rung 5 the host name."""
         report = self.run_ladder()
         details = {result.number: result.detail for result in report.results}
         self.assertEqual(
@@ -162,7 +161,6 @@ class TestPreflightLadder(_PreflightCase):
         )
 
     def test_ready_machine_passes_all_rungs(self) -> None:
-        """A ready board passes rungs 1 to 11."""
         report = self.run_ladder()
         self.assertTrue(report.passed, report.render(verbose=True))
         self.assertEqual(
@@ -182,7 +180,6 @@ class TestPreflightLadder(_PreflightCase):
         )
 
     def test_every_call_uses_the_ssh_prefix_and_no_stdin(self) -> None:
-        """Remote calls go through ssh_argv with stdin closed."""
         with mock.patch.dict(os.environ, self.env, clear=True):
             target.reset_target_cache()
             prefix = target.ssh_argv() + [target.ssh_alias()]
@@ -201,7 +198,6 @@ class TestPreflightLadder(_PreflightCase):
             self.assertIs(subprocess.DEVNULL, call.kwargs["stdin"])
 
     def test_config_error_stops_before_any_ssh_call(self) -> None:
-        """Rung 1 stops the ladder, and nothing reaches the machine."""
         del self.env["ATESOR_PLATFORM"]
         report = self.run_ladder()
         self.assertEqual([1], [result.number for result in report.results])
@@ -210,7 +206,6 @@ class TestPreflightLadder(_PreflightCase):
         self.assertIn("ATESOR_PLATFORM", report.render())
 
     def test_missing_local_rsync_stops_at_rung_2(self) -> None:
-        """Rung 2 checks the local computer and stops the ladder."""
         self.which["rsync"] = None
         report = self.run_ladder()
         self.assertEqual(2, report.stopped_at)
@@ -218,7 +213,6 @@ class TestPreflightLadder(_PreflightCase):
         self.assertIn("rsync on the local computer", report.render())
 
     def test_open_field_mode_key_fails_rung_3(self) -> None:
-        """A key file that others can read stops the ladder."""
         key = os.path.join(self._tmp.name, "id_board")
         with open(key, "w", encoding="utf-8") as handle:
             handle.write("key\n")
@@ -232,7 +226,6 @@ class TestPreflightLadder(_PreflightCase):
         self.assertEqual([], self.machine.calls)
 
     def test_private_field_mode_key_passes_rung_3(self) -> None:
-        """A 0600 key passes, and rung 3 writes the SSH config."""
         key = os.path.join(self._tmp.name, "id_board")
         with open(key, "w", encoding="utf-8") as handle:
             handle.write("key\n")
@@ -255,7 +248,6 @@ class TestPreflightLadder(_PreflightCase):
         self.assertEqual([], self.machine.calls)
 
     def test_login_failures_name_the_fix(self) -> None:
-        """Rung 4 turns each ssh error into the command that fixes it."""
         cases = [
             (
                 (255, "", "tester@board-1: Permission denied (publickey)."),
@@ -291,7 +283,6 @@ class TestPreflightLadder(_PreflightCase):
                 self.assertEqual(1, len(self.machine.calls))
 
     def test_login_error_detail_is_redacted(self) -> None:
-        """An address in an ssh error never reaches the output."""
         self.machine.login = (
             255,
             "",
@@ -309,7 +300,6 @@ class TestPreflightLadder(_PreflightCase):
         self.assertIn("a reachable SSH server", report.render())
 
     def test_connection_loss_after_login_is_listed_once(self) -> None:
-        """Later ssh errors give one item and no address."""
         real_run = self.machine.run
 
         def flaky(argv, **kwargs):
@@ -347,7 +337,6 @@ class TestMachineRungs(_PreflightCase):
         self.assertIn("not a QEMU virt VM", report.render())
 
     def test_virt_board_with_a_vendor_id_passes(self) -> None:
-        """A virt board with a real vendor ID is not rejected."""
         self.machine.compatible = "riscv-virtio"
         self.machine.mvendorid = "0x489"
         report = self.run_ladder()
@@ -385,20 +374,17 @@ class TestMachineRungs(_PreflightCase):
                 self.assertNotIn(word, script)
 
     def test_old_podman_is_reported(self) -> None:
-        """Podman 3 is too old."""
         self.machine.podman = "podman version 3.4.4"
         report = self.run_ladder()
         self.assertIn("podman 4.0 or newer", report.render())
         self.assertIn("found podman version 3.4.4", report.render(True))
 
     def test_rootful_podman_is_reported(self) -> None:
-        """Podman that runs as root is not accepted."""
         self.machine.podman_info = (0, "false /var/lib/containers/storage")
         report = self.run_ladder()
         self.assertIn("rootless podman for the login user", report.render())
 
     def test_missing_subordinate_ids_are_reported(self) -> None:
-        """No /etc/subuid entry gives the usermod fix."""
         self.machine.subuid = "0"
         report = self.run_ladder()
         self.assertIn("subordinate UID and GID ranges", report.render())
@@ -411,13 +397,11 @@ class TestMachineRungs(_PreflightCase):
         self.assertIn("a working rootless podman", report.render())
 
     def test_podman_graph_root_feeds_the_disk_check(self) -> None:
-        """Rung 11 measures the storage path that podman reports."""
         self.run_ladder()
         disk = [script for script in self.scripts() if "df -Pk" in script]
         self.assertIn("/home/tester/.local/share/containers/storage", disk[0])
 
     def test_unsafe_workdirs_are_rejected_before_mkdir(self) -> None:
-        """$HOME, its parents and ~/.ssh are never used or created."""
         cases = [
             ("~", "other than $HOME"),
             ("/home", "not a parent of $HOME"),
@@ -442,7 +426,6 @@ class TestMachineRungs(_PreflightCase):
         self.assertIsNone(target.remote_workdir())
 
     def test_unwritable_workdir_is_reported(self) -> None:
-        """A failed mkdir or write test gives the workdir item."""
         self.machine.workdir = ""
         report = self.run_ladder()
         self.assertIn(
@@ -450,7 +433,6 @@ class TestMachineRungs(_PreflightCase):
         )
 
     def test_one_filesystem_needs_20_gb(self) -> None:
-        """Podman storage and the workdir on one disk need 20 GB."""
         self.machine.free = (
             "graph=/dev/root 15728640",
             "work=/dev/root 15728640",
@@ -460,7 +442,6 @@ class TestMachineRungs(_PreflightCase):
         self.assertIn("(has 15.0 GB)", report.render())
 
     def test_two_filesystems_need_10_gb_each(self) -> None:
-        """Separate disks need 10 GB each."""
         self.machine.free = ("graph=/dev/a 12582912", "work=/dev/b 12582912")
         self.assertTrue(self.run_ladder().passed)
         self.machine = FakeMachine()
@@ -498,7 +479,6 @@ class TestReportColors(unittest.TestCase):
         )
 
     def test_default_render_has_no_color(self) -> None:
-        """Without a paint function, the text has no color codes."""
         expected = [
             "  [  ok]  6 Real hardware: mvendorid 0x489",
             "  [FAIL]  7 Podman: not installed",
@@ -512,7 +492,6 @@ class TestReportColors(unittest.TestCase):
         self.assertEqual("\n".join(expected), self.report.render(True))
 
     def test_only_failures_are_red(self) -> None:
-        """The failed rung and the verdict are red, and nothing else."""
         lines = self.report.render(True, _tag_colors).splitlines()
         self.assertEqual(
             "  <green>[  ok]</green>  6 Real hardware: mvendorid 0x489",
@@ -530,7 +509,6 @@ class TestReportColors(unittest.TestCase):
         self.assertEqual([lines[1], lines[3]], red)
 
     def test_stopped_verdict_is_the_only_red_line(self) -> None:
-        """A stop at rung 4 paints its verdict red and the rest plain."""
         login = preflight.Missing(
             "SSH key login to the machine", "ssh-copy-id board-1"
         )
@@ -544,7 +522,6 @@ class TestReportColors(unittest.TestCase):
         self.assertEqual([lines[0]], [line for line in lines if "</" in line])
 
     def test_passed_verdict_is_green(self) -> None:
-        """A passed report has a green verdict and no red."""
         report = preflight.PreflightReport(
             [preflight.RungResult(6, True, "mvendorid 0x489")]
         )
@@ -582,6 +559,9 @@ class TestMainPreflightWiring(unittest.TestCase):
             values: Return values that replace the defaults below. An
                 exception value is raised instead. ``self.calls`` keeps
                 the call order, also when main() raises.
+
+        Returns:
+            ``(exit code, calls, mocks, captured stdout)``.
         """
         calls = self.calls = []
         real_run = preflight.run_preflight
@@ -668,7 +648,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertEqual(2, out.count("<red>"))
 
     def test_qemu_rejects_the_preflight_flag(self) -> None:
-        """--preflight on the qemu target exits with 1 after rung 1."""
         code, calls, _, out = self._run_main(["--preflight"], {})
         self.assertEqual(1, code)
         self.assertEqual([("preflight", 1, 1)], calls)
@@ -684,7 +663,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertIn("ATESOR_PLATFORM", out)
 
     def test_preflight_flag_runs_the_full_ladder(self) -> None:
-        """--preflight runs rungs 1 to 11 and returns their result."""
         code, calls, mocks, _ = self._run_main(["--preflight"], self.env)
         self.assertEqual(0, code)
         self.assertEqual(("preflight", 1, preflight.LAST_RUNG), calls[-1])
@@ -695,12 +673,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertEqual(1, code)
 
     def test_repo_run_checks_the_cache_before_the_ladder(self) -> None:
-        """Rungs 2 to 11 run after the fast path and before the keys.
-
-        Then the native container starts, the agent runs, the tree on
-        the machine goes, and the container stops. The local Docker
-        setup never runs.
-        """
         code, calls, mocks, _ = self._run_main(["--repo", _URL], self.env)
         self.assertEqual(0, code)
         order = [call for call in calls if call[0] != "configure_logging"]
@@ -720,7 +692,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         mocks["setup_docker_environment"].assert_not_called()
 
     def test_failed_ladder_lists_what_is_missing(self) -> None:
-        """A failed ladder prints the list and skips the key check."""
         code, _, mocks, out = self._run_main(
             ["--repo", _URL], self.env, ladder_passes=False
         )
@@ -730,7 +701,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertIn("sudo apt install podman", out)
 
     def test_native_cleanup_never_touches_local_docker(self) -> None:
-        """Cleanup runs rungs 2 to 8, then the podman cleanup only."""
         code, calls, mocks, _ = self._run_main(["--cleanup"], self.env)
         self.assertEqual(0, code)
         self.assertIn(("preflight", 2, preflight.CLEANUP_LAST_RUNG), calls)
@@ -741,7 +711,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         mocks["setup_native_environment"].assert_not_called()
 
     def test_native_clean_image_removes_the_podman_image(self) -> None:
-        """--clean-image on native removes the image on the machine."""
         code, _, mocks, _ = self._run_main(["--clean-image"], self.env)
         self.assertEqual(0, code)
         mocks["cleanup_native_container"].assert_called_once_with(
@@ -750,7 +719,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         mocks["cleanup_container"].assert_not_called()
 
     def test_native_rebuild_never_rebuilds_local_images(self) -> None:
-        """--rebuild on native rebuilds the podman image only."""
         code, calls, mocks, _ = self._run_main(["--rebuild"], self.env)
         self.assertEqual(0, code)
         mocks["rebuild_all_sandboxes"].assert_not_called()
@@ -760,7 +728,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertEqual(("stop_native_container",), calls[-1])
 
     def test_native_setup_only_stops_the_container(self) -> None:
-        """--setup-only starts the container, then stops it again."""
         code, calls, mocks, out = self._run_main(["--setup-only"], self.env)
         self.assertEqual(0, code)
         mocks["check_keys"].assert_not_called()
@@ -771,7 +738,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertIn("Setup complete!", out)
 
     def test_native_container_stops_after_an_exception(self) -> None:
-        """An agent crash still stops the container on the machine."""
         with self.assertRaises(RuntimeError):
             self._run_main(
                 ["--repo", _URL],
@@ -781,7 +747,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         self.assertEqual(("stop_native_container",), self.calls[-1])
 
     def test_native_port_removes_the_tree_after_a_crash(self) -> None:
-        """The tree on the machine goes, then the container stops."""
         with self.assertRaises(RuntimeError):
             self._run_main(
                 ["--repo", _URL],
@@ -794,7 +759,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         )
 
     def test_native_clean_workspace_cleans_the_machine_repos(self) -> None:
-        """Choosing repos/ also cleans repos/ on the machine."""
         code, _, mocks, _ = self._run_main(
             ["--clean-workspace"],
             self.env,
@@ -804,7 +768,6 @@ class TestMainPreflightWiring(unittest.TestCase):
         mocks["clean_native_repos"].assert_called_once_with()
 
     def test_native_clean_workspace_keeps_machine_repos(self) -> None:
-        """Choosing logs/ only leaves the machine alone."""
         code, _, mocks, _ = self._run_main(
             ["--clean-workspace"],
             self.env,

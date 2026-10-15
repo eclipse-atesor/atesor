@@ -82,6 +82,12 @@ jobs:
               tests/test_sandbox.py
               tests/test_mirror.py
               tests/test_batch_test.py
+          - category: performance-mode
+            paths: >-
+              tests/test_machine.py
+              tests/test_workload.py
+              tests/test_bench.py
+              tests/test_optimize.py
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
