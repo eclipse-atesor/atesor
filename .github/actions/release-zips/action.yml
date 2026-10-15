@@ -26,6 +26,11 @@ description: |
   (e.g. `owner-foo-*-alpine.zip` vs `owner-foo-*-debian.zip`) are
   independent.
 
+  A zip whose exact filename is already an asset of any monthly release
+  is the same build and is skipped. (`--clobber` replaces a same-name
+  asset only inside the release it uploads to; when such an upload
+  spilled into an overflow release, the month held two copies.)
+
   Race-safe: parallel shards may all see the active release at e.g.
   990 assets and each try to upload 50. If `gh release upload` fails
   (because a peer shard already filled the release), this action
@@ -194,6 +199,29 @@ runs:
             (( s > highest_suffix )) && highest_suffix=$s
           fi
         done
+
+        # Skip zips already published this month under the same name
+        echo "::group::Skip zips already published this month"
+        month_assets=""
+        for tag in "${MONTH_TAGS[@]:-}"; do
+          [[ -z "$tag" ]] && continue
+          month_assets+="$(release_assets "$tag" || true)"$'\n'
+        done
+        to_upload=()
+        for zip in "${zips[@]}"; do
+          fname="$(basename "$zip")"
+          if grep -qFx -- "$fname" <<< "$month_assets"; then
+            echo "  - $fname: already published this month, skipping"
+          else
+            to_upload+=("$zip")
+          fi
+        done
+        echo "::endgroup::"
+        if (( ${#to_upload[@]} == 0 )); then
+          echo "::notice::All ${#zips[@]} zip(s) are already published this month — nothing to upload."
+          exit 0
+        fi
+        zips=("${to_upload[@]}")
 
         # Dedupe stale assets across ALL month releases
         echo "::group::Dedupe existing assets across month releases"
