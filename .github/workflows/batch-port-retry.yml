@@ -121,11 +121,12 @@ jobs:
         id: missing
         run: |
           set -euo pipefail
+          # The main run's zips stay in $src_dir: they only tell
+          # missing_pkgs.py what was built. Copied into workspace/packages,
+          # they were all uploaded again by the publish step and spilled
+          # into overflow releases as duplicates.
           src_dir="_main_artifact/workspace/packages"
           mkdir -p workspace/packages
-          if [[ -d "$src_dir" ]]; then
-            cp -v "$src_dir"/*.zip workspace/packages/ 2>/dev/null || true
-          fi
 
           # The retry checks out the TRIGGERING run's SHA, whose tree may
           # use either the old hyphenated or new snake_case script names
@@ -134,7 +135,7 @@ jobs:
           [ -f "$MISSING_PKGS" ] || MISSING_PKGS=.github/scripts/missing-pkgs.py
           missing="$(python3 "$MISSING_PKGS" \
               --list .github/packages/${LIST}.json \
-              --packages-dir workspace/packages \
+              --packages-dir "$src_dir" \
               --platform "$ATESOR_PLATFORM" \
               --format space)"
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
@@ -202,10 +203,9 @@ jobs:
         env:
           MISSING: ${{ steps.missing.outputs.missing }}
         run: |
-          # Pre-seeded workspace/packages already contains the main
-          # run's zips for this platform/list; batch_test only runs
-          # packages explicitly named via positional args, so it won't
-          # rebuild what already succeeded.
+          # workspace/packages starts empty: batch_test only runs the
+          # packages named as positional args, so only the retried
+          # packages are packaged and published.
           # shellcheck disable=SC2086  # intentional word-splitting
           python3 .github/scripts/batch_test.py \
             --list "$LIST" \
@@ -311,13 +311,15 @@ jobs:
   #
   # Each shard:
   #   1. Pulls EVERY full-list zip the main run produced for its
-  #      platform (across all shards) into workspace/packages.
+  #      platform (across all shards) into _main_artifact/ (read only;
+  #      never published again).
   #   2. Downloads the per-platform "remaining" plan from the main
   #      run, slices it to ITS shard via missing_pkgs.py
   #      --shard-index/--shard-total, and treats that slice as the
   #      declared set.
   #   3. Computes missing = (this shard's expected) - (built by main).
-  #   4. Re-runs only those packages and publishes via release-zips.
+  #   4. Re-runs only those packages and publishes only their new zips
+  #      via release-zips.
   retry-debian-full:
     name: retry-debian-full (shard ${{ matrix.shard }}/${{ needs.plan-retry-full.outputs.debian_total }})
     needs: [preflight, plan-retry-full]
@@ -371,11 +373,12 @@ jobs:
         id: missing
         run: |
           set -euo pipefail
+          # The main run's zips stay in $src_dir: they only tell
+          # missing_pkgs.py what was built. Copied into workspace/packages,
+          # they were all uploaded again by the publish step and spilled
+          # into overflow releases as duplicates.
           src_dir="_main_artifact/workspace/packages"
           mkdir -p workspace/packages
-          if [[ -d "$src_dir" ]]; then
-            cp -v "$src_dir"/*.zip workspace/packages/ 2>/dev/null || true
-          fi
 
           # The retry checks out the TRIGGERING run's SHA, whose tree may
           # use either the old hyphenated or new snake_case script names
@@ -384,7 +387,7 @@ jobs:
           [ -f "$MISSING_PKGS" ] || MISSING_PKGS=.github/scripts/missing-pkgs.py
           missing="$(python3 "$MISSING_PKGS" \
               --list "remaining/remaining-${ATESOR_PLATFORM}.json" \
-              --packages-dir workspace/packages \
+              --packages-dir "$src_dir" \
               --platform "$ATESOR_PLATFORM" \
               --shard-index "$SHARD_INDEX" \
               --shard-total "$SHARD_TOTAL" \
@@ -525,11 +528,12 @@ jobs:
         id: missing
         run: |
           set -euo pipefail
+          # The main run's zips stay in $src_dir: they only tell
+          # missing_pkgs.py what was built. Copied into workspace/packages,
+          # they were all uploaded again by the publish step and spilled
+          # into overflow releases as duplicates.
           src_dir="_main_artifact/workspace/packages"
           mkdir -p workspace/packages
-          if [[ -d "$src_dir" ]]; then
-            cp -v "$src_dir"/*.zip workspace/packages/ 2>/dev/null || true
-          fi
 
           # The retry checks out the TRIGGERING run's SHA, whose tree may
           # use either the old hyphenated or new snake_case script names
@@ -538,7 +542,7 @@ jobs:
           [ -f "$MISSING_PKGS" ] || MISSING_PKGS=.github/scripts/missing-pkgs.py
           missing="$(python3 "$MISSING_PKGS" \
               --list "remaining/remaining-${ATESOR_PLATFORM}.json" \
-              --packages-dir workspace/packages \
+              --packages-dir "$src_dir" \
               --platform "$ATESOR_PLATFORM" \
               --shard-index "$SHARD_INDEX" \
               --shard-total "$SHARD_TOTAL" \
