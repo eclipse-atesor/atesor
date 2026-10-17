@@ -1983,17 +1983,16 @@ class ScriptedOperations:
 
         sections.append("## Repository Structure Overview\n")
 
-        ls_cmd = f"ls -la {target_path} 2>/dev/null"
-        ls_result = execute_command(ls_cmd, use_docker=True)
-
+        # No `ls -la` here: the build evidence (src/evidence.py) already
+        # lists the top-level files, and modes, owners and dates do not
+        # help a build plan. The two patterns drop the .git directory
+        # and its subdirectories only; `.git` alone (a regex wildcard)
+        # also dropped .github, which holds the CI build steps.
         find_cmd = (
             f"find {target_path} -maxdepth 2 -type d 2>/dev/null "
-            f"| grep -v '.git' | sort"
+            f"| grep -v -e '/\\.git$' -e '/\\.git/' | sort"
         )
         find_result = execute_command(find_cmd, use_docker=True)
-
-        if ls_result.success and ls_result.stdout.strip():
-            sections.append("```\n" + ls_result.stdout.strip() + "\n```\n")
 
         if find_result.success and find_result.stdout.strip():
             dirs = find_result.stdout.strip().split("\n")[:20]
@@ -2098,7 +2097,8 @@ class ScriptedOperations:
         if py_result.success and py_result.stdout.strip() != "0":
             sections.append(f"- Python files: {py_result.stdout.strip()}\n")
 
-        return "\n".join(sections)
+        # Each section ends with its own newline; "\n".join doubled them.
+        return "".join(sections)
 
     def read_file(self, filepath: str, max_lines: int = 1000) -> str:
         """Read up to ``max_lines`` lines of a text file.

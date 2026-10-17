@@ -35,7 +35,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,42 @@ def _looks_like_noise(path: str) -> bool:
 def _looks_like_secondary(path: str) -> bool:
     p = path.lower()
     return any(tok in p for tok in _SECONDARY_TOKENS)
+
+
+def _rules_are_unsure(
+    repo_name: str, raw_artifacts: List[Dict[str, Any]]
+) -> bool:
+    """Return True when only a model can tell the deliverables apart.
+
+    The rules decide a file named after the package, a library of a
+    library package (no binary is named after the package), and a file
+    under a test/example/tools path. Anything else is undecided: the
+    rules make it primary. That is safe for a lone binary, which must be
+    the deliverable; next to a decided primary it may be a helper, a
+    probe or a bundled test library (btop ships libgtest.a), which only
+    a reader of the names can tell.
+    """
+    repo_tag = (repo_name or "").lower()
+    kept = []
+    for art in raw_artifacts:
+        path = art.get("filepath") or art.get("path") or ""
+        if not path or _looks_like_noise(path):
+            continue
+        bn = os.path.basename(path).lower()
+        named = bool(repo_tag) and (
+            bn == repo_tag or bn.startswith(repo_tag + ".")
+        )
+        library = art.get("type", "binary").startswith("library")
+        kept.append((path, named, library))
+    named_binary = any(named and not library for _, named, library in kept)
+    undecided = 0
+    decided_primary = 0
+    for path, named, library in kept:
+        if named or (library and not named_binary):
+            decided_primary += 1
+        elif not _looks_like_secondary(path):
+            undecided += 1
+    return undecided >= 2 or (undecided == 1 and decided_primary > 0)
 
 
 def _rule_based_curate(
@@ -182,6 +218,18 @@ _CURATOR_PROMPT = (
 )
 
 
+# Structured-output schema of the curator reply.
+_CURATOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        key: {"type": "array", "items": {"type": "integer"}}
+        for key in ("primary", "secondary", "drop")
+    },
+    "required": ["primary", "secondary", "drop"],
+    "additionalProperties": False,
+}
+
+
 def _format_numbered(raw_artifacts: List[Dict[str, Any]]) -> str:
     """Return the artifacts as numbered ``[type] path`` prompt lines."""
     lines = []
@@ -228,8 +276,12 @@ def curate_artifacts(
     repo_name: str,
     build_system: str = "unknown",
     llm: Any = None,
+    usage_sink: Optional[Callable[[float, int, int], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Curate the raw artifact scan into a clean, user-facing list.
+
+    The deterministic rules decide first; the LLM is asked only when
+    they are unsure (see ``_rules_are_unsure``).
 
     Args:
         raw_artifacts: ArtifactScanner output (``{filepath, type, ...}``
@@ -241,6 +293,9 @@ def curate_artifacts(
             hint.
         llm: An instance returned by ``get_model_for_role()``. When
             ``None``, the deterministic rule-based curator is used.
+        usage_sink: Receives ``(cost_usd, tokens_in, tokens_out)`` of the
+            LLM call, so the run's call, token and cost counters (and
+            the cost cap) include it.
 
     Returns:
         A list of artifact dicts (same shape as the input) with an added
@@ -270,6 +325,10 @@ def curate_artifacts(
         )
         return _rule_based_curate(repo_name, pre_filtered)
 
+    if not _rules_are_unsure(repo_name, pre_filtered):
+        logger.info("Artifact curator: the rules decide; no LLM call.")
+        return _rule_based_curate(repo_name, pre_filtered)
+
     n = len(pre_filtered)
     prompt = _CURATOR_PROMPT.format(
         repo_name=repo_name or "unknown",
@@ -287,16 +346,24 @@ def curate_artifacts(
 
         from .graph import invoke_llm
         from .llm_helpers import (
+            bind_output_schema,
             extract_content,
             response_cost,
             response_usage,
         )
         from .llm_logger import log_llm_call
 
-        response = invoke_llm(llm, [HumanMessage(content=prompt)], timeout=60)
+        # The default wall timeout: it stays above the provider's own
+        # HTTP timeout (see graph.LLM_WALL_TIMEOUT).
+        response = invoke_llm(
+            bind_output_schema(llm, _CURATOR_SCHEMA),
+            [HumanMessage(content=prompt)],
+        )
         # A list of parts (Claude thinking + text) keeps only the text.
         text = extract_content(getattr(response, "content", response))
         tokens_in, tokens_out = response_usage(response)
+        if usage_sink is not None:
+            usage_sink(response_cost(llm, response), tokens_in, tokens_out)
         log_llm_call(
             agent_role="curator",
             prompt=prompt,

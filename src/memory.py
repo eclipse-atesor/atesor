@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Optional
 import filelock
 
 from .config import DATA_DIR
+from .evidence import strip_failure_prefix
 from .scripted_ops import normalize_repo_url
 from .target import is_native
 
@@ -139,6 +140,93 @@ def _seed_bundled_data() -> None:
 _seed_bundled_data()
 
 
+# Words that say nothing about which error it is.
+_COMMON_WORDS = frozenset(
+    {
+        "error",
+        "build",
+        "command",
+        "failed",
+        "exit",
+        "line",
+        "from",
+        "with",
+        "such",
+        "file",
+        "directory",
+        "found",
+        "cannot",
+        "could",
+        "make",
+        "warning",
+        "note",
+        "this",
+        "that",
+        "have",
+        "does",
+        "into",
+        "there",
+        "were",
+        "your",
+        "configure",
+    }
+)
+
+
+def _unescape_pattern(pattern: str) -> str:
+    """Return a ``re.escape``-d text in its readable form."""
+    # re.S: an escaped newline ("\\" + newline) is unescaped as well.
+    return re.sub(r"\\(.)", r"\1", pattern, flags=re.S)
+
+
+def _distinct_words(text: str) -> set:
+    """Return the words of ``text`` that can tell two errors apart."""
+    words = re.findall(r"[a-z][a-z0-9_+.-]{3,}", text.lower())
+    return {w for w in words if w not in _COMMON_WORDS}
+
+
+def _error_matches(example: "AgentExample", error: str) -> bool:
+    """Return True when ``example`` was learned from this kind of error.
+
+    Its ``error_pattern`` regex matches the error, or at least 60% (and
+    at least two) of the distinctive words of its error text occur in
+    the error.
+    """
+    pattern = example.error_pattern or ""
+    # The failed command is not part of the error: two packages that
+    # ran the same `cmake ..` failed for different reasons.
+    error_text = strip_failure_prefix(error)
+    # An older auto example escaped the head of the whole message, so
+    # its pattern starts with "Build command failed: <cmd> (exit N) - ".
+    # The rest is the error itself; it matches the same error from any
+    # command. A head cut inside the command holds no error text.
+    old_style = pattern.startswith("Build\\ command\\ failed:")
+    core = strip_failure_prefix(_unescape_pattern(pattern)).strip()
+    if core.lower().startswith("build command failed:"):
+        core = ""
+    if pattern and not old_style:
+        try:
+            if re.search(pattern, error_text, re.IGNORECASE):
+                return True
+        except re.error:
+            pass
+    # The head cut can leave only a generic compiler phrase ("In file
+    # included fr"), which every C error contains; 24 characters keep
+    # a real error text ("configure: error: NOT FOUND!").
+    if len(core) >= 24 and core.lower() in error_text.lower():
+        return True
+    # Word overlap uses the error text only: words of the failed command
+    # (buildvcs, false) say nothing about the error.
+    ctx = example.raw.get("error_context", {}) or {}
+    words = _distinct_words(
+        strip_failure_prefix(ctx.get("error_message") or "") or core
+    )
+    if len(words) < 2:
+        return False
+    found = _distinct_words(error_text)
+    return len(words & found) / len(words) >= 0.6
+
+
 @dataclass
 class AgentExample:
     """A single few-shot example for an agent."""
@@ -223,9 +311,11 @@ class AgentExample:
     def _to_fixer_prompt(self) -> str:
         fix_data = self.fix or self.solution or {}
         error_ctx = self.raw.get("error_context", {})
+        # An older auto example has only its regex; show it unescaped.
         error_msg = (
-            error_ctx.get("error_message") or self.error_pattern or ""
-        )[:120]
+            error_ctx.get("error_message")
+            or _unescape_pattern(self.error_pattern or "")
+        )[:200]
 
         actions_text = ""
         for action in fix_data.get("actions", []):
@@ -421,6 +511,35 @@ class AgentMemory:
             return ex_sandbox == ctx_sandbox
 
         candidates = [ex for ex in self.examples if _sandbox_ok(ex)]
+        # Only examples that match the case: a fixer example for the
+        # same kind of error, a scout plan for the same build system.
+        # Without this, every candidate scored above zero and the first
+        # two of the file went into every prompt (October 2026: one
+        # pair of Debian fixer examples in 29% of the fixer calls).
+        error = context.get("error_message")
+        if self.agent_type == "fixer":
+            # An example with no actions holds no fix to reuse; in the
+            # October 2026 data these were stub-file hacks and advice
+            # the fixer cannot follow (raise a timeout).
+            candidates = [
+                ex
+                for ex in candidates
+                if (ex.fix or ex.solution or {}).get("actions")
+            ]
+        if self.agent_type == "fixer" and error:
+            candidates = [ex for ex in candidates if _error_matches(ex, error)]
+        build_system = context.get("build_system")
+        if (
+            self.agent_type == "scout"
+            and build_system
+            and build_system != "unknown"
+        ):
+            candidates = [
+                ex
+                for ex in candidates
+                if (ex.build_system or ex.context.get("build_system", ""))
+                == build_system
+            ]
         if not candidates:
             # Nothing matches the active distro — better to inject zero
             # examples (forces the LLM to follow Platform knowledge) than

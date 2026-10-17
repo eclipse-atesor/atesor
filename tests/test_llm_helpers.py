@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
 from src.llm_helpers import (
     LLMCallOutcome,
     ValidationResult,
@@ -13,11 +15,16 @@ from src.llm_helpers import (
     _extract_slug_hint,
     _is_provider_error,
     _shrink_max_tokens,
+    bind_output_schema,
     extract_content,
     extract_json_block,
+    is_refusal,
     llm_call_with_validation,
+    response_cache_usage,
     response_cost,
+    response_stop_reason,
     response_usage,
+    system_message,
 )
 
 
@@ -741,6 +748,320 @@ class TestClaudeResponses(unittest.TestCase):
                 validator=_ok_validator,
             )
         self.assertEqual(log.call_args.kwargs["model"], "claude-haiku-5-5")
+
+
+def _reply(content, stop_reason):
+    """Build a fake LLM reply with a provider stop reason."""
+    return SimpleNamespace(
+        content=content, response_metadata={"stop_reason": stop_reason}
+    )
+
+
+class TestRefusalHandling(unittest.TestCase):
+    """A safety refusal ends the call: no critique retry of the prompt."""
+
+    def _invoke(self, replies):
+        calls = {"n": 0}
+
+        def invoke_fn(llm, messages, timeout=120):
+            calls["n"] += 1
+            return replies[calls["n"] - 1]
+
+        return invoke_fn, calls
+
+    def test_stop_reason_and_refusal_detection(self) -> None:
+        self.assertEqual(
+            response_stop_reason(_reply("x", "end_turn")), "end_turn"
+        )
+        self.assertTrue(is_refusal(_reply("", "refusal")))
+        self.assertTrue(
+            is_refusal(
+                SimpleNamespace(
+                    content="",
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            )
+        )
+        self.assertFalse(is_refusal(_reply('{"a": 1}', "end_turn")))
+        self.assertFalse(is_refusal(SimpleNamespace(content="x")))
+        self.assertEqual(
+            response_stop_reason(SimpleNamespace(content="x")), ""
+        )
+
+    def test_refusal_is_not_retried(self) -> None:
+        invoke, calls = self._invoke(
+            [_reply("", "refusal"), _reply('{"ok": true}', "end_turn")]
+        )
+        with mock.patch("src.llm_helpers.log_llm_call") as log:
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hi",
+                validator=_ok_validator,
+                max_retries=2,
+            )
+        self.assertEqual(calls["n"], 1)
+        self.assertTrue(out.refused)
+        self.assertIsNone(out.data)
+        self.assertEqual(out.attempts, 1)
+        self.assertIn("refused", out.last_error)
+        self.assertEqual(
+            log.call_args.kwargs["metadata"]["stop_reason"], "refusal"
+        )
+
+    def test_refusal_rotates_to_another_model(self) -> None:
+        invoke, calls = self._invoke(
+            [_reply("", "refusal"), _reply('{"ok": true}', "end_turn")]
+        )
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                fallback_llms=[mock.MagicMock()],
+                prompt="hi",
+                validator=_ok_validator,
+            )
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(out.data, {"ok": True})
+        self.assertFalse(out.refused)
+
+    def test_refusal_still_returns_the_fallback(self) -> None:
+        invoke, _ = self._invoke([_reply("", "refusal")])
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="hi",
+                validator=_ok_validator,
+                fallback_factory=lambda: {"fb": 1},
+            )
+        self.assertTrue(out.used_fallback)
+        self.assertTrue(out.refused)
+        self.assertEqual(out.data, {"fb": 1})
+
+
+class TestCachedSystemPrompt(unittest.TestCase):
+    """Static instructions go first, as a cacheable system message."""
+
+    def test_claude_system_blocks_carry_cache_breakpoints(self) -> None:
+        msgs = system_message(["rules", "", "knowledge"], _claude())
+        self.assertEqual(len(msgs), 1)
+        self.assertIsInstance(msgs[0], SystemMessage)
+        self.assertEqual(
+            msgs[0].content,
+            [
+                {
+                    "type": "text",
+                    "text": "rules",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": "knowledge",
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+        )
+
+    def test_other_models_get_plain_text(self) -> None:
+        msgs = system_message("rules", SimpleNamespace(model_name="gpt-4o"))
+        self.assertEqual(msgs[0].content, "rules")
+        self.assertEqual(system_message(None, _claude()), [])
+
+    def test_cache_usage_is_read_from_usage_metadata(self) -> None:
+        reply = SimpleNamespace(
+            content="x",
+            usage_metadata={
+                "input_tokens": 5000,
+                "output_tokens": 10,
+                "input_token_details": {
+                    "cache_read": 3000,
+                    "cache_creation": 0,
+                    "ephemeral_5m_input_tokens": 1500,
+                },
+            },
+        )
+        self.assertEqual(response_cache_usage(reply), (3000, 1500))
+        self.assertEqual(
+            response_cache_usage(SimpleNamespace(content="x")), (0, 0)
+        )
+
+    def test_call_sends_system_first_and_logs_cache_tokens(self) -> None:
+        seen = {}
+
+        def invoke_fn(llm, messages, timeout=120):
+            seen["messages"] = list(messages)
+            return SimpleNamespace(
+                content='{"ok": true}',
+                response_metadata={"stop_reason": "end_turn"},
+                usage_metadata={
+                    "input_tokens": 4000,
+                    "output_tokens": 100,
+                    "input_token_details": {"cache_read": 3000},
+                },
+            )
+
+        with mock.patch("src.llm_helpers.log_llm_call") as log:
+            out = llm_call_with_validation(
+                invoke_fn=invoke_fn,
+                llm=_claude(),
+                prompt="the task",
+                system_prompt=["the rules"],
+                validator=_ok_validator,
+            )
+        first, second = seen["messages"]
+        self.assertIsInstance(first, SystemMessage)
+        self.assertEqual(second.content, "the task")
+        meta = log.call_args.kwargs["metadata"]
+        self.assertEqual((meta["cache_read"], meta["cache_write"]), (3000, 0))
+        # 1000 plain tokens at $2/M + 3000 read at $0.2/M + 100 out at $10/M
+        self.assertAlmostEqual(out.cost_usd, (2000 + 600 + 1000) / 1e6)
+        self.assertIn("the rules", log.call_args.kwargs["prompt"])
+
+
+def _claude():
+    """Build a fake Claude chat model."""
+    return SimpleNamespace(model="claude-sonnet-5-5")
+
+
+class TestInformedRetry(unittest.TestCase):
+    """A retry shows the model its rejected reply before the critique."""
+
+    def test_rejected_reply_is_kept_before_the_critique(self) -> None:
+        threads = []
+        replies = [
+            AIMessage(content='{"x": 1}'),
+            AIMessage(content='{"x": 2, "y": 3}'),
+        ]
+
+        def invoke_fn(llm, messages, timeout=120):
+            threads.append(list(messages))
+            return replies[len(threads) - 1]
+
+        def validator(d):
+            if "y" not in d:
+                return ValidationResult.bad("missing y")
+            return ValidationResult.good()
+
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=invoke_fn,
+                llm=mock.MagicMock(),
+                prompt="task",
+                validator=validator,
+            )
+        second = threads[1]
+        self.assertEqual(
+            [type(m).__name__ for m in second],
+            ["HumanMessage", "AIMessage", "HumanMessage"],
+        )
+        self.assertIs(second[1], replies[0])
+        self.assertIn("missing y", second[2].content)
+        self.assertIn("(above)", second[2].content)
+        self.assertEqual(out.data, {"x": 2, "y": 3})
+        # The outcome carries the thread for a follow-up round.
+        self.assertEqual(len(out.messages), 4)
+        self.assertIs(out.messages[-1], replies[1])
+
+    def test_unparseable_reply_is_kept_too(self) -> None:
+        threads = []
+        replies = ["not json", '{"ok": true}']
+
+        def invoke_fn(llm, messages, timeout=120):
+            threads.append(list(messages))
+            return SimpleNamespace(content=replies[len(threads) - 1])
+
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            llm_call_with_validation(
+                invoke_fn=invoke_fn,
+                llm=mock.MagicMock(),
+                prompt="task",
+                validator=_ok_validator,
+            )
+        self.assertIsInstance(threads[1][1], AIMessage)
+        self.assertEqual(threads[1][1].content, "not json")
+
+    def test_history_goes_between_system_and_prompt(self) -> None:
+        seen = {}
+
+        def invoke_fn(llm, messages, timeout=120):
+            seen["m"] = list(messages)
+            return SimpleNamespace(content='{"ok": true}')
+
+        earlier = [HumanMessage(content="round 0"), AIMessage(content="{}")]
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            llm_call_with_validation(
+                invoke_fn=invoke_fn,
+                llm=_claude(),
+                prompt="round 1",
+                system_prompt="rules",
+                history=earlier,
+                validator=_ok_validator,
+            )
+        names = [type(m).__name__ for m in seen["m"]]
+        self.assertEqual(
+            names,
+            ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"],
+        )
+        self.assertEqual(seen["m"][-1].content, "round 1")
+
+
+class TestStructuredOutput(unittest.TestCase):
+    """JSON roles ask Claude for structured output of their schema."""
+
+    def test_claude_models_are_bound_to_the_schema(self) -> None:
+        llm = mock.MagicMock()
+        llm.model_name = None
+        llm.model = "claude-haiku-5-5"
+        schema = {"type": "object", "properties": {}}
+        bound = bind_output_schema(llm, schema)
+        llm.bind.assert_called_once_with(response_format=schema)
+        self.assertIs(bound, llm.bind.return_value)
+
+    def test_other_models_and_no_schema_are_unchanged(self) -> None:
+        llm = SimpleNamespace(model_name="gpt-4o")
+        self.assertIs(bind_output_schema(llm, {"type": "object"}), llm)
+        claude = _claude()
+        self.assertIs(bind_output_schema(claude, None), claude)
+
+    def test_the_call_invokes_the_bound_model(self) -> None:
+        llm = mock.MagicMock()
+        llm.model_name = None
+        llm.model = "claude-sonnet-5-5"
+        seen = []
+
+        def invoke_fn(model, messages, timeout=120):
+            seen.append(model)
+            return SimpleNamespace(content='{"ok": true}')
+
+        with mock.patch("src.llm_helpers.log_llm_call") as log:
+            llm_call_with_validation(
+                invoke_fn=invoke_fn,
+                llm=llm,
+                prompt="task",
+                output_schema={"type": "object"},
+                validator=_ok_validator,
+            )
+        self.assertIs(seen[0], llm.bind.return_value)
+        self.assertEqual(log.call_args.kwargs["model"], "claude-sonnet-5-5")
+
+
+class TestRaisedAttemptsAreLogged(unittest.TestCase):
+    """An attempt that raised is in the audit log, with the error."""
+
+    def test_raised_attempt_is_logged(self) -> None:
+        invoke, _ = _make_invoke([RuntimeError("socket closed"), '{"ok": 1}'])
+        with mock.patch("src.llm_helpers.log_llm_call") as log:
+            llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=mock.MagicMock(),
+                prompt="task",
+                validator=_ok_validator,
+            )
+        first = log.call_args_list[0].kwargs
+        self.assertEqual(first["response"], "")
+        self.assertIn("socket closed", first["metadata"]["error"])
+        self.assertEqual(log.call_count, 2)
 
 
 if __name__ == "__main__":

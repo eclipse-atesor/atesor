@@ -592,18 +592,21 @@ jobs:
           merge-multiple: false
         continue-on-error: true
 
-      - name: Collect all *.log files
+      - name: Collect all *.log and *.jsonl files
         run: |
           set -euo pipefail
           mkdir -p collected-logs
           # Preserve shard-level path context to avoid filename collisions.
+          # *.jsonl holds the full LLM prompts and replies
+          # (agent-call_<repo>.jsonl); the .log copy is cut at 10,000
+          # characters.
           while IFS= read -r f; do
             rel="${f#collected/}"
             mkdir -p "collected-logs/$(dirname "$rel")"
             cp "$f" "collected-logs/$rel"
-          done < <(find collected -type f -name '*.log' 2>/dev/null || true)
+          done < <(find collected -type f \( -name '*.log' -o -name '*.jsonl' \) 2>/dev/null || true)
 
-          count=$(find collected-logs -type f -name '*.log' | wc -l | tr -d ' ')
+          count=$(find collected-logs -type f | wc -l | tr -d ' ')
           echo "Collected $count log file(s)."
 
       - name: Upload platform full logs (debian)

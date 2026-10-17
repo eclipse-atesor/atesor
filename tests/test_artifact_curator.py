@@ -191,5 +191,54 @@ class TestCuratorEdgeCases(unittest.TestCase):
         self.assertEqual(roles.get("/b/tests/foo-test"), "secondary")
 
 
+class TestRulesFirst(unittest.TestCase):
+    """The LLM is asked only when the rules cannot decide."""
+
+    def _llm(self, text):
+        m = mock.MagicMock()
+        m.invoke.return_value = mock.MagicMock(content=text)
+        return m
+
+    def test_sure_cases_need_no_llm(self) -> None:
+        llm = self._llm("{}")
+        out = curate_artifacts(
+            [_art("/b/libz.a", "library_static"), _art("/b/test/example")],
+            "zlib",
+            llm=llm,
+        )
+        llm.invoke.assert_not_called()
+        self.assertEqual(out[0]["role"], "primary")
+        llm = self._llm("{}")
+        curate_artifacts([_art("/b/othername")], "foo", llm=llm)
+        llm.invoke.assert_not_called()
+
+    def test_bundled_test_library_next_to_the_binary_asks_the_llm(
+        self,
+    ) -> None:
+        llm = self._llm('{"primary": [1], "secondary": [2], "drop": []}')
+        curate_artifacts(
+            [_art("/b/btop"), _art("/b/lib/libgtest.a", "library_static")],
+            "btop",
+            llm=llm,
+        )
+        llm.invoke.assert_called_once()
+
+    def test_two_unnamed_binaries_ask_the_llm_and_count_it(self) -> None:
+        llm = self._llm('{"primary": [1], "secondary": [2], "drop": []}')
+        usage = []
+        with (
+            mock.patch("src.llm_helpers.response_usage", return_value=(40, 5)),
+            mock.patch("src.llm_helpers.response_cost", return_value=0.001),
+        ):
+            curate_artifacts(
+                [_art("/b/tool-a"), _art("/b/tool-b")],
+                "foo",
+                llm=llm,
+                usage_sink=lambda c, i, o: usage.append((c, i, o)),
+            )
+        llm.invoke.assert_called_once()
+        self.assertEqual(usage, [(0.001, 40, 5)])
+
+
 if __name__ == "__main__":
     unittest.main()

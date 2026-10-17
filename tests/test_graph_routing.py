@@ -7,6 +7,7 @@ heuristic plan, supervisor, finish, and the build-fix subgraph.
 import unittest
 
 from src.graph import (
+    _fix_loop_stop_reason,
     create_workflow,
     route_analyst_to_next,
     route_build_result,
@@ -26,6 +27,7 @@ from src.state import (
     ErrorCategory,
     FixAttempt,
     PackageAnalysis,
+    create_error_record,
     create_initial_state,
 )
 
@@ -361,6 +363,176 @@ class TestBuildFixSubgraphRouting(unittest.TestCase):
             max_attempts=5,
         )
         self.assertEqual(route_fix_result(s), "__end__")
+
+
+_BLOCKED = (
+    "Build command failed: cabal --version (exit 1) - Command blocked by "
+    "safety validation: Unknown command pattern (not in whitelist)"
+)
+
+
+def _fix(build_result=None) -> FixAttempt:
+    """Build a failed FixAttempt with an optional build_result marker."""
+    return FixAttempt(
+        error_category=ErrorCategory.COMPILATION,
+        strategy="patch the source",
+        changes_made=["Executed: sed -i x a.c"],
+        success=False,
+        build_result=build_result,
+    )
+
+
+def _error(message: str):
+    """Build a COMPILATION error record for ``message``."""
+    return create_error_record(
+        message, ErrorCategory.COMPILATION, command="make"
+    )
+
+
+class TestFixLoopStopRules(unittest.TestCase):
+    """The fixer is not called when another round cannot help."""
+
+    def test_validator_block_exits_subgraph_without_fixer(self) -> None:
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=1,
+            error_history=[_error(_BLOCKED)],
+        )
+        self.assertEqual(route_build_result(s), "__end__")
+
+    def test_supervisor_replans_once_after_validator_block(self) -> None:
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=1,
+            package_analysis=_analysis(),
+            error_history=[_error(_BLOCKED)],
+        )
+        self.assertEqual(route_supervisor_to_next(s), "scout_node")
+        s.context_cache["validator_block_replans"] = 1
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_unchanged_error_after_two_fixes_stops(self) -> None:
+        msg = "Build command failed: make (exit 2) - a.c:3: error: x"
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=3,
+            package_analysis=_analysis(),
+            fixes_attempted=[_fix(), _fix()],
+            error_history=[_error("other failure"), _error(msg), _error(msg)],
+        )
+        self.assertEqual(route_build_result(s), "__end__")
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_error_category_alone_does_not_skip_the_fixer(self) -> None:
+        """A noisy PERMISSION or DISK_SPACE category still gets fixes."""
+        for category in (ErrorCategory.PERMISSION, ErrorCategory.DISK_SPACE):
+            with self.subTest(category=category):
+                s = _base_state(
+                    build_status=BuildStatus.FAILED, attempt_count=1
+                )
+                s.add_error(
+                    create_error_record(
+                        "Build command failed: bash ./build.sh (exit 1) - "
+                        "warning: unable to access '/root/.config/git/"
+                        "ignore': Permission denied",
+                        category,
+                        command="bash ./build.sh",
+                    )
+                )
+                self.assertEqual(_fix_loop_stop_reason(s), "")
+                self.assertEqual(route_build_result(s), "fix_node")
+
+    def test_changed_error_after_two_fixes_continues(self) -> None:
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=3,
+            fixes_attempted=[_fix(), _fix()],
+            error_history=[
+                _error("Build command failed: make - a.c:3: error: x"),
+                _error("Build command failed: make - b.c:9: error: y"),
+            ],
+        )
+        self.assertEqual(route_build_result(s), "fix_node")
+
+    def test_one_fix_with_unchanged_error_gets_another_round(self) -> None:
+        msg = "Build command failed: make (exit 2) - a.c:3: error: x"
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=2,
+            fixes_attempted=[_fix()],
+            error_history=[_error(msg), _error(msg)],
+        )
+        self.assertEqual(route_build_result(s), "fix_node")
+
+    def test_refused_package_stops_the_loop(self) -> None:
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=1,
+            package_analysis=_analysis(),
+            error_history=[_error("Build command failed: make - error")],
+        )
+        s.context_cache["llm_refused"] = "fixer"
+        self.assertEqual(route_build_result(s), "__end__")
+        self.assertEqual(route_verify_result(s), "__end__")
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_no_change_fix_goes_back_to_the_fixer(self) -> None:
+        s = _base_state(
+            build_status=BuildStatus.FIXING,
+            attempt_count=2,
+            fixes_attempted=[_fix(build_result="no change applied")],
+        )
+        self.assertEqual(route_fix_result(s), "fix_node")
+        s.attempt_count = 5
+        self.assertEqual(route_fix_result(s), "__end__")
+
+    def test_invalid_fixer_round_stops_the_loop(self) -> None:
+        """A fixer round without a valid answer is not rebuilt and retried."""
+        invalid = (
+            "FIXER proposed invalid fix: schema validation failed: Unsafe "
+            "command: Unknown command pattern (not in whitelist)"
+        )
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=2,
+            package_analysis=_analysis(),
+            error_history=[
+                _error("Build command failed: make - x"),
+                _error(invalid),
+            ],
+        )
+        self.assertEqual(route_supervisor_to_next(s), "escalate_node")
+
+    def test_fixer_provider_fault_gets_another_round(self) -> None:
+        """A timeout is a provider fault, so the loop goes on."""
+        fault = (
+            "FIXER proposed invalid fix: LLM invocation raised: LLM call "
+            "timed out after 135s"
+        )
+        s = _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=2,
+            package_analysis=_analysis(),
+            build_plan=BuildPlan(
+                build_system="make",
+                build_system_confidence=0.9,
+                phases=[BuildPhase(1, "build", ["make"])],
+                total_estimated_duration="1m",
+            ),
+            error_history=[
+                _error("Build command failed: make - x"),
+                _error(fault),
+            ],
+        )
+        self.assertEqual(route_supervisor_to_next(s), "build_fix_subgraph")
+
+    def test_fix_node_loops_to_itself_in_the_graph(self) -> None:
+        from src.graph import create_build_fix_subgraph
+
+        graph = create_build_fix_subgraph().get_graph()
+        targets = {(edge.source, edge.target) for edge in graph.edges}
+        self.assertIn(("fix_node", "fix_node"), targets)
+        self.assertIn(("fix_node", "build_node"), targets)
 
 
 if __name__ == "__main__":

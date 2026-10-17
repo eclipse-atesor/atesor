@@ -249,9 +249,9 @@ ALPINE_RISCV = PlatformProfile(
             " errors."
         ),
         (
-            "If the bundled Go toolchain is too old for go.mod,"
-            " download a newer riscv64 Go binary from"
-            " https://go.dev/dl/ as a recovery option."
+            "If go.mod needs a newer Go than the bundled toolchain, the"
+            " builder downloads that Go release by itself; do not"
+            " install golang packages and do not escalate for this."
         ),
     ],
 )
@@ -414,12 +414,7 @@ DEBIAN_RISCV = PlatformProfile(
             " which cannot parse modern go.mod files (toolchain"
             " directive, 3-part `go 1.X.Y` version)."
         ),
-        (
-            "GOTOOLCHAIN=local is set image-wide; if go.mod requires a"
-            " newer Go than the bundled toolchain, treat as"
-            " MISSING_TOOLS and escalate -- do NOT attempt apt golang"
-            " install."
-        ),
+        "GOTOOLCHAIN=local is set image-wide.",
         (
             'If `git` is not installed ("git: command not found"),'
             " install it via the package manager first."
@@ -430,9 +425,9 @@ DEBIAN_RISCV = PlatformProfile(
             " errors."
         ),
         (
-            "If the bundled Go toolchain is too old for go.mod,"
-            " download a newer riscv64 Go binary from"
-            " https://go.dev/dl/ as a recovery option."
+            "If go.mod needs a newer Go than the bundled toolchain, the"
+            " builder downloads that Go release by itself; do not"
+            " install golang packages and do not escalate for this."
         ),
     ],
 )

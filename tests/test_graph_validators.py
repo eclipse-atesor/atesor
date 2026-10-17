@@ -1306,6 +1306,24 @@ class TestNpmScripts(unittest.TestCase):
             self.assertEqual(_npm_scripts(d), [])
 
 
+class TestFixCommandRejectionNamesTheCommand(unittest.TestCase):
+    """A retry can only fix what the critique names."""
+
+    def test_unknown_tool_reason_names_command_and_tools(self) -> None:
+        ok, reason = validate_fix_command("cabal build exe:hadolint")
+        self.assertFalse(ok)
+        self.assertIn("`cabal build exe:hadolint`", reason)
+        self.assertIn("Allowed tools include", reason)
+
+    def test_chain_reason_names_command(self) -> None:
+        ok, reason = validate_fix_command(
+            "apt-get update && apt-get install x"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Chained commands are not allowed", reason)
+        self.assertIn("`apt-get update && apt-get install x`", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
 

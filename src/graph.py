@@ -37,12 +37,24 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
 from .artifact_scanner import UNVERIFIED, WRONG_ARCH, ArtifactScanner
-from .evidence import collect_build_evidence, error_context_excerpts
+from .evidence import (
+    collect_build_evidence,
+    cut_text,
+    error_context_excerpts,
+    failure_digest,
+    first_error_line,
+    has_error_line,
+    strip_failure_prefix,
+    top_level_listing,
+)
 from .knowledge import get_system_knowledge_summary
 from .llm_helpers import (
     ValidationResult,
+    is_refusal,
     llm_call_with_validation,
+    response_cache_usage,
     response_cost,
+    response_stop_reason,
     response_usage,
 )
 from .llm_logger import log_llm_call
@@ -67,12 +79,16 @@ from .state import (
     PackageAnalysis,
     TaskPhase,
     TaskPlan,
+    _error_signature,
+    _first_meaningful_error_line,
+    _normalize_error_line,
     classify_error,
     create_error_record,
     should_escalate,
 )
 from .tools import (
     BUILD_STEP_RE,
+    CommandValidator,
     apply_patch,
     execute_command,
     masks_failure,
@@ -350,6 +366,25 @@ def _build_command_error_message(result, fallback: str) -> str:
     stdout = (result.stdout or "").strip()
     detail = stderr or stdout or "No stderr/stdout output captured."
     return f"{fallback} (exit {result.exit_code}) - {detail}"
+
+
+_STDOUT_TAIL_CHARS = 2000
+
+
+def _stdout_evidence(result) -> str:
+    """Return the end of stdout when the error message leaves it out.
+
+    The message keeps stderr when stderr has text, so a configure
+    script or test runner that prints its error on stdout loses it.
+    Such tools print the decisive lines last, so only the end is kept,
+    and only when it has an error line (plain progress output has none).
+    """
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    if not stderr or not stdout:
+        return ""
+    tail = failure_digest(stdout, tail_chars=_STDOUT_TAIL_CHARS)[1]
+    return tail if has_error_line(tail) else ""
 
 
 def _try_clone_recovery(
@@ -716,25 +751,18 @@ def init_node(state: AgentState) -> AgentState:
 
 # The JSON schema braces are doubled because the prompt is rendered
 # with str.format(); single braces would parse as format fields.
+# The system part (static per platform, cached); the per-package part
+# is ANALYST_TASK_PROMPT, sent as the user message.
 ANALYST_PROMPT = (
     "You are the package analyst for a RISC-V (riscv64) porting agent."
     "\n"
-    "Read the repository evidence below — ACTUAL build files and docs "
-    "—\n"
+    "Read the repository evidence in the user message — ACTUAL build "
+    "files and docs —\n"
     "and produce the analysis every downstream agent builds from.\n"
     "Ground every claim in a file you can see. Never invent.\n"
     "\n"
     "## Active sandbox (READ FIRST — overrides conflicting knowledge)\n"
     "{platform_banner}\n"
-    "\n"
-    "## Repository\n"
-    "- Name: {repo_name} ({repo_url})\n"
-    "- Path: {repo_path}\n"
-    "- Scripted detection: {detection_summary}\n"
-    "- Arch-specific code detected: {arch_summary}\n"
-    "\n"
-    "## Repository evidence (real file contents)\n"
-    "{build_evidence}\n"
     "\n"
     "## Your task\n"
     "1. Say what this package IS (purpose) and its dominant language.\n"
@@ -751,6 +779,10 @@ ANALYST_PROMPT = (
     "   which targets, which flags/feature toggles matter).\n"
     "6. Name the artifacts a successful build must produce (binary/\n"
     "   library file names).\n"
+    "Keep every text short: purpose one sentence (at most 200 "
+    "characters), build-system reasoning at most 150, each dependency "
+    "reason at most 80, at most 6 risks of at most 160 each, build "
+    "strategy at most 400.\n"
     "7. Decide needs_custom_plan: true when the STANDARD recipe for\n"
     "   this build system would fail (unusual layout, code generation\n"
     "   step, subprojects, heavy arch-specific code, pinned toolchain)"
@@ -770,9 +802,70 @@ ANALYST_PROMPT = (
     '  "riscv_risks": ["<risk grounded in evidence>"],\n'
     '  "build_strategy": "<2-3 sentences>",\n'
     '  "expected_artifacts": ["<file name>"],\n'
-    '  "needs_custom_plan": <bool>,\n'
-    '  "complexity": <int 1-10>\n'
+    '  "needs_custom_plan": <bool>\n'
     "}}"
+)
+
+
+def _object(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a closed JSON-schema object; every property is required."""
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+_STRING = {"type": "string"}
+_STRINGS = {"type": "array", "items": _STRING}
+
+# Structured-output schemas of the JSON roles (see bind_output_schema).
+ANALYST_SCHEMA = _object(
+    {
+        "purpose": _STRING,
+        "language": _STRING,
+        "build_system": _object(
+            {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "go",
+                        "cmake",
+                        "make",
+                        "autotools",
+                        "cargo",
+                        "meson",
+                        "python",
+                        "other",
+                    ],
+                },
+                "confidence": {"type": "number"},
+                "reasoning": _STRING,
+            }
+        ),
+        "dependencies": {
+            "type": "array",
+            "items": _object({"name": _STRING, "reason": _STRING}),
+        },
+        "riscv_risks": _STRINGS,
+        "build_strategy": _STRING,
+        "expected_artifacts": _STRINGS,
+        "needs_custom_plan": {"type": "boolean"},
+    }
+)
+
+ANALYST_TASK_PROMPT = (
+    "## Repository\n"
+    "- Name: {repo_name} ({repo_url})\n"
+    "- Path: {repo_path}\n"
+    "- Scripted detection: {detection_summary}\n"
+    "- Arch-specific code detected: {arch_summary}\n"
+    "\n"
+    "## Repository evidence (real file contents)\n"
+    "{build_evidence}\n"
+    "\n"
+    "Reply with the JSON object of the output schema."
 )
 
 
@@ -812,6 +905,22 @@ def _fallback_analysis(state: AgentState) -> PackageAnalysis:
     )
 
 
+def _shorten(text: Any, limit: int) -> str:
+    """Return ``text`` cut at a word boundary to ``limit`` chars, with "…".
+
+    The analyst is asked for short fields; this only bounds a field
+    that is still too long, without breaking a word.
+    """
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 1]
+    space = head.rfind(" ")
+    if space >= limit // 2:
+        head = head[:space]
+    return head.rstrip(" ,;:.") + "…"
+
+
 def _format_analysis_for_prompt(
     analysis: Optional[PackageAnalysis],
 ) -> str:
@@ -824,7 +933,7 @@ def _format_analysis_for_prompt(
         return "(no package analysis available)"
     deps = (
         ", ".join(
-            f"{d.get('name', '?')} ({d.get('reason', '')[:60]})"
+            f"{d.get('name', '?')} ({_shorten(d.get('reason', ''), 100)})"
             for d in analysis.dependencies[:10]
         )
         or "none identified"
@@ -843,7 +952,7 @@ def _format_analysis_for_prompt(
         f"Language: {analysis.language} | Build system: "
         f"{analysis.build_system} "
         f"(confidence {analysis.build_system_confidence:.2f}, "
-        f"{analysis.build_system_reasoning[:120]})\n"
+        f"{_shorten(analysis.build_system_reasoning, 200)})\n"
         f"Strategy: {analysis.build_strategy}\n"
         f"Dependencies: {deps}\n"
         f"Expected artifacts: "
@@ -895,9 +1004,13 @@ def analyst_node(state: AgentState) -> AgentState:
     )
 
     build_evidence = collect_build_evidence(state.repo_path)
+    # The first scout pass reuses it (no build has run yet).
+    state.context_cache["build_evidence"] = build_evidence
 
-    prompt = ANALYST_PROMPT.format(
-        platform_banner=_build_platform_banner(),
+    system_prompt = ANALYST_PROMPT.format(
+        platform_banner=_build_platform_banner()
+    )
+    prompt = ANALYST_TASK_PROMPT.format(
         repo_name=state.repo_name,
         repo_url=state.repo_url,
         repo_path=state.repo_path,
@@ -924,12 +1037,21 @@ def analyst_node(state: AgentState) -> AgentState:
             )
         return ValidationResult.good()
 
+    if _llm_refused(state):
+        logger.info("Analyst: the model refused this package; fallback")
+        state.package_analysis = _fallback_analysis(state)
+        state.task_plan = create_default_plan()
+        state.current_phase = "analyzed"
+        return state
+
     _analyst_pool = get_model_pool_for_role(AgentRole.PLANNER)
     outcome = llm_call_with_validation(
         invoke_fn=invoke_llm,
         llm=_analyst_pool[0],
         fallback_llms=_analyst_pool[1:],
         prompt=prompt,
+        system_prompt=system_prompt,
+        output_schema=ANALYST_SCHEMA,
         validator=_validate_analysis,
         fallback_factory=lambda: None,  # materialized below
         role=AgentRole.PLANNER.value,
@@ -942,6 +1064,8 @@ def analyst_node(state: AgentState) -> AgentState:
         tokens_out=outcome.output_tokens,
         calls=outcome.attempts,
     )
+    if outcome.refused:
+        _mark_llm_refused(state, AgentRole.PLANNER.value)
 
     if outcome.data is None:
         logger.warning(
@@ -956,39 +1080,37 @@ def analyst_node(state: AgentState) -> AgentState:
         dependencies = [
             {
                 "name": str(d.get("name", "")).strip().lower(),
-                "reason": str(d.get("reason", ""))[:200],
+                "reason": _shorten(d.get("reason", ""), 200),
             }
             for d in deps_raw
             if isinstance(d, dict) and str(d.get("name", "")).strip()
         ]
         try:
-            complexity = int(data.get("complexity", 5))
+            confidence = float(bs.get("confidence", 0.5) or 0)
         except (TypeError, ValueError):
-            complexity = 5
+            confidence = 0.5
         state.package_analysis = PackageAnalysis(
-            purpose=str(data.get("purpose", ""))[:300],
-            language=str(data.get("language", ""))[:60],
+            purpose=_shorten(data.get("purpose", ""), 300),
+            language=_shorten(data.get("language", ""), 60),
             build_system=str(bs.get("type", "unknown")).lower(),
-            build_system_confidence=float(bs.get("confidence", 0.5) or 0),
-            build_system_reasoning=str(bs.get("reasoning", ""))[:300],
+            build_system_confidence=confidence,
+            build_system_reasoning=_shorten(bs.get("reasoning", ""), 300),
             dependencies=dependencies[:15],
             riscv_risks=[
-                str(r)[:200] for r in data.get("riscv_risks", [])[:10]
+                _shorten(r, 200) for r in data.get("riscv_risks", [])[:10]
             ],
-            build_strategy=str(data.get("build_strategy", ""))[:600],
+            build_strategy=_shorten(data.get("build_strategy", ""), 600),
             expected_artifacts=[
-                str(a)[:80] for a in data.get("expected_artifacts", [])[:10]
+                _shorten(a, 80)
+                for a in data.get("expected_artifacts", [])[:10]
             ],
             needs_custom_plan=bool(data.get("needs_custom_plan", False)),
-            complexity=max(1, min(10, complexity)),
             llm_grounded=True,
         )
-        state.context_cache["package_analysis"] = data
         logger.info(
             f"Analysis: {state.package_analysis.purpose[:80]} | "
             f"build={state.package_analysis.build_system} | "
-            f"custom_plan={state.package_analysis.needs_custom_plan} | "
-            f"complexity={state.package_analysis.complexity}/10"
+            f"custom_plan={state.package_analysis.needs_custom_plan}"
         )
 
     # Structural record of the fixed pipeline; no LLM call generates
@@ -1101,18 +1223,70 @@ def supervisor_node(state: AgentState) -> AgentState:
 
 # Doubled braces in the JSON schema are literal braces after
 # str.format().
+# The system part (static per platform, cached; the knowledge block
+# follows as a second system block); the per-package part is
+# SCOUT_TASK_PROMPT, sent as the user message.
 SCOUT_PROMPT = (
     "You are the build scout for a RISC-V porting agent. Produce a\n"
-    "minimal, executable BuildPlan for **{repo_name}** built natively at"
-    " `{repo_path}`.\n"
+    "minimal, executable BuildPlan for the package in the user message,"
+    "\nbuilt natively at its repository root.\n"
     "\n"
     "## ACTIVE SANDBOX (use ONLY these package commands)\n"
     "{platform_banner}\n"
     "\n"
     "## Target\n"
-    "- Architecture: {target_arch} ({arch_identifiers})\n"
+    "- Architecture: RISC-V (riscv64) (rv64, riscv, riscv64, RISCV64)\n"
     "- Native compilation only (DO NOT set `--host`, `GOOS/GOARCH`, `-DC"
     "MAKE_SYSTEM_PROCESSOR`).\n"
+    "\n"
+    "## Build plan rules\n"
+    "1. Each command runs in a fresh shell at the repository root. "
+    "**Always chain `cd` with `&&`** — e.g. `cd build && cmake ..`, "
+    "never two commands.\n"
+    "2. Group commands into ≤3 phases: `setup` (install deps) → `configu"
+    "re` (optional) → `build`. Skip phases that have nothing to do.\n"
+    "3. Install only `-dev` packages you can justify from CMakeLists.txt"
+    " / configure.ac / meson.build / go.mod. No guessing.\n"
+    "4. Use the package names from the platform knowledge below. Do NOT "
+    "use names from a different distro.\n"
+    "5. If the project has both CMake and autotools, prefer the one whos"
+    "e dependencies are easier to satisfy; if unsure, prefer autotools.\n"
+    "6. For Go: if `go.mod` is missing, first phase must `go mod init <m"
+    "odule_path>` then `go mod tidy`. Always pass `-buildvcs=false` to `"
+    "go build`. **If `Project context` in the user message gives a "
+    "`build_command`, us"
+    "e exactly that command — do not substitute `go build ./...` (which "
+    "compiles every helper and fails on the first one with missing deps)"
+    ".** Never emit `go build ./cmd` or `go build ./<top-level-dir>` "
+    "without an explicit output path; if building a subpackage, use "
+    "`go build -o ./bin/<name> <package>`.\n"
+    "7. Disable optional features that pull in heavy or x86-specific dep"
+    "s (tests, SIMD, examples, docs).\n"
+    "8. NEVER reference paths or files you can't see in the project stru"
+    "cture.\n"
+    "9. Never add a command that runs tests (`ctest`, `make check`, "
+    "`make test`, `meson test`, `go test`, `cargo test`). Atesor runs "
+    "the package tests after a verified build, and they never gate it.\n"
+    "\n"
+    "## Self-check (do silently before responding)\n"
+    "- Did I read the actual build files (or admit I couldn't)?\n"
+    "- Does every package install command exist for the target distro?\n"
+    "- Do my commands actually run if pasted into a shell at the "
+    "repository root?\n"
+    "\n"
+    "## Output schema (JSON only)\n"
+    "{{\n"
+    '  "build_system": "go|cmake|make|autotools|cargo|meson|other",\n'
+    '  "phases": [\n'
+    '    {{"id": 1, "name": "setup", "commands": ["..."]}},\n'
+    '    {{"id": 2, "name": "build", "commands": ["..."]}}\n'
+    "  ]\n"
+    "}}"
+)
+
+SCOUT_TASK_PROMPT = (
+    "## Package\n"
+    "- Name: **{repo_name}** | Repository root: `{repo_path}`\n"
     "\n"
     "## Analyst's understanding of this package (plan FROM this)\n"
     "{package_analysis}\n"
@@ -1147,59 +1321,30 @@ SCOUT_PROMPT = (
     "### Documentation excerpts\n"
     "{documentation}\n"
     "\n"
-    "## Platform knowledge (USE THIS — don't invent package names)\n"
-    "{system_knowledge}\n"
-    "\n"
     "{few_shot_examples}\n"
     "\n"
-    "## Build plan rules\n"
-    "1. Each command runs in a fresh shell at `{repo_path}`. **Always ch"
-    "ain `cd` with `&&`** — e.g. `cd build && cmake ..`, never two comma"
-    "nds.\n"
-    "2. Group commands into ≤3 phases: `setup` (install deps) → `configu"
-    "re` (optional) → `build`. Skip phases that have nothing to do.\n"
-    "3. Install only `-dev` packages you can justify from CMakeLists.txt"
-    " / configure.ac / meson.build / go.mod. No guessing.\n"
-    "4. Use the package names from the platform knowledge above. Do NOT "
-    "use names from a different distro.\n"
-    "5. If the project has both CMake and autotools, prefer the one whos"
-    "e dependencies are easier to satisfy; if unsure, prefer autotools.\n"
-    "6. For Go: if `go.mod` is missing, first phase must `go mod init <m"
-    "odule_path>` then `go mod tidy`. Always pass `-buildvcs=false` to `"
-    "go build`. **If `Project context` above gives a `build_command`, us"
-    "e exactly that command — do not substitute `go build ./...` (which "
-    "compiles every helper and fails on the first one with missing deps)"
-    ".** Never emit `go build ./cmd` or `go build ./<top-level-dir>` "
-    "without an explicit output path; if building a subpackage, use "
-    "`go build -o ./bin/<name> <package>`.\n"
-    "7. Disable optional features that pull in heavy or x86-specific dep"
-    "s (tests, SIMD, examples, docs).\n"
-    "8. NEVER reference paths or files you can't see in the project stru"
-    "cture.\n"
-    "9. Never add a command that runs tests (`ctest`, `make check`, "
-    "`make test`, `meson test`, `go test`, `cargo test`). Atesor runs "
-    "the package tests after a verified build, and they never gate it.\n"
-    "\n"
-    "## Self-check (do silently before responding)\n"
-    "- Did I read the actual build files (or admit I couldn't)?\n"
-    "- Does every package install command exist for the target distro?\n"
-    "- Do my commands actually run if pasted into a shell at `{repo_path"
-    "}`?\n"
-    "\n"
-    "## Output schema (JSON only)\n"
-    "{{\n"
-    '  "build_system": "go|cmake|make|autotools|cargo|meson|other",\n'
-    '  "build_system_confidence": <0-1 float>,\n'
-    '  "phases": [\n'
-    '    {{"id": 1, "name": "setup", "commands": ["..."], "ca'
-    'n_parallelize": false, "expected_duration": "30s"}},\n'
-    '    {{"id": 2, "name": "build", "commands": ["..."], "ca'
-    'n_parallelize": false, "expected_duration": "2m"}}\n'
-    "  ],\n"
-    '  "total_estimated_duration": "<sum>",\n'
-    '  "notes": ["..."],\n'
-    '  "architecture_concerns": ["..."]\n'
-    "}}"
+    "Reply with the JSON BuildPlan of the output schema."
+)
+
+SCOUT_SCHEMA = _object(
+    {
+        "build_system": _STRING,
+        "phases": {
+            "type": "array",
+            "items": _object(
+                {
+                    "id": {"type": "integer"},
+                    "name": _STRING,
+                    "commands": _STRINGS,
+                }
+            ),
+        },
+    }
+)
+
+# Heading of the knowledge block, the second (cached) system block.
+_SCOUT_KNOWLEDGE_HEADING = (
+    "## Platform knowledge (USE THIS — don't invent package names)\n"
 )
 
 
@@ -1237,6 +1382,15 @@ def _rewind_after_verify_failure(state: AgentState) -> None:
     for phase in plan.phases[start:]:
         for command in phase.commands:
             state.forget_command_result(command)
+
+
+# The whitelist that execute_command applies to every build command,
+# used by the scout to reject a plan command before the build runs it.
+_plan_command_validator = CommandValidator()
+
+# Text of the scout's critique for a blocked plan command. When the
+# scout's final failure still carries it, no plan avoided the block.
+_PLAN_BLOCKED = "the sandbox command validator blocks"
 
 
 def validate_build_plan(plan: BuildPlan) -> tuple[bool, str]:
@@ -1468,8 +1622,32 @@ def scout_node(state: AgentState) -> AgentState:
     state.build_status = BuildStatus.SCOUTING
     state.current_phase = "scouting"
 
+    # A re-plan after a validator block happens at most once (see
+    # route_supervisor_to_next).
+    if _last_error_is_validator_block(state):
+        state.context_cache["validator_block_replans"] = (
+            state.context_cache.get("validator_block_replans", 0) + 1
+        )
+
+    # After a refusal, the scout prompt (same package) is refused too.
+    if _llm_refused(state):
+        logger.info("Scout: the model refused this package; fallback plan")
+        state.build_plan = create_fallback_build_plan(state)
+        state.last_successful_phase = 0
+        state.build_status = BuildStatus.PENDING
+        return state
+
     build_sys = state.build_system_info
     deps = state.dependencies
+
+    # The analyst's evidence is still current until a build has run: a
+    # re-scout after a failure reads the tree again (configure may have
+    # written files, a fix may have edited them).
+    build_evidence = (
+        state.context_cache.get("build_evidence")
+        if not state.error_history
+        else None
+    ) or collect_build_evidence(state.repo_path)
 
     documentation = "No documentation cached"
     if state.file_content_cache:
@@ -1477,12 +1655,21 @@ def scout_node(state: AgentState) -> AgentState:
             k
             for k in state.file_content_cache.keys()
             if any(d in k.upper() for d in ["README", "INSTALL", "BUILD"])
+            # A top-level doc already in the build evidence is not sent
+            # twice.
+            and not (
+                os.path.dirname(k) == state.repo_path.rstrip("/")
+                and f"### {Path(k).name} (excerpt)" in build_evidence
+            )
         ]
         if doc_files:
             report_docs = doc_files[:3]
             documentation = "\n\n".join(
                 [
-                    f"## {Path(f).name}\n{state.file_content_cache[f][:2000]}"
+                    # The repo-relative path: two README.md files in
+                    # different directories must not look the same.
+                    f"## {os.path.relpath(f, state.repo_path)}\n"
+                    f"{cut_text(state.file_content_cache[f], 2000)}"
                     for f in report_docs
                 ]
             )
@@ -1521,7 +1708,9 @@ def scout_node(state: AgentState) -> AgentState:
     go_main_info = state.context_cache.get("go_main_info", {})
     build_type_lower = (build_sys.type if build_sys else "").lower()
     if go_main_info:
-        go_main_str = json.dumps(go_main_info, indent=2)
+        go_main_str = cut_text(
+            json.dumps(go_main_info, separators=(",", ":")), 2000
+        )
     elif build_type_lower == "go":
         go_main_str = (
             "Go project detected; main package not auto-discovered "
@@ -1551,9 +1740,24 @@ def scout_node(state: AgentState) -> AgentState:
             failed_cmd = (
                 f"Failed command: `{state.error_history[-1].command}`\n"
             )
+        key_lines, tail = failure_digest(state.last_error, tail_chars=1200)
+        stdout_tail = (
+            state.error_history[-1].stdout_tail if state.error_history else ""
+        )
         previous_failure = (
-            f"{failed_cmd}Error: {state.last_error[:800]}\n"
-            "Your new plan MUST avoid repeating the cause of this "
+            f"{failed_cmd}Exit code: {_exit_code_text(state.last_error)}\n"
+            + (
+                f"Error lines from the cut part of the output:\n{key_lines}\n"
+                if key_lines
+                else ""
+            )
+            + f"Command output (the end; a cut is marked):\n{tail}\n"
+            + (
+                f"Standard output (the end):\n{stdout_tail}\n"
+                if stdout_tail
+                else ""
+            )
+            + "Your new plan MUST avoid repeating the cause of this "
             "failure (e.g. install the missing package, pick a "
             "different build path)."
         )
@@ -1573,13 +1777,16 @@ def scout_node(state: AgentState) -> AgentState:
         )
 
     package_analysis_str = _format_analysis_for_prompt(state.package_analysis)
-    build_evidence = collect_build_evidence(state.repo_path)
 
-    prompt = SCOUT_PROMPT.format(
-        target_arch="RISC-V (riscv64)",
-        arch_identifiers="rv64, riscv, riscv64, RISCV64",
+    system_prompt = [
+        SCOUT_PROMPT.format(platform_banner=_build_platform_banner()),
+        _SCOUT_KNOWLEDGE_HEADING
+        + get_system_knowledge_summary(
+            build_system=build_sys.type if build_sys else None
+        ),
+    ]
+    prompt = SCOUT_TASK_PROMPT.format(
         repo_name=state.repo_name,
-        platform_banner=_build_platform_banner(),
         package_analysis=package_analysis_str,
         build_evidence=build_evidence,
         build_system=build_sys.type if build_sys else "unknown",
@@ -1596,8 +1803,6 @@ def scout_node(state: AgentState) -> AgentState:
         repo_path=state.repo_path,
         system_info=system_info,
         previous_failure=previous_failure,
-        system_knowledge=get_system_knowledge_summary(),
-        architecture=system_info_raw.get("architecture", "riscv64"),
         few_shot_examples=few_shot_examples,
     )
 
@@ -1620,6 +1825,19 @@ def scout_node(state: AgentState) -> AgentState:
                 return ValidationResult.bad(
                     f"phase {i} ({p.get('name')}) has empty/non-string command"
                 )
+            # The builder runs each command through the same whitelist.
+            # A blocked command fails the build, and the fixer cannot
+            # change the whitelist, so reject it here, where a retry is
+            # cheap.
+            for cmd in cmds:
+                allowed, why = _plan_command_validator.is_safe(cmd)
+                if not allowed:
+                    return ValidationResult.bad(
+                        f"phase {i} ({p.get('name')}): {_PLAN_BLOCKED} "
+                        f"`{cmd[:160]}` ({why}). Use standard build and "
+                        f"package tools only, or drop the step (version "
+                        f"checks are not needed)"
+                    )
         # Dry-build a BuildPlan to reuse the existing semantic validator
         try:
             trial_phases = [
@@ -1662,6 +1880,8 @@ def scout_node(state: AgentState) -> AgentState:
         llm=_scout_pool[0],
         fallback_llms=_scout_pool[1:],
         prompt=prompt,
+        system_prompt=system_prompt,
+        output_schema=SCOUT_SCHEMA,
         validator=_validate_scout,
         fallback_factory=lambda: None,  # we build the BuildPlan fallback below
         role=AgentRole.SCOUT.value,
@@ -1681,6 +1901,15 @@ def scout_node(state: AgentState) -> AgentState:
         tokens_out=outcome.output_tokens,
         calls=outcome.attempts,
     )
+
+    if outcome.refused:
+        # A refusal is not a build attempt: keep the attempt budget for
+        # the fallback plan.
+        _mark_llm_refused(state, AgentRole.SCOUT.value)
+        state.build_plan = create_fallback_build_plan(state)
+        state.last_successful_phase = 0
+        state.build_status = BuildStatus.PENDING
+        return state
 
     try:
         if outcome.data is None:
@@ -1727,6 +1956,25 @@ def scout_node(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"Scout failed: {e}")
+        if _PLAN_BLOCKED in str(e):
+            # Every plan the model could write needs a tool that the
+            # command validator blocks (hadolint: cabal). A guessed
+            # fallback plan cannot build the package, and the fixer
+            # cannot change the whitelist, so the run escalates. The
+            # scout already retried with the blocked command named,
+            # so no second re-plan either.
+            state.add_error(
+                create_error_record(
+                    message=(
+                        f"Scout could not plan without blocked commands "
+                        f"({_VALIDATOR_BLOCK}): {e}"
+                    ),
+                    category=ErrorCategory.MISSING_TOOLS,
+                )
+            )
+            state.context_cache["validator_block_replans"] = 1
+            state.build_status = BuildStatus.FAILED
+            return state
         logger.info("Using fallback build plan due to scout failure")
         state.add_error(
             create_error_record(
@@ -3277,6 +3525,7 @@ def builder_node(state: AgentState) -> AgentState:
                     category=classify_error(error_message),
                     command=command,
                     attempt_number=state.attempt_count,
+                    stdout_tail=_stdout_evidence(result),
                 )
                 state.add_error(error)
                 state.build_status = BuildStatus.FAILED
@@ -3302,14 +3551,21 @@ def builder_node(state: AgentState) -> AgentState:
     state.build_status = BuildStatus.SUCCESS
     logger.info("All build phases completed; verifying artifacts next")
 
-    # Close the fix-attempt feedback loop: any fix applied before this
-    # successful build evidently worked. Without this, every attempt
-    # stays success=False forever — the fixer prompt then lists working
-    # fixes as "(Failed)" and fixer auto-learning never triggers.
-    for fix in state.fixes_attempted:
-        if not fix.success and fix.build_result is None:
+    # Close the fix-attempt feedback loop. The last applied fix led to
+    # this build, so it worked; an earlier fix worked only if the error
+    # after it differed from the error it addressed. A fix that left
+    # the error as it was is not learned as a success.
+    open_fixes = [
+        fix
+        for fix in state.fixes_attempted
+        if not fix.success and fix.build_result is None
+    ]
+    for fix in open_fixes:
+        if fix is open_fixes[-1] or _fix_changed_the_error(state, fix):
             fix.success = True
             fix.build_result = "build succeeded after fix"
+        else:
+            fix.build_result = "the error did not change after this fix"
 
     return state
 
@@ -3378,13 +3634,25 @@ def validate_fix_command(command: str) -> tuple[bool, str]:
                     f"Use 'go {pkg}' as a separate command."
                 )
 
-    from .tools import CommandValidator
-
     single_ok, single_reason = CommandValidator().is_safe_single(command)
     if not single_ok:
-        return False, single_reason
+        # Name the rejected command: the reason alone ("Unknown command
+        # pattern") does not tell the model which action to change.
+        hint = ""
+        if "Unknown command pattern" in single_reason:
+            hint = f". Allowed tools include: {_ALLOWED_TOOLS_HINT}"
+        return False, f"{single_reason}: `{command[:160]}`{hint}"
 
     return True, "Command is safe"
+
+
+# Tool names for a whitelist rejection, so a retry can pick a tool that
+# passes. Not the whole whitelist (see tools.CommandValidator).
+_ALLOWED_TOOLS_HINT = (
+    "apt-get/apk, make, cmake, ninja, meson, ./configure, autoreconf, go, "
+    "cargo, rustup, npm, pnpm, pip, python3, sed, cp, mv, mkdir, ln, rm, "
+    "patch, git, curl, wget, tar"
+)
 
 
 def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
@@ -3468,7 +3736,9 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
 
             # Same containment as create_file.
             elif action_type == "patch":
-                patch_file = (action.get("file") or "").strip()
+                patch_file = (
+                    action.get("file") or action.get("path") or ""
+                ).strip()
                 if patch_file and (
                     os.path.isabs(patch_file) or ".." in Path(patch_file).parts
                 ):
@@ -3503,18 +3773,11 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                 if not is_safe:
                     return False, f"Unsafe command: {reason}"
 
-        # Reflection fields are advisory: a thin self-critique is
-        # logged, never rejected.
-        reflection = fix_data.get("reflection", {})
+        # The root cause is advisory: an empty one is logged, never
+        # rejected.
+        reflection = fix_data.get("reflection") or {}
         if not reflection.get("root_cause"):
             logger.warning("Fixer response has empty root_cause analysis")
-
-        if not reflection.get("this_fix_will_work_because"):
-            logger.warning(
-                "Fixer response has empty "
-                "'this_fix_will_work_because' - self-critique may be "
-                "shallow"
-            )
 
         return True, ""
 
@@ -3527,52 +3790,15 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
 
 # Doubled braces in the JSON schema are literal braces after
 # str.format().
+# The system part (static per platform, cached; the knowledge block
+# follows as a second system block); the per-failure part is
+# FIXER_TASK_PROMPT, sent as the user message.
 FIXER_PROMPT = (
     "You are the build doctor for a RISC-V porting agent. Diagnose\n"
-    "the failure for **{repo_name}** and emit a minimal fix.\n"
+    "the build failure in the user message and emit a minimal fix.\n"
     "\n"
     "## ACTIVE SANDBOX (use ONLY these package commands)\n"
     "{platform_banner}\n"
-    "\n"
-    "## Build context\n"
-    "- Target: {target_arch} | Build system: {build_system}\n"
-    "- Attempt {attempt_count}/{max_attempts} | Phase: {current_phase}\n"
-    "\n"
-    "## Failure\n"
-    "**Failed command:**\n"
-    "```\n"
-    "{failed_command}\n"
-    "```\n"
-    "**Error (truncated):**\n"
-    "```\n"
-    "{error_output}\n"
-    "```\n"
-    "**Exit code:** {exit_code}\n"
-    "\n"
-    "### Source context around the error (real file contents)\n"
-    "{error_file_excerpts}\n"
-    "\n"
-    "### What this package is (analyst)\n"
-    "{package_context}\n"
-    "\n"
-    "### Previous fix attempts (most recent last — DO NOT repeat any of "
-    "these)\n"
-    "{previous_fixes}\n"
-    "\n"
-    "### Repo structure\n"
-    "{repo_tree}\n"
-    "\n"
-    "### Known arch concerns\n"
-    "{known_arch_issues}\n"
-    "\n"
-    "### Current build plan\n"
-    "{build_plan}\n"
-    "\n"
-    "## Platform knowledge (canonical — use these package names + comman"
-    "ds)\n"
-    "{system_knowledge}\n"
-    "\n"
-    "{few_shot_examples}\n"
     "\n"
     "## Diagnostic procedure\n"
     "1. **Read the error.** What's the *root cause*, not the symptom?\n"
@@ -3585,8 +3811,8 @@ FIXER_PROMPT = (
     "   (b) change a build flag, (c) regenerate configure / copy `config"
     ".{{guess,sub}}`,\n"
     "   (d) add a `#ifdef __riscv` guard, (e) patch source.\n"
-    "4. **Check the few-shot examples above** — if one matches the error"
-    " pattern, use it.\n"
+    "4. **Check the few-shot examples in the user message** — if one "
+    "matches the error pattern, use it.\n"
     "5. **Verify your fix does not duplicate a previous failed attempt.*"
     "*\n"
     "\n"
@@ -3597,6 +3823,15 @@ FIXER_PROMPT = (
     "`cd <dir> && `. Put the package-index update and the install in "
     "two separate actions.\n"
     "- Do NOT propose unrelated cleanups. Fix only what's broken.\n"
+    "- After your fix, the builder re-runs the build plan commands from "
+    "the user message unchanged. A fix must change the source tree or "
+    "the environment so that those commands pass; a build command that "
+    "you run yourself does not change the plan.\n"
+    "- Never add a stub or placeholder source file only to make a plan "
+    "command pass: the build must produce the package's real programs. "
+    "If the plan builds the wrong target (for example `go build .` when "
+    "the main package is in `cmd/<name>`), set `escalate` and name the "
+    "right target and command.\n"
     "- For Go: `-buildvcs=false` is required; never install Go via the p"
     "ackage manager (it is preinstalled in the sandbox). Avoid `go build "
     "./cmd` / `go build ./<dir>` unless you also set `-o` to a file path"
@@ -3612,38 +3847,126 @@ FIXER_PROMPT = (
     "- For autotools failures involving gettext macros: copy macros BEFO"
     "RE `aclocal`,\n"
     "  do NOT run `autoreconf` (it reverts the fix via `autopoint`).\n"
-    "- If the error indicates an unfixable mismatch (e.g. project needs "
-    "newer Go\n"
-    "  than the sandbox provides), say so in `reflection.root_cause` and"
-    " propose\n"
-    "  ESCALATE rather than a hack.\n"
+    "- If no fix inside the sandbox can work (for example a toolchain "
+    "that does not exist for riscv64), set `escalate` instead of "
+    "proposing a hack.\n"
     "\n"
     "## Output schema (JSON only)\n"
     "{{\n"
+    '  "investigate": null,\n'
+    '  "escalate": null,\n'
     '  "strategies": [\n'
     '    {{"id": 1, "description": "<one line>",\n'
     '      "actions": [\n'
-    '        {{"type": "command", "command": "<shell>"}}\n'
-    '        // or {{"type": "create_file", "path": "<rel>", "c'
-    'ontent": "..."}}\n'
-    '        // or {{"type": "patch", "file": "<rel>", "content'
-    '": "<unified diff>"}}\n'
+    '        {{"type": "command", "command": "<one shell command>", '
+    '"path": "", "content": ""}}\n'
     "      ]}}\n"
     "  ],\n"
     '  "recommended_strategy_id": 1,\n'
-    '  "reflection": {{\n'
-    '    "root_cause": "<why it broke>",\n'
-    '    "this_fix_will_work_because": "<why the chosen fix addresses'
-    ' the root cause>"\n'
-    "  }}\n"
+    '  "reflection": {{"root_cause": "<why it broke, one sentence>"}}\n'
     "}}\n"
+    "Give exactly ONE strategy: the one you recommend.\n"
     "\n"
-    "Rules: ≥1 strategy with ≥1 action; no placeholder paths (`/path/to/"
-    "`, `/home/`);\n"
-    "prefer `command` with `sed` over `patch` for simple edits.\n"
+    "Action types: `command` fills `command`; `create_file` fills "
+    "`path` (repo-relative) and `content`; `patch` fills `path` and a "
+    'unified diff in `content`. Leave the unused fields as "".\n'
+    'To give up: set `escalate` to {{"reason": "<why no fix in the '
+    'sandbox can work>"}} and `strategies` to [].\n'
+    "Rules: ≥1 strategy with ≥1 action unless you investigate or "
+    "escalate; no placeholder paths (`/path/to/`, `/home/`); prefer "
+    "`command` with `sed` over `patch` for simple edits.\n"
+)
+
+FIXER_SCHEMA = _object(
+    {
+        "investigate": {
+            "anyOf": [{"type": "null"}, _object({"commands": _STRINGS})]
+        },
+        "escalate": {
+            "anyOf": [{"type": "null"}, _object({"reason": _STRING})]
+        },
+        "strategies": {
+            "type": "array",
+            "items": _object(
+                {
+                    "id": {"type": "integer"},
+                    "description": _STRING,
+                    "actions": {
+                        "type": "array",
+                        "items": _object(
+                            {
+                                "type": {
+                                    "type": "string",
+                                    "enum": [
+                                        "command",
+                                        "create_file",
+                                        "patch",
+                                    ],
+                                },
+                                "command": _STRING,
+                                "path": _STRING,
+                                "content": _STRING,
+                            }
+                        ),
+                    },
+                }
+            ),
+        },
+        "recommended_strategy_id": {"type": "integer"},
+        "reflection": _object({"root_cause": _STRING}),
+    }
+)
+
+FIXER_TASK_PROMPT = (
+    "## Package: **{repo_name}**\n"
+    "\n"
+    "## Build context\n"
+    "- Target: {target_arch} | Build system: {build_system}\n"
+    "- Attempt {attempt_count}/{max_attempts}\n"
+    "\n"
+    "## Failure\n"
+    "- Failed phase: {failed_phase}\n"
+    "- Failed command: `{failed_command}`\n"
+    "- Exit code: {exit_code}\n"
+    "\n"
+    "{key_lines_section}"
+    "### Command output (the end; a cut is marked)\n"
+    "```\n"
+    "{output_tail}\n"
+    "```\n"
+    "{stdout_section}"
+    "\n"
+    "### Source context around the error (real file contents)\n"
+    "{error_file_excerpts}\n"
+    "\n"
+    "### What this package is (analyst)\n"
+    "{package_context}\n"
+    "\n"
+    "### Build plan (the builder re-runs these commands unchanged)\n"
+    "{build_plan}\n"
+    "\n"
+    "### Previous fix attempts (most recent last — DO NOT repeat any of "
+    "these)\n"
+    "{previous_fixes}\n"
+    "\n"
+    "### Top-level files\n"
+    "{top_level_files}\n"
+    "\n"
+    "### Known arch concerns\n"
+    "{known_arch_issues}\n"
+    "\n"
+    "{few_shot_examples}\n"
     "\n"
     "## Investigation option\n"
-    "{investigation}"
+    "{investigation}\n"
+    "\n"
+    "Reply with the JSON object of the output schema."
+)
+
+# Heading of the knowledge block, the second (cached) system block.
+_FIXER_KNOWLEDGE_HEADING = (
+    "## Platform knowledge (canonical — use these package names + "
+    "commands)\n"
 )
 
 
@@ -3673,21 +3996,14 @@ _INVESTIGATE_MAX_COMMANDS = 4
 _INVESTIGATE_OUTPUT_CAP = 1500
 
 _INVESTIGATION_OFFER = (
-    "If (and ONLY if) the error text and source excerpts above are "
-    "genuinely\n"
-    "insufficient to diagnose the root cause, you may respond ONCE "
-    "with this\n"
-    "shape instead of the strategies schema:\n"
-    "{\n"
-    '  "investigate": {"commands": ["<read-only shell command>"]}\n'
-    "}\n"
-    "Up to 4 commands; allowed first tokens: cat, head, tail, ls, "
-    "find, grep,\n"
-    "file, stat, wc, pkg-config, readelf, nm, ldd, go, which. No "
-    "redirection.\n"
-    "The outputs will be returned to you and then you MUST emit the "
-    "strategies\n"
-    "schema."
+    "If (and ONLY if) the error lines and source excerpts above are not "
+    "enough to find the root cause, you may ask ONCE for read-only "
+    'inspection: set `investigate` to {"commands": ["<read-only shell '
+    'command>", ...]} and `strategies` to []. Up to 4 commands; the '
+    "first word is one of cat, head, tail, ls, find, grep, file, stat, "
+    "wc, pkg-config, readelf, nm, ldd, go, which; no redirection. Their "
+    "output comes back in the next message, and then you MUST give "
+    "strategies."
 )
 
 
@@ -3712,8 +4028,6 @@ def _run_fixer_investigation(state: AgentState, commands: List[str]) -> str:
         if not cmd:
             continue
         first = cmd.split()[0] if cmd.split() else ""
-        from .tools import CommandValidator
-
         segments = CommandValidator.split_segments(cmd)
         heads = [s.split()[0] for s in segments if s.split()]
         if (
@@ -3733,11 +4047,140 @@ def _run_fixer_investigation(state: AgentState, commands: List[str]) -> str:
             f"\n[stderr] {result.stderr}" if result.stderr else ""
         )
         output = output.strip() or "(no output)"
-        if len(output) > _INVESTIGATE_OUTPUT_CAP:
-            output = output[:_INVESTIGATE_OUTPUT_CAP] + "\n[... truncated ...]"
+        output = cut_text(output, _INVESTIGATE_OUTPUT_CAP)
         sections.append(f"$ {cmd}  (exit {result.exit_code})\n{output}")
     state.log_scripted_op("fixer_investigation")
     return "\n\n".join(sections) or "(no valid commands to run)"
+
+
+# Fixer prompt facts: exit code, failed phase, plan, earlier fixes.
+
+_EXIT_CODE_RE = re.compile(r"\(exit (-?\d+)\)")
+
+_EXIT_NOTES = {
+    -1: "Atesor stopped the command: time limit or sandbox error",
+    124: "the `timeout` limit stopped the command",
+    126: "the command is not executable",
+    127: "command not found",
+    137: "SIGKILL: the process was killed, usually out of memory",
+    139: "SIGSEGV: segmentation fault",
+    143: "SIGTERM: the process was terminated",
+}
+
+
+def _exit_code_text(message: str) -> str:
+    """Return the exit code in an error message, with a signal note."""
+    match = _EXIT_CODE_RE.search(message or "")
+    if not match:
+        return "not reported"
+    code = int(match.group(1))
+    note = _EXIT_NOTES.get(code)
+    return f"{code} ({note})" if note else str(code)
+
+
+def _failed_phase_text(state: AgentState, command: Optional[str]) -> str:
+    """Name the plan phase that holds ``command``."""
+    plan = state.build_plan
+    if plan and command:
+        for phase in plan.phases:
+            if command in phase.commands:
+                return f"{phase.name} (phase {phase.id} of {len(plan.phases)})"
+    return "not a build-plan command (for example the artifact check)"
+
+
+def _build_plan_text(state: AgentState, failed_command: Optional[str]) -> str:
+    """Render the plan's phases and commands, marking the failed one."""
+    plan = state.build_plan
+    if not plan:
+        return "No build plan"
+    lines = [f"Build system: {plan.build_system}"]
+    for phase in plan.phases:
+        done = (
+            " (completed)" if phase.id <= state.last_successful_phase else ""
+        )
+        lines.append(f"{phase.id}. {phase.name}{done}")
+        for cmd in phase.commands:
+            mark = "   <- failed here" if cmd == failed_command else ""
+            lines.append(f"   - `{cmd[:200]}`{mark}")
+    return "\n".join(lines)
+
+
+def _fix_status(fix: FixAttempt) -> str:
+    """Return the outcome label of a fix attempt."""
+    if fix.success:
+        return "Success"
+    if fix.build_result == _NO_CHANGE:
+        return "Failed: no change applied"
+    return "Failed"
+
+
+def _previous_fixes_text(state: AgentState) -> str:
+    """Render the last five fixes: actions, their results, what followed."""
+    fixes = state.fixes_attempted[-5:]
+    if not fixes:
+        return "None"
+    first = len(state.fixes_attempted) - len(fixes) + 1
+    lines = []
+    for number, fix in enumerate(fixes, start=first):
+        lines.append(f"- Fix {number}: {fix.strategy} ({_fix_status(fix)})")
+        if fix.root_cause:
+            lines.append(f"  believed cause: {fix.root_cause}")
+        results = fix.action_results or fix.changes_made
+        if results:
+            lines.append("  actions: " + "; ".join(results))
+        if fix.success:
+            lines.append("  then: the build passed")
+            continue
+        if fix.build_result == _NO_CHANGE:
+            continue  # nothing ran, so no later error belongs to it
+        after = next(
+            (e for e in state.error_history if e.timestamp > fix.timestamp),
+            None,
+        )
+        if after is not None:
+            line = first_error_line(
+                after.message
+            ) or _first_meaningful_error_line(
+                strip_failure_prefix(after.message)
+            )
+            lines.append(f"  then: next error: {line[:240]}")
+    return "\n".join(lines)
+
+
+def _error_key(message: str) -> str:
+    """Return the normalized first meaningful line of an error."""
+    return _normalize_error_line(
+        _first_meaningful_error_line(strip_failure_prefix(message))
+    )
+
+
+def _fix_changed_the_error(state: AgentState, fix: FixAttempt) -> bool:
+    """Return True when the build error after ``fix`` differs from before."""
+    after = next(
+        (e for e in state.error_history if e.timestamp > fix.timestamp),
+        None,
+    )
+    return after is not None and _error_key(after.message) != _error_key(
+        fix.error_message
+    )
+
+
+def _error_regex(line: str) -> str:
+    """Return a regex for an error line, tolerant of paths and numbers."""
+    pattern = re.escape(_normalize_error_line(line))
+    for token, regex in (
+        ("<path>", r"\S+"),
+        ("<hex>", r"[0-9a-fx]+"),
+        ("<n>", r"\d+"),
+    ):
+        pattern = pattern.replace(re.escape(token), regex)
+    return pattern
+
+
+def _one_line_tail(text: str, limit: int = 200) -> str:
+    """Return the end of command output as one short line."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else "..." + flat[-limit:]
 
 
 @agent_node(AgentRole.FIXER)
@@ -3764,16 +4207,12 @@ def fixer_node(state: AgentState) -> AgentState:
         state.build_status = BuildStatus.PENDING
         return state
 
-    previous_fixes = (
-        "\n".join(
-            [
-                f"- {fix.strategy} ({'Success' if fix.success else 'Failed'})"
-                for fix in state.fixes_attempted[-5:]
-            ]
-        )
-        if state.fixes_attempted
-        else "None"
-    )
+    if _llm_refused(state):
+        logger.warning("Fixer: the model refused this package; escalating")
+        state.build_status = BuildStatus.ESCALATED
+        return state
+
+    previous_fixes = _previous_fixes_text(state)
 
     arch_issues = "None"
     if state.arch_specific_code:
@@ -3806,12 +4245,13 @@ def fixer_node(state: AgentState) -> AgentState:
         "fixer", few_shot_context, max_examples=2, max_chars=2000
     )
 
-    build_plan_str = "Unknown"
-    if state.build_plan:
-        build_plan_str = (
-            f"Build System: {state.build_plan.build_system}\n"
-            f"Completed Phases: {state.last_successful_phase}"
-        )
+    build_plan_str = _build_plan_text(
+        state, failed_command if failed_command != "Unknown" else None
+    )
+    key_lines, output_tail = failure_digest(state.last_error or "")
+    stdout_tail = (
+        state.error_history[-1].stdout_tail if state.error_history else ""
+    )
 
     # Deterministic diagnosis context — the actual source lines the
     # error points at, plus the analyst's understanding of the package.
@@ -3819,38 +4259,55 @@ def fixer_node(state: AgentState) -> AgentState:
         error_context_excerpts(state.last_error or "", state.repo_path)
         or "(error references no readable repo files)"
     )
+    # Read once: on native each read after a sandbox command re-copies
+    # the mirror, and the investigation commands do not change the tree.
+    top_level_files = top_level_listing(state.repo_path)
     package_context = _format_analysis_for_prompt(state.package_analysis)
 
+    fixer_build_system = (
+        state.build_plan.build_system if state.build_plan else None
+    )
+    fixer_system_prompt = [
+        FIXER_PROMPT.format(platform_banner=_build_platform_banner()),
+        _FIXER_KNOWLEDGE_HEADING
+        + get_system_knowledge_summary(build_system=fixer_build_system),
+    ]
+
     def _render_fixer_prompt(investigation: str) -> str:
-        return FIXER_PROMPT.format(
+        return FIXER_TASK_PROMPT.format(
             repo_name=state.repo_name,
             target_arch="RISC-V (riscv64)",
-            platform_banner=_build_platform_banner(),
             build_system=(
                 state.build_plan.build_system
                 if state.build_plan
                 else "unknown"
             ),
-            current_phase=state.current_phase,
             attempt_count=state.attempt_count,
             max_attempts=state.max_attempts,
-            failed_phase=state.current_phase,
-            exit_code="N/A",
-            error_output=(
-                state.last_error[:3000]
-                if state.last_error
-                else "No error details"
+            failed_phase=_failed_phase_text(
+                state, failed_command if failed_command != "Unknown" else None
+            ),
+            exit_code=_exit_code_text(state.last_error or ""),
+            key_lines_section=(
+                "### Error lines from the cut part of the output\n"
+                f"```\n{key_lines}\n```\n\n"
+                if key_lines
+                else ""
+            ),
+            output_tail=output_tail or "No error details",
+            stdout_section=(
+                "\n### Standard output (the end; the output above is "
+                f"stderr)\n```\n{stdout_tail}\n```\n"
+                if stdout_tail
+                else ""
             ),
             error_file_excerpts=error_file_excerpts,
             package_context=package_context,
             failed_command=failed_command,
             previous_fixes=previous_fixes,
-            repo_tree=(
-                state.repo_tree[:500] if state.repo_tree else "(Not available)"
-            ),
+            top_level_files=top_level_files,
             known_arch_issues=arch_issues,
             build_plan=build_plan_str,
-            system_knowledge=get_system_knowledge_summary(),
             few_shot_examples=few_shot_examples,
             investigation=investigation,
         )
@@ -3862,11 +4319,25 @@ def fixer_node(state: AgentState) -> AgentState:
     # ONCE with the outputs. Round 1 must produce strategies.
     outcome = None
     investigation = _INVESTIGATION_OFFER
+    # Round 1 continues round 0's conversation: the model sees its own
+    # investigation request, then the results.
+    history: Optional[list] = None
+    round_prompt = None
     for round_idx in range(2):
         allow_investigation = round_idx == 0
 
         def _validate_fix(data: dict) -> ValidationResult:
-            if "investigate" in data and "strategies" not in data:
+            if data.get("escalate") and not data.get("strategies"):
+                esc = data["escalate"]
+                if (
+                    not isinstance(esc, dict)
+                    or not str(esc.get("reason", "")).strip()
+                ):
+                    return ValidationResult.bad(
+                        "'escalate' must be an object with a 'reason'"
+                    )
+                return ValidationResult.good()
+            if data.get("investigate") and not data.get("strategies"):
                 if not allow_investigation:
                     return ValidationResult.bad(
                         "investigation already used — emit the "
@@ -3890,7 +4361,10 @@ def fixer_node(state: AgentState) -> AgentState:
             invoke_fn=invoke_llm,
             llm=_fixer_pool[0],
             fallback_llms=_fixer_pool[1:],
-            prompt=_render_fixer_prompt(investigation),
+            prompt=round_prompt or _render_fixer_prompt(investigation),
+            system_prompt=fixer_system_prompt,
+            history=history,
+            output_schema=FIXER_SCHEMA,
             validator=_validate_fix,
             # No deterministic fix: FAILED ends the subgraph, and the
             # supervisor routes the run.
@@ -3903,7 +4377,7 @@ def fixer_node(state: AgentState) -> AgentState:
                     if state.last_error_category
                     else "unknown"
                 ),
-                "attempt": state.attempt_count,
+                "build_attempt": state.attempt_count,
                 "fixer_round": round_idx,
             },
             max_retries=2,
@@ -3914,19 +4388,22 @@ def fixer_node(state: AgentState) -> AgentState:
             tokens_out=outcome.output_tokens,
             calls=outcome.attempts,
         )
+        if outcome.refused:
+            break
 
         if (
             outcome.data is not None
             and allow_investigation
-            and "investigate" in outcome.data
-            and "strategies" not in outcome.data
+            and outcome.data.get("investigate")
+            and not outcome.data.get("strategies")
         ):
             commands = outcome.data["investigate"].get("commands", [])
             logger.info(
                 f"Fixer requested investigation: {len(commands)} command(s)"
             )
             results = _run_fixer_investigation(state, commands)
-            investigation = (
+            history = outcome.messages
+            round_prompt = (
                 "### Investigation results (you asked for these)\n"
                 f"{results}\n\n"
                 "You MUST now respond with the strategies schema — "
@@ -3934,6 +4411,12 @@ def fixer_node(state: AgentState) -> AgentState:
             )
             continue
         break
+
+    if outcome.refused:
+        # Every later fixer prompt for this package is refused too.
+        _mark_llm_refused(state, AgentRole.FIXER.value)
+        state.build_status = BuildStatus.ESCALATED
+        return state
 
     try:
         if outcome.data is None:
@@ -3944,9 +4427,7 @@ def fixer_node(state: AgentState) -> AgentState:
             )
             state.add_error(
                 create_error_record(
-                    message=(
-                        f"FIXER proposed invalid fix: " f"{outcome.last_error}"
-                    ),
+                    message=f"{_FIXER_INVALID}: {outcome.last_error}",
                     category=ErrorCategory.CONFIGURATION,
                 )
             )
@@ -3954,6 +4435,20 @@ def fixer_node(state: AgentState) -> AgentState:
             return state
 
         fix_data = outcome.data
+
+        escalation = fix_data.get("escalate")
+        if escalation and not fix_data.get("strategies"):
+            reason = str(escalation.get("reason", "")).strip()[:1200]
+            logger.warning(f"Fixer escalated: {reason}")
+            state.add_error(
+                create_error_record(
+                    message=f"{_FIXER_ESCALATED}: {reason}",
+                    category=state.last_error_category
+                    or ErrorCategory.UNKNOWN,
+                )
+            )
+            state.build_status = BuildStatus.ESCALATED
+            return state
 
         recommended_id = fix_data.get("recommended_strategy_id", 1)
         strategies = fix_data.get("strategies", [])
@@ -3970,6 +4465,7 @@ def fixer_node(state: AgentState) -> AgentState:
         logger.info(f"Applying fix strategy: {strategy['description']}")
 
         changes_made = []
+        action_results: List[str] = []
         for action in strategy.get("actions", []):
             if action["type"] == "create_file":
                 file_path = action.get("path")
@@ -3988,6 +4484,9 @@ def fixer_node(state: AgentState) -> AgentState:
                     changes_made.append(
                         f"REJECTED create_file outside repo: {file_path}"
                     )
+                    action_results.append(
+                        f"create `{file_path}` rejected: outside the repo"
+                    )
                     continue
 
                 # Built by Atesor with quoted arguments and base64
@@ -4003,6 +4502,7 @@ def fixer_node(state: AgentState) -> AgentState:
 
                 if write_result.success:
                     changes_made.append(f"Created file: {file_path}")
+                    action_results.append(f"created `{file_path}`")
                     logger.info(f"Created file: {file_path}")
                 elif write_result.exit_code == 3:
                     logger.error(
@@ -4012,15 +4512,23 @@ def fixer_node(state: AgentState) -> AgentState:
                     changes_made.append(
                         f"REJECTED create_file outside repo: {file_path}"
                     )
+                    action_results.append(
+                        f"create `{file_path}` rejected: symlink out of "
+                        f"the repo"
+                    )
                 else:
                     logger.error(
                         f"Failed to create file {file_path}: "
                         f"{write_result.stderr}"
                     )
+                    action_results.append(
+                        f"create `{file_path}` failed: "
+                        f"{_one_line_tail(write_result.stderr)}"
+                    )
 
             elif action["type"] == "patch":
                 patch_content = action["content"]
-                file_path = action.get("file")
+                file_path = action.get("file") or action.get("path") or None
                 full_file_path = (
                     os.path.join(state.repo_path, file_path)
                     if file_path
@@ -4034,6 +4542,9 @@ def fixer_node(state: AgentState) -> AgentState:
                     changes_made.append(
                         f"REJECTED patch outside repo: {file_path}"
                     )
+                    action_results.append(
+                        f"patch of `{file_path}` rejected: outside the repo"
+                    )
                     continue
 
                 if apply_patch(
@@ -4045,9 +4556,16 @@ def fixer_node(state: AgentState) -> AgentState:
                     changes_made.append(
                         f"Patched {file_path if file_path else 'repository'}"
                     )
+                    action_results.append(
+                        f"patched `{file_path or 'repository'}`"
+                    )
                     state.patches_generated.append(patch_content)
                 else:
                     logger.error(f"Failed to apply patch to {file_path}")
+                    action_results.append(
+                        f"patch of `{file_path or 'repository'}` did not "
+                        f"apply"
+                    )
 
             elif action["type"] == "command":
                 command = action["command"]
@@ -4056,6 +4574,9 @@ def fixer_node(state: AgentState) -> AgentState:
                 if not is_safe:
                     logger.warning(
                         f"Fix command blocked: {command} - {reason}"
+                    )
+                    action_results.append(
+                        f"`{command[:160]}` blocked: {reason[:160]}"
                     )
                     continue
 
@@ -4088,23 +4609,47 @@ def fixer_node(state: AgentState) -> AgentState:
                     result = execute_command(cmd, cwd=state.repo_path)
                     if result.success:
                         changes_made.append(f"Executed: {cmd}")
+                        action_results.append(f"`{cmd[:160]}` ok")
                     else:
                         logger.error(f"Fix command failed: {result.stderr}")
+                        output = result.stderr or result.stdout or ""
+                        action_results.append(
+                            f"`{cmd[:160]}` failed (exit "
+                            f"{result.exit_code}): {_one_line_tail(output)}"
+                        )
 
+        effective = [c for c in changes_made if not c.startswith("REJECTED")]
         fix_attempt = FixAttempt(
             error_category=state.last_error_category,
             strategy=strategy["description"],
             changes_made=changes_made,
-            # builder_node flips this to True on the next good build.
+            # builder_node flips this to True on the next good build;
+            # a no-change fix keeps its marker and is never flipped.
             success=False,
+            build_result=None if effective else _NO_CHANGE,
             error_message=state.last_error or "",
+            action_results=action_results,
+            root_cause=_shorten(
+                (fix_data.get("reflection") or {}).get("root_cause", ""), 300
+            ),
         )
         state.add_fix_attempt(fix_attempt)
 
         logger.info(f"Fix applied: {len(changes_made)} changes")
 
-        if any(not c.startswith("REJECTED") for c in changes_made):
-            _rewind_after_verify_failure(state)
+        if not effective:
+            # A rebuild of an unchanged tree repeats the same failure.
+            # Count the attempt (it bounds this loop) and let
+            # route_fix_result send the run back to the fixer, which
+            # sees this fix as "no change applied".
+            logger.warning(
+                "Fix changed nothing; asking the fixer again without a "
+                "rebuild"
+            )
+            state.attempt_count += 1
+            return state
+
+        _rewind_after_verify_failure(state)
 
         # Back to PENDING so route_fix_result sends the run to
         # build_node for a rebuild.
@@ -4182,7 +4727,7 @@ Message: {err_msg}
     report += f"""
 
 ## Recommendation
-{should_escalate(state)[1]}
+{should_escalate(state)[1] or _escalation_reason(state)}
 """
 
     if state.error_history:
@@ -4206,6 +4751,51 @@ Message: {err_msg}
 # finish_node — package tests, the recipe, and auto-learning.
 
 
+def _curate_artifacts(state: AgentState) -> None:
+    """Curate ``build_artifacts`` once, into ``curated_artifacts``.
+
+    The rules decide; the LLM is asked only when they are unsure, and
+    its call counts in the run's call, token and cost totals. Never
+    raises.
+    """
+    if (
+        not state.build_artifacts
+        or state.curated_artifacts
+        or state.context_cache.get("curated")
+    ):
+        return
+    # Once per run, also when the result is empty (everything dropped).
+    state.context_cache["curated"] = True
+    try:
+        from .artifact_curator import curate_artifacts
+
+        curator_llm = None
+        try:
+            # After a refusal, the rules curate without the LLM.
+            if not _llm_refused(state):
+                curator_llm = get_model_for_role(AgentRole.SUMMARIZER)
+        except Exception as e:
+            logger.info(
+                f"Curator LLM unavailable, using rule-based fallback: {e}"
+            )
+        state.curated_artifacts = curate_artifacts(
+            raw_artifacts=state.build_artifacts,
+            repo_name=state.repo_name or "unknown",
+            build_system=(
+                state.build_plan.build_system
+                if state.build_plan
+                else "unknown"
+            ),
+            llm=curator_llm,
+            usage_sink=lambda cost, tokens_in, tokens_out: state.log_api_call(
+                cost=cost, tokens_in=tokens_in, tokens_out=tokens_out
+            ),
+        )
+    except Exception as e:
+        logger.warning(f"Artifact curation failed (non-fatal): {e}")
+        state.curated_artifacts = []
+
+
 def _save_learning_data(state: AgentState):
     """Learn from a verified success; teach nothing from the rest.
 
@@ -4219,29 +4809,8 @@ def _save_learning_data(state: AgentState):
         repo = state.repo_name or "unknown"
         bs = state.build_plan.build_system if state.build_plan else "unknown"
 
-        # Curate artifacts so recipe + report show only user-facing
-        # deliverables.
-        if state.build_artifacts and not state.curated_artifacts:
-            try:
-                from .artifact_curator import curate_artifacts
-
-                curator_llm = None
-                try:
-                    curator_llm = get_model_for_role(AgentRole.SUMMARIZER)
-                except Exception as e:
-                    logger.info(
-                        f"Curator LLM unavailable, using rule-based "
-                        f"fallback: {e}"
-                    )
-                state.curated_artifacts = curate_artifacts(
-                    raw_artifacts=state.build_artifacts,
-                    repo_name=repo,
-                    build_system=bs,
-                    llm=curator_llm,
-                )
-            except Exception as e:
-                logger.warning(f"Artifact curation failed (non-fatal): {e}")
-                state.curated_artifacts = []
+        # Curated already by finish_node; this covers other callers.
+        _curate_artifacts(state)
 
         # Only a proven riscv64 port may teach later runs. An unverified
         # or wrong-arch "success" in the cache or the few-shot store
@@ -4282,30 +4851,35 @@ def _save_learning_data(state: AgentState):
         # Fixer learning
         for fix in state.fixes_attempted or []:
             if fix.success and fix.strategy:
+                # ``changes_made`` records "Executed: <cmd>" /
+                # "Created file: <p>" strings; recover the raw commands
+                # for the few-shot example. A fix of file edits only
+                # gives no reusable action, so it is not saved (the
+                # selection skips examples without actions).
+                actions = [
+                    {"type": "command", "command": change[len("Executed: ") :]}
+                    for change in (fix.changes_made or [])
+                    if change.startswith("Executed: ")
+                ]
+                if not actions:
+                    continue
+                # The decisive error line, not the failed command that
+                # heads the message ("Build command failed: <cmd> ...").
+                key_line = first_error_line(
+                    fix.error_message
+                ) or _first_meaningful_error_line(
+                    strip_failure_prefix(fix.error_message)
+                )
                 fixer_data = {
-                    "name": f"Auto: {repo} - {fix.strategy[:40]}",
+                    "name": f"Auto: {repo} - {_shorten(fix.strategy, 60)}",
                     "tags": [bs, "auto-fix"],
                     "build_system": bs,
                     "repo_name": repo,
                     "error_pattern": (
-                        re.escape(fix.error_message[:80])
-                        if fix.error_message
-                        else ""
+                        _error_regex(key_line) if key_line else ""
                     ),
-                    # ``changes_made`` records "Executed: <cmd>" /
-                    # "Created file: <p>" strings; recover the raw
-                    # commands for the few-shot example.
-                    "fix": {
-                        "strategy": fix.strategy,
-                        "actions": [
-                            {
-                                "type": "command",
-                                "command": change[len("Executed: ") :],
-                            }
-                            for change in (fix.changes_made or [])
-                            if change.startswith("Executed: ")
-                        ],
-                    },
+                    "error_context": {"error_message": key_line[:200]},
+                    "fix": {"strategy": fix.strategy, "actions": actions},
                     "reasoning": f"Auto-learned fix from {repo}.",
                 }
                 save_learned_example("fixer", fixer_data)
@@ -4564,6 +5138,10 @@ def finish_node(state: AgentState) -> AgentState:
                 build_steps += f"{cmd}\n"
             build_steps += "```\n"
 
+    # Curate first, so the summary lists the deliverables, not the
+    # build-system probes.
+    _curate_artifacts(state)
+
     # Prefer the curated artifact list: primary first, no noise.
     artifacts_info = ""
     artifacts_to_show = state.curated_artifacts or state.build_artifacts
@@ -4624,6 +5202,8 @@ def finish_node(state: AgentState) -> AgentState:
     )
 
     try:
+        if _llm_refused(state):
+            raise RuntimeError("the model refused this package earlier")
         messages = [HumanMessage(content=prompt)]
         llm = get_model_for_role(AgentRole.SUMMARIZER)
         response = invoke_llm(llm, messages)
@@ -4635,6 +5215,7 @@ def finish_node(state: AgentState) -> AgentState:
 
         recipe = extract_content(response.content)
 
+        cache_read, cache_write = response_cache_usage(response)
         log_llm_call(
             agent_role=AgentRole.SUMMARIZER.value,
             prompt=prompt,
@@ -4643,8 +5224,21 @@ def finish_node(state: AgentState) -> AgentState:
             cost_usd=cost,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            metadata={"repo": state.repo_name, "phase": "finish"},
+            metadata={
+                "repo": state.repo_name,
+                "phase": "finish",
+                "stop_reason": response_stop_reason(response),
+                "cache_read": cache_read,
+                "cache_write": cache_write,
+            },
         )
+
+        if is_refusal(response):
+            _mark_llm_refused(state, AgentRole.SUMMARIZER.value)
+            raise RuntimeError("the model refused the request")
+        # An empty recipe would leave no recipe file at all.
+        if not recipe.strip():
+            raise RuntimeError("the model returned an empty recipe")
 
         state.porting_recipe = recipe
         logger.info("Porting guide generated successfully")
@@ -5010,6 +5604,30 @@ def route_supervisor_to_next(state: AgentState) -> str:
     if state.package_analysis is None:
         return "analyst_node"
 
+    # A plan command that the command validator blocks cannot be fixed
+    # by the fixer: the whitelist rejects its answer too. Re-plan once
+    # with the blocked command in the scout prompt, then escalate.
+    if state.build_status == BuildStatus.FAILED and (
+        _last_error_is_validator_block(state)
+    ):
+        if state.context_cache.get("validator_block_replans", 0) < 1:
+            logger.warning(
+                "A planned command was blocked by the command validator; "
+                "re-planning once"
+            )
+            return "scout_node"
+        logger.warning(f"Escalating: {_escalation_reason(state)}")
+        return "escalate_node"
+
+    # The fix loop stopped because more fixer rounds cannot help (a
+    # refusal, or an error that two fixes did not change). Building
+    # again would repeat the same failure.
+    if state.build_status in (BuildStatus.FAILED, BuildStatus.FIXING):
+        stop = _fix_loop_stop_reason(state)
+        if stop:
+            logger.warning(f"Escalating: {stop}")
+            return "escalate_node"
+
     need_new_plan = state.build_status == BuildStatus.FAILED and (
         state.last_error_category
         in (ErrorCategory.DEPENDENCY, ErrorCategory.MISSING_TOOLS)
@@ -5030,11 +5648,130 @@ def route_supervisor_to_next(state: AgentState) -> str:
     return "scout_node"
 
 
+# Fix-loop stop rules, shared by the subgraph and the supervisor.
+
+# FixAttempt.build_result of a fix whose actions changed nothing in the
+# tree. The builder does not mark such a fix successful, and the next
+# step is another fixer round instead of an identical rebuild.
+_NO_CHANGE = "no change applied"
+
+# Prefix that execute_command writes for a command the whitelist blocks.
+_VALIDATOR_BLOCK = "Command blocked by safety validation"
+
+# Prefix of the error fixer_node records when no attempt gave a valid
+# fix. The tree is unchanged, so a rebuild repeats the same failure.
+_FIXER_INVALID = "FIXER proposed invalid fix"
+
+# Prefix of the error fixer_node records when the model says that no
+# fix inside the sandbox can work (the `escalate` field).
+_FIXER_ESCALATED = "FIXER escalated"
+
+
+def _llm_refused(state: AgentState) -> bool:
+    """Return True when a model refused this package earlier in the run."""
+    return bool(state.context_cache.get("llm_refused"))
+
+
+def _mark_llm_refused(state: AgentState, role: str) -> None:
+    """Record a refusal; later steps of this package skip the LLM.
+
+    The refusal is about the package, not one prompt: in the October
+    2026 runs every role refused the same eight offensive-security
+    packages, and each retry got the same refusal.
+
+    Args:
+        state: The current agent state.
+        role: The role whose call was refused.
+    """
+    if not state.context_cache.get("llm_refused"):
+        logger.warning(
+            f"[{role}] the model refused this package; the remaining "
+            f"steps of this run skip the LLM"
+        )
+    state.context_cache["llm_refused"] = role
+
+
+def _last_error_is_validator_block(state: AgentState) -> bool:
+    """Return True when the command validator blocked the last command."""
+    if not state.error_history:
+        return False
+    return _VALIDATOR_BLOCK in (state.error_history[-1].message or "")
+
+
+def _fix_loop_stop_reason(state: AgentState) -> str:
+    """Return why another fixer round cannot help, or an empty string.
+
+    Stops on: a refusal; a ``should_escalate`` reason other than the
+    error category (attempt limit, three identical errors, cost cap); a
+    fixer round with no valid answer; and two or more fixes after which
+    the error did not change. The category alone does not stop the
+    loop: it comes from substring matches, and the fixer fixed errors
+    classified as DISK_SPACE. In October 2026
+    the fixer passed 21.7% of packages in round 1, but only 8.6% in
+    round 3 and 5.4% in round 4.
+
+    Args:
+        state: The current agent state.
+
+    Returns:
+        A short reason for the escalation report, or ``""``.
+    """
+    if _llm_refused(state):
+        return (
+            "the model refused this package (safety stop), so no LLM fix "
+            "is possible"
+        )
+    escalate, reason = should_escalate(state, check_category=False)
+    if escalate:
+        return reason
+    last = state.error_history[-1].message if state.error_history else ""
+    # A provider fault (timeout, HTTP error) may pass; an answer that
+    # fails validation or parsing three times will not. In October 2026
+    # no package passed after such a fixer round (32 runs).
+    if (last or "").startswith(_FIXER_INVALID) and (
+        "LLM invocation raised" not in last
+    ):
+        return (
+            "the fixer gave no valid fix after its retries; a rebuild of "
+            "the unchanged tree would repeat the failure"
+        )
+    if len(state.fixes_attempted) >= 2 and len(state.error_history) >= 2:
+        before, after = state.error_history[-2:]
+        if _error_signature(before) == _error_signature(after):
+            return (
+                f"the error did not change after fix "
+                f"{len(state.fixes_attempted)}; more fixer rounds are "
+                f"unlikely to help"
+            )
+    return ""
+
+
+def _escalation_reason(state: AgentState) -> str:
+    """Return the reason the escalation report gives for this run."""
+    last = state.error_history[-1].message if state.error_history else ""
+    if (last or "").startswith(_FIXER_ESCALATED):
+        return f"the fixer found no fix inside the sandbox: {last}"
+    reason = _fix_loop_stop_reason(state)
+    if reason:
+        return reason
+    if _last_error_is_validator_block(state):
+        return (
+            "a planned command is not allowed by the command validator, "
+            "and a re-plan did not remove it"
+        )
+    return ""
+
+
 # Build-fix subgraph routing: build → verify → fix → rebuild.
 
 
 def route_build_result(state: AgentState) -> str:
-    """Route a build result: verify, attempt a fix, or exit."""
+    """Route a build result: verify, attempt a fix, or exit.
+
+    A command blocked by the validator, or a stop rule from
+    ``_fix_loop_stop_reason``, exits the subgraph without a fixer call;
+    the supervisor then re-plans or escalates.
+    """
     if state.build_status == BuildStatus.SUCCESS:
         return "verify_node"
     if state.build_status == BuildStatus.ESCALATED:
@@ -5044,6 +5781,16 @@ def route_build_result(state: AgentState) -> str:
             f"Subgraph: max attempts ({state.max_attempts}) exceeded "
             f"after build — exiting subgraph"
         )
+        return "__end__"
+    if _last_error_is_validator_block(state):
+        logger.warning(
+            "Subgraph: the command validator blocked a planned command; "
+            "the fixer cannot change the whitelist — exiting subgraph"
+        )
+        return "__end__"
+    stop = _fix_loop_stop_reason(state)
+    if stop:
+        logger.warning(f"Subgraph: no fixer round ({stop}) — exiting")
         return "__end__"
     return "fix_node"
 
@@ -5071,11 +5818,19 @@ def route_verify_result(state: AgentState) -> str:
         ErrorCategory.ARCHITECTURE,
     ):
         return "__end__"
+    stop = _fix_loop_stop_reason(state)
+    if stop:
+        logger.warning(f"Subgraph: no fixer round ({stop}) — exiting")
+        return "__end__"
     return "fix_node"
 
 
 def route_fix_result(state: AgentState) -> str:
-    """After a fix: retry build, or exit subgraph as failure."""
+    """After a fix: rebuild, ask the fixer again, or exit as failure.
+
+    A fix that changed nothing goes straight back to the fixer: the
+    rebuild would repeat the same failure.
+    """
     if state.build_status == BuildStatus.ESCALATED:
         return "__end__"
     if state.build_status == BuildStatus.FAILED:
@@ -5087,6 +5842,16 @@ def route_fix_result(state: AgentState) -> str:
             f"after fix — exiting subgraph"
         )
         return "__end__"
+    if (
+        state.build_status == BuildStatus.FIXING
+        and state.fixes_attempted
+        and state.fixes_attempted[-1].build_result == _NO_CHANGE
+    ):
+        stop = _fix_loop_stop_reason(state)
+        if stop:
+            logger.warning(f"Subgraph: no fixer round ({stop}) — exiting")
+            return "__end__"
+        return "fix_node"
     return "build_node"
 
 
@@ -5482,7 +6247,7 @@ def create_build_fix_subgraph() -> StateGraph:
     sg.add_conditional_edges(
         "fix_node",
         route_fix_result,
-        {"build_node": "build_node", "__end__": END},
+        {"build_node": "build_node", "fix_node": "fix_node", "__end__": END},
     )
 
     return sg.compile()

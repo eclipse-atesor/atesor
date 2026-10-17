@@ -162,6 +162,9 @@ class ErrorRecord:
     traceback: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
     attempt_number: int = 0
+    # The end of stdout when the message holds stderr and stdout has an
+    # error line too (configure scripts, test runners print there).
+    stdout_tail: str = ""
 
 
 @dataclass
@@ -177,6 +180,11 @@ class FixAttempt:
     # The error this fix addressed. Auto-learning keys the few-shot
     # example on it; the run's last error belongs to another step.
     error_message: str = ""
+    # One line per action and its result (ok, failed with the output
+    # tail, blocked); the next fixer prompt shows them.
+    action_results: List[str] = field(default_factory=list)
+    # The fixer's one-sentence root cause for this fix.
+    root_cause: str = ""
 
 
 @dataclass
@@ -1141,6 +1149,7 @@ def create_error_record(
     severity: Optional[FailureSeverity] = None,
     command: Optional[str] = None,
     attempt_number: int = 0,
+    stdout_tail: str = "",
 ) -> ErrorRecord:
     """Create an error record, inferring what the caller leaves out.
 
@@ -1151,6 +1160,7 @@ def create_error_record(
         severity: Inferred via ``infer_failure_severity`` when None.
         command: The command that failed; used in severity inference.
         attempt_number: The run's attempt counter at failure time.
+        stdout_tail: The end of stdout, when the message left it out.
 
     Returns:
         The populated ``ErrorRecord``.
@@ -1168,6 +1178,7 @@ def create_error_record(
         severity=severity,
         command=command,
         attempt_number=attempt_number,
+        stdout_tail=stdout_tail,
     )
 
 
@@ -1238,7 +1249,9 @@ def infer_failure_severity(
     return FailureSeverity.MEDIUM
 
 
-def should_escalate(state: AgentState) -> tuple[bool, str]:
+def should_escalate(
+    state: AgentState, check_category: bool = True
+) -> tuple[bool, str]:
     """Determine whether the task should be escalated to a human.
 
     Escalates on any of: the attempt ceiling, an error loop with no
@@ -1248,6 +1261,11 @@ def should_escalate(state: AgentState) -> tuple[bool, str]:
 
     Args:
         state: The current agent state.
+        check_category: False skips the fundamental-category rule. The
+            fix loop uses False: the category comes from substring
+            matches (a git warning with "Permission denied" gives
+            PERMISSION), and in October 2026 the fixer passed 5 runs
+            whose error had the DISK_SPACE category.
 
     Returns:
         A ``(should_escalate, reason)`` tuple.
@@ -1266,7 +1284,7 @@ def should_escalate(state: AgentState) -> tuple[bool, str]:
         ErrorCategory.DISK_SPACE,
     }
 
-    if state.last_error_category in fundamental_categories:
+    if check_category and state.last_error_category in fundamental_categories:
         return True, f"Fundamental blocker: {state.last_error_category.value}"
 
     # Hard per-package spend cap, in USD.
