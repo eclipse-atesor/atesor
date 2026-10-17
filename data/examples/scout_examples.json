@@ -2094,6 +2094,76 @@
       "id": "scout-auto-136",
       "source": "auto",
       "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: bingrep (cargo)",
+      "tags": [
+        "cargo",
+        "bingrep"
+      ],
+      "build_system": "cargo",
+      "repo_name": "bingrep",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends rust"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cargo build --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful bingrep build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-137",
+      "source": "auto",
+      "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: tzupdate (cargo)",
+      "tags": [
+        "cargo",
+        "tzupdate"
+      ],
+      "build_system": "cargo",
+      "repo_name": "tzupdate",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends rust"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cargo build --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful tzupdate build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-138",
+      "source": "auto",
+      "timestamp": "2026-10-17"
     }
   ]
 }

@@ -1701,6 +1701,64 @@
       "id": "builder-auto-139",
       "source": "auto",
       "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: bingrep build execution",
+      "tags": [
+        "cargo",
+        "bingrep"
+      ],
+      "build_system": "cargo",
+      "repo_name": "bingrep",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends rust"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cargo build --release"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from bingrep.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-140",
+      "source": "auto",
+      "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: tzupdate build execution",
+      "tags": [
+        "cargo",
+        "tzupdate"
+      ],
+      "build_system": "cargo",
+      "repo_name": "tzupdate",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends rust"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cargo build --release"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from tzupdate.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-141",
+      "source": "auto",
+      "timestamp": "2026-10-17"
     }
   ]
 }

@@ -3593,6 +3593,46 @@
         "build_duration_seconds": 984.7,
         "recipe_file": "output/manifest-tool_recipe.md",
         "recipe_markdown": "# RISC-V Porting Recipe: manifest-tool\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends build-essential make\n```\n\n### build\n```bash\nmake -j$(nproc)\n```\n\n### Build Artifacts Generated\n\n- **binary** (None): `/workspace/repos/manifest-tool/integration/test-registry.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/integration/test-registry-tagonly.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/makestatic.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/vendor.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/cross.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-lint`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-git-marks`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-gofmt`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-vet`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/sign-release.sh`\n- **binary** (RISC-V): `/workspace/repos/manifest-tool/manifest-tool`\n- **binary** (None): `/workspace/repos/manifest-tool/integration/test-registry.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/integration/test-registry-tagonly.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/makestatic.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/vendor.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/cross.sh`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-lint`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-git-marks`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-gofmt`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/make/validate-vet`\n- **binary** (None): `/workspace/repos/manifest-tool/hack/sign-release.sh`\n- **binary** (RISC-V): `/workspace/repos/manifest-tool/manifest-tool`\n\n"
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/estesp/manifest-tool",
+        "build_system": "make",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T02:23:11.273245",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add build-base"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "make -j$(nproc)"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/manifest-tool/manifest-tool",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1038.9,
+        "recipe_file": "output/manifest-tool_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: manifest-tool\n\nThe build commands succeeded. Artifact verification: verified: 1 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add build-base\n```\n\n### build\n```bash\nmake -j$(nproc)\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/manifest-tool/manifest-tool`\n\n\n**Artifact verification:** verified: 1 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** skipped: no test suite found (ctest, meson test, go test, cargo test, make check or make test)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "1 riscv64 ELF build output(s) verified by header",
+          "source_commit": "c4ae22e6977eb61fb3f6c380fedf43260c335718"
+        }
       }
     },
     "mieru": {
@@ -13279,6 +13319,47 @@
         "build_duration_seconds": 1267.2,
         "recipe_file": "output/cloudsword_recipe.md",
         "recipe_markdown": "## Executive Summary\n\n**Status: partial.** The riscv64 binary builds and its ELF header verifies as riscv64, but the package test suite (`go test ./...`) fails with exit 1. The test failure is not gating for this report. Portability verdict: cloudsword is a pure Go project with no architecture-specific code, so the port required no source changes; the remaining open question is why the tests fail, which was not investigated.\n\n## Prerequisites\n\nOnly `git` was installed in the run, plus the Go toolchain (assumed present in the build environment; the report does not record how it was provisioned).\n\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n## Build Instructions\n\nRun from the repository root (`cloudsword/`):\n\n```bash\ngit clone https://github.com/wgpsec/cloudsword\ncd cloudsword\n```\n\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\nThe `-buildvcs=false` flag was used to avoid VCS stamping failures; it is not strictly required if git metadata is present and healthy.\n\n## Architecture Notes\n\nNo architecture-specific issues were observed. No preprocessor macros, assembly, SIMD paths, or libc-dependent code needed handling. The Go toolchain handles `GOARCH=riscv64` natively, so the build succeeded without changes.\n\n## Verification\n\nConfirm the produced binary is a riscv64 ELF:\n\n```bash\nfile ./cloudsword\nreadelf -h ./cloudsword | grep -E 'Class|Machine'\n```\n\nExpected: `ELF 64-bit LSB executable, UCB RISC-V` and `Machine: RISC-V`. The run's artifact check confirmed one riscv64 ELF output at `/workspace/repos/cloudsword/cloudsword` by header.\n\n## Known Issues & Recommendations\n\n- **Package tests fail (`go test ./...`, exit 1).** The run did not capture the failure output, so the cause is unknown. Re-run `go test ./...` on the target to see whether failures are environmental (missing tools, network access) or architecture-related. Do not assume they are riscv64-specific until that is confirmed.\n- **Runtime not validated.** Only the build and ELF header were checked. The binary has not been executed on RISC-V hardware or QEMU user-mode in this run.\n- **Upstream:** no portability patches are needed. Consider adding a riscv64 entry to the CI matrix (e.g., via `GOARCH=riscv64 go build`) so future regressions are caught.",
+        "verification": {
+          "status": "verified",
+          "reason": "1 riscv64 ELF build output(s) verified by header",
+          "source_commit": "58655f3a824c77d9020280e362cab2c17e9e43e1"
+        }
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/wgpsec/cloudsword",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T04:17:51.566454",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add git go"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ."
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cloudsword/cloudsword",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1651.8,
+        "recipe_file": "output/cloudsword_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: cloudsword\n\nThe build commands succeeded. Artifact verification: verified: 1 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add git go\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false .\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/cloudsword/cloudsword`\n\n\n**Artifact verification:** verified: 1 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** failed (`go test ./...`, exit 1)\n",
         "verification": {
           "status": "verified",
           "reason": "1 riscv64 ELF build output(s) verified by header",
@@ -23473,13 +23554,138 @@
         "build_system": "cargo",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64",
-        "last_built": "2026-07-07T10:15:26.547693",
+        "last_built": "2026-10-17T03:48:59.010552",
         "build_plan": {
           "phases": [
             {
               "name": "setup",
               "commands": [
-                "apt-get update && apt-get install -y --no-install-recommends rustc cargo"
+                "apt-get update && apt-get install -y --no-install-recommends rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/bingrep",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/anyhow-9cb0f8daea7f42c3/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/anyhow-9cb0f8daea7f42c3/build_script_build-9cb0f8daea7f42c3",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-a41ed41ac11b90a5/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-a41ed41ac11b90a5/build_script_build-a41ed41ac11b90a5",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/libc-76fe6e20728a8b44/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/libc-76fe6e20728a8b44/build_script_build-76fe6e20728a8b44",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-ba20f4ad81ac34c4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-ba20f4ad81ac34c4/build_script_build-ba20f4ad81ac34c4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/quote-d3585571e2d9d804/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/quote-d3585571e2d9d804/build_script_build-d3585571e2d9d804",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/rustix-9d7a3574ce26f591/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/rustix-9d7a3574ce26f591/build_script_build-9d7a3574ce26f591",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/serde_core-451d7b469a692f66/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/serde_core-451d7b469a692f66/build_script_build-451d7b469a692f66",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/deps/bingrep-793a7cedff3a2a4b",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/bingrep/target/release/deps/libclap_derive-a4a51372eee7ee54.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/bingrep/target/release/deps/libscroll_derive-0828368cf752f524.so",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1873.1,
+        "recipe_file": "output/bingrep_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: bingrep\n\nThe build commands succeeded. Artifact verification: verified: 18 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/bingrep`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/anyhow-9cb0f8daea7f42c3/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/anyhow-9cb0f8daea7f42c3/build_script_build-9cb0f8daea7f42c3`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/cpp_demangle-a41ed41ac11b90a5/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/cpp_demangle-a41ed41ac11b90a5/build_script_build-a41ed41ac11b90a5`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/libc-76fe6e20728a8b44/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/libc-76fe6e20728a8b44/build_script_build-76fe6e20728a8b44`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/proc-macro2-ba20f4ad81ac34c4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/proc-macro2-ba20f4ad81ac34c4/build_script_build-ba20f4ad81ac34c4`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/quote-d3585571e2d9d804/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/quote-d3585571e2d9d804/build_script_build-d3585571e2d9d804`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/rustix-9d7a3574ce26f591/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/rustix-9d7a3574ce26f591/build_script_build-9d7a3574ce26f591`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/serde_core-451d7b469a692f66/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/serde_core-451d7b469a692f66/build_script_build-451d7b469a692f66`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/deps/bingrep-793a7cedff3a2a4b`\n- **library_shared** (riscv64): `/workspace/repos/bingrep/target/release/deps/libclap_derive-a4a51372eee7ee54.so`\n- **library_shared** (riscv64): `/workspace/repos/bingrep/target/release/deps/libscroll_derive-0828368cf752f524.so`\n\n\n**Artifact verification:** verified: 18 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** passed (`cargo test --release`, exit 0)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "18 riscv64 ELF build output(s) verified by header",
+          "source_commit": "99d10541c7d442c50f732e62c507f1d62001413e"
+        }
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/m4b/bingrep",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T02:52:08.555319",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
               ]
             },
             {
@@ -23495,108 +23701,103 @@
         "artifacts": [
           {
             "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/deps/bingrep-b9bf8b7289e733b6",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build_script_build-024f9b28351e764e",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build_script_build-cdd3c45a33ecd893",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build_script_build-c04db066d8983c55",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build_script_build-98f818c262107926",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build_script_build-5d8427a0cc01e366",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build_script_build-ef603568a2b97267",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build_script_build-91baee32f77c0676",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
             "path": "/workspace/repos/bingrep/target/release/bingrep",
             "role": "primary"
           },
           {
-            "type": "library_shared",
-            "path": "/workspace/repos/bingrep/target/release/deps/libclap_derive-272b9dedb6bb4444.so",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/bingrep/target/release/deps/libscroll_derive-f7d6edd9858fcfa2.so",
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/anyhow-ae8749fa8909fd8f/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/deps/bingrep-b9bf8b7289e733b6",
+            "path": "/workspace/repos/bingrep/target/release/build/anyhow-ae8749fa8909fd8f/build_script_build-ae8749fa8909fd8f",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build-script-build",
+            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-a2b4190742f3cac6/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/cpp_demangle-a2b4190742f3cac6/build_script_build-a2b4190742f3cac6",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/libc-4eee90890fdfeace/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/libc-4eee90890fdfeace/build_script_build-4eee90890fdfeace",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-07a0909f1051fe5d/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/proc-macro2-07a0909f1051fe5d/build_script_build-07a0909f1051fe5d",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/quote-0716689585541c49/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/quote-0716689585541c49/build_script_build-0716689585541c49",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/rustix-477e566852e9b6ed/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/rustix-477e566852e9b6ed/build_script_build-477e566852e9b6ed",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/serde_core-2a0988d94b9bc1ce/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/build/serde_core-2a0988d94b9bc1ce/build_script_build-2a0988d94b9bc1ce",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/bingrep/target/release/deps/bingrep-9e6fed8cae3c75ba",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/bingrep/target/release/deps/libclap_derive-575653684c8ff38d.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/bingrep/target/release/deps/libscroll_derive-79be7c2669dfb753.so",
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 2410.9,
+        "build_duration_seconds": 2265.8,
         "recipe_file": "output/bingrep_recipe.md",
-        "recipe_markdown": "# RISC-V Porting Recipe: bingrep\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rustc cargo\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/deps/bingrep-b9bf8b7289e733b6`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build_script_build-024f9b28351e764e`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build_script_build-cdd3c45a33ecd893`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build_script_build-c04db066d8983c55`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build_script_build-98f818c262107926`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build_script_build-5d8427a0cc01e366`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build_script_build-ef603568a2b97267`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build_script_build-91baee32f77c0676`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/bingrep`\n- **library_shared** (RISC-V): `/workspace/repos/bingrep/target/release/deps/libclap_derive-272b9dedb6bb4444.so`\n- **library_shared** (RISC-V): `/workspace/repos/bingrep/target/release/deps/libscroll_derive-f7d6edd9858fcfa2.so`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/deps/bingrep-b9bf8b7289e733b6`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/libc-024f9b28351e764e/build_script_build-024f9b28351e764e`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/rustix-cdd3c45a33ecd893/build_script_build-cdd3c45a33ecd893`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/proc-macro2-c04db066d8983c55/build_script_build-c04db066d8983c55`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/serde_core-98f818c262107926/build_script_build-98f818c262107926`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/quote-5d8427a0cc01e366/build_script_build-5d8427a0cc01e366`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/cpp_demangle-ef603568a2b97267/build_script_build-ef603568a2b97267`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/build/anyhow-91baee32f77c0676/build_script_build-91baee32f77c0676`\n- **binary** (RISC-V): `/workspace/repos/bingrep/target/release/bingrep`\n- **library_shared** (RISC-V): `/workspace/repos/bingrep/target/release/deps/libclap_derive-272b9dedb6bb4444.so`\n- **library_shared** (RISC-V): `/workspace/repos/bingrep/target/release/deps/libscroll_derive-f7d6edd9858fcfa2.so`\n\n"
+        "recipe_markdown": "# RISC-V Porting Recipe: bingrep\n\nThe build commands succeeded. Artifact verification: verified: 18 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/bingrep`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/anyhow-ae8749fa8909fd8f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/anyhow-ae8749fa8909fd8f/build_script_build-ae8749fa8909fd8f`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/cpp_demangle-a2b4190742f3cac6/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/cpp_demangle-a2b4190742f3cac6/build_script_build-a2b4190742f3cac6`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/libc-4eee90890fdfeace/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/libc-4eee90890fdfeace/build_script_build-4eee90890fdfeace`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/proc-macro2-07a0909f1051fe5d/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/proc-macro2-07a0909f1051fe5d/build_script_build-07a0909f1051fe5d`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/quote-0716689585541c49/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/quote-0716689585541c49/build_script_build-0716689585541c49`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/rustix-477e566852e9b6ed/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/rustix-477e566852e9b6ed/build_script_build-477e566852e9b6ed`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/serde_core-2a0988d94b9bc1ce/build-script-build`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/build/serde_core-2a0988d94b9bc1ce/build_script_build-2a0988d94b9bc1ce`\n- **binary** (riscv64): `/workspace/repos/bingrep/target/release/deps/bingrep-9e6fed8cae3c75ba`\n- **library_shared** (riscv64): `/workspace/repos/bingrep/target/release/deps/libclap_derive-575653684c8ff38d.so`\n- **library_shared** (riscv64): `/workspace/repos/bingrep/target/release/deps/libscroll_derive-79be7c2669dfb753.so`\n\n\n**Artifact verification:** verified: 18 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** skipped: disabled, or no time left in the run budget\n",
+        "verification": {
+          "status": "verified",
+          "reason": "18 riscv64 ELF build output(s) verified by header",
+          "source_commit": "99d10541c7d442c50f732e62c507f1d62001413e"
+        }
       }
     },
     "ripgrep": {
@@ -25570,20 +25771,20 @@
         "build_system": "cmake",
         "architecture": "riscv64",
         "sandbox": "alpine-riscv64",
-        "last_built": "2026-05-22T23:11:37.844294",
+        "last_built": "2026-10-17T07:12:55.806849",
         "build_plan": {
           "phases": [
             {
               "name": "setup",
               "commands": [
-                "apk update",
-                "apk add build-base cmake"
+                "apk update && apk add build-base cmake"
               ]
             },
             {
               "name": "configure",
               "commands": [
-                "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+                "mkdir -p build",
+                "cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
               ]
             },
             {
@@ -25598,53 +25799,8 @@
         "patches": [],
         "artifacts": [
           {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/build/cmake/programs/zstd",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/build/cmake/programs/zstd-frugal",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/build_decoder_test.sh",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/combine.sh",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/create_single_file_decoder.sh",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/build_library_test.sh",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/combine.py",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/create_single_file_library.sh",
-            "role": "primary"
-          },
-          {
             "type": "library_static",
             "path": "/workspace/repos/zstd/build/build/cmake/lib/libzstd.a",
-            "role": "primary"
-          },
-          {
-            "type": "library_shared",
-            "path": "/workspace/repos/zstd/build/build/cmake/lib/libzstd.so",
             "role": "primary"
           },
           {
@@ -25653,18 +25809,24 @@
             "role": "primary"
           },
           {
-            "type": "library_shared",
-            "path": "/workspace/repos/zstd/build/build/cmake/lib/libzstd.so.1",
+            "type": "binary",
+            "path": "/workspace/repos/zstd/build/build/cmake/programs/zstd",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/zstd/build/single_file_libs/examples/testcard.png",
-            "role": "secondary"
+            "path": "/workspace/repos/zstd/build/build/cmake/programs/zstd-frugal",
+            "role": "primary"
           }
         ],
-        "build_duration_seconds": 863.7,
-        "recipe_file": "output/zstd_recipe.md"
+        "build_duration_seconds": 1438.9,
+        "recipe_file": "output/zstd_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: zstd\n\nThe build commands succeeded. Artifact verification: verified: 6 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add build-base cmake\n```\n\n### configure\n```bash\nmkdir -p build\ncd build && cmake .. -DCMAKE_BUILD_TYPE=Release\n```\n\n### build\n```bash\ncd build && make -j$(nproc)\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/zstd/build/CMakeFiles/4.2.3/CMakeDetermineCompilerABI_C.bin`\n- **binary** (riscv64): `/workspace/repos/zstd/build/CMakeFiles/4.2.3/CompilerIdC/a.out`\n- **library_static** (riscv64): `/workspace/repos/zstd/build/build/cmake/lib/libzstd.a`\n- **library_shared** (riscv64): `/workspace/repos/zstd/build/build/cmake/lib/libzstd.so.1.6.0`\n- **binary** (riscv64): `/workspace/repos/zstd/build/build/cmake/programs/zstd`\n- **binary** (riscv64): `/workspace/repos/zstd/build/build/cmake/programs/zstd-frugal`\n\n\n**Artifact verification:** verified: 6 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`make check`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "6 riscv64 ELF build output(s) verified by header",
+          "source_commit": "49cf51799ea051457f57243527aa2058f999f005"
+        }
       },
       "debian-riscv64-native": {
         "repo_url": "https://github.com/facebook/zstd",
@@ -26778,13 +26940,13 @@
         "build_system": "cargo",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64",
-        "last_built": "2026-07-07T11:59:45.118959",
+        "last_built": "2026-10-17T06:49:18.106273",
         "build_plan": {
           "phases": [
             {
               "name": "setup",
               "commands": [
-                "apt-get update && apt-get install -y --no-install-recommends rustc cargo"
+                "apt-get update && apt-get install -y --no-install-recommends rust"
               ]
             },
             {
@@ -26800,108 +26962,248 @@
         "artifacts": [
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/deps/tzupdate-32844c0275b851ae",
+            "path": "/workspace/repos/tzupdate/target/release/tzupdate",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-b7ae9afb1b505628/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build_script_build-7d655db9e042fd4b",
+            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-b7ae9afb1b505628/build_script_build-b7ae9afb1b505628",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-969bd12144a9e918/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build_script_build-fe92bf72602b96d4",
+            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-969bd12144a9e918/build_script_build-969bd12144a9e918",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/httparse-116e735d61631eab/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build_script_build-f56c1a10292154b3",
+            "path": "/workspace/repos/tzupdate/target/release/build/httparse-116e735d61631eab/build_script_build-116e735d61631eab",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/libc-2ff5be6e256bfa04/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build_script_build-463a4a90401d4221",
+            "path": "/workspace/repos/tzupdate/target/release/build/libc-2ff5be6e256bfa04/build_script_build-2ff5be6e256bfa04",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-9c28169249267517/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build_script_build-babfdc5d7e2e47fc",
+            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-9c28169249267517/build_script_build-9c28169249267517",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-42a0e30e9cce249f/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build_script_build-ec1823283fd9ced0",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-42a0e30e9cce249f/build_script_build-42a0e30e9cce249f",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-c5091e6442452ef4/out/libring_core_0_17_14_.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-c5091e6442452ef4/out/libring_core_0_17_14__test.a",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustix-cef382389fa37a72/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build_script_build-26775e8cb45ecb73",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustix-cef382389fa37a72/build_script_build-cef382389fa37a72",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build-script-build",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustls-19633674e580b377/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build_script_build-b2f1c2bbb5a593bd",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustls-19633674e580b377/build_script_build-19633674e580b377",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build_script_build-d9eaf37abae48648",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/tzupdate/target/release/build/libc-130c5772d9174d22/build_script_build-130c5772d9174d22",
+            "path": "/workspace/repos/tzupdate/target/release/build/serde-cec72204766b975b/build-script-build",
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 1621.1,
+        "build_duration_seconds": 1819.1,
         "recipe_file": "output/tzupdate_recipe.md",
-        "recipe_markdown": "# RISC-V Porting Recipe: tzupdate\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rustc cargo\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/deps/tzupdate-32844c0275b851ae`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build_script_build-7d655db9e042fd4b`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build_script_build-fe92bf72602b96d4`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build_script_build-f56c1a10292154b3`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build_script_build-463a4a90401d4221`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build_script_build-babfdc5d7e2e47fc`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build_script_build-ec1823283fd9ced0`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build_script_build-26775e8cb45ecb73`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build_script_build-b2f1c2bbb5a593bd`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build_script_build-d9eaf37abae48648`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/libc-130c5772d9174d22/build_script_build-130c5772d9174d22`\n- **library_static** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-637d5c7f951bfd06/out/libring_core_0_17_14_.a`\n- **library_static** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-637d5c7f951bfd06/out/libring_core_0_17_14__test.a`\n- **library_shared** (RISC-V): `/workspace/repos/tzupdate/target/release/deps/libclap_derive-f14b02c89783424e.so`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/deps/tzupdate-32844c0275b851ae`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/anyhow-7d655db9e042fd4b/build_script_build-7d655db9e042fd4b`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-fe92bf72602b96d4/build_script_build-fe92bf72602b96d4`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/httparse-f56c1a10292154b3/build_script_build-f56c1a10292154b3`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/getrandom-463a4a90401d4221/build_script_build-463a4a90401d4221`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/proc-macro2-babfdc5d7e2e47fc/build_script_build-babfdc5d7e2e47fc`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustix-ec1823283fd9ced0/build_script_build-ec1823283fd9ced0`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde_json-26775e8cb45ecb73/build_script_build-26775e8cb45ecb73`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/rustls-b2f1c2bbb5a593bd/build_script_build-b2f1c2bbb5a593bd`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/serde-d9eaf37abae48648/build_script_build-d9eaf37abae48648`\n- **binary** (RISC-V): `/workspace/repos/tzupdate/target/release/build/libc-130c5772d9174d22/build_script_build-130c5772d9174d22`\n- **library_static** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-637d5c7f951bfd06/out/libring_core_0_17_14_.a`\n- **library_static** (RISC-V): `/workspace/repos/tzupdate/target/release/build/ring-637d5c7f951bfd06/out/libring_core_0_17_14__test.a`\n- **library_shared** (RISC-V): `/workspace/repos/tzupdate/target/release/deps/libclap_derive-f14b02c89783424e.so`\n\n"
+        "recipe_markdown": "# RISC-V Porting Recipe: tzupdate\n\nThe build commands succeeded. Artifact verification: verified: 25 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/tzupdate`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/anyhow-b7ae9afb1b505628/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/anyhow-b7ae9afb1b505628/build_script_build-b7ae9afb1b505628`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/getrandom-969bd12144a9e918/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/getrandom-969bd12144a9e918/build_script_build-969bd12144a9e918`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/httparse-116e735d61631eab/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/httparse-116e735d61631eab/build_script_build-116e735d61631eab`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/libc-2ff5be6e256bfa04/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/libc-2ff5be6e256bfa04/build_script_build-2ff5be6e256bfa04`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/proc-macro2-9c28169249267517/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/proc-macro2-9c28169249267517/build_script_build-9c28169249267517`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-42a0e30e9cce249f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-42a0e30e9cce249f/build_script_build-42a0e30e9cce249f`\n- **library_static** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-c5091e6442452ef4/out/libring_core_0_17_14_.a`\n- **library_static** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-c5091e6442452ef4/out/libring_core_0_17_14__test.a`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustix-cef382389fa37a72/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustix-cef382389fa37a72/build_script_build-cef382389fa37a72`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustls-19633674e580b377/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustls-19633674e580b377/build_script_build-19633674e580b377`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde-cec72204766b975b/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde-cec72204766b975b/build_script_build-cec72204766b975b`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde_json-6e2f1acaa82ce907/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde_json-6e2f1acaa82ce907/build_script_build-6e2f1acaa82ce907`\n- **library_shared** (riscv64): `/workspace/repos/tzupdate/target/release/deps/libclap_derive-e5dcf29b00f6ddb0.so`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/deps/tzupdate-d2c57e8c47507eec`\n\n\n**Artifact verification:** verified: 25 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** passed (`cargo test --release`, exit 0)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "25 riscv64 ELF build output(s) verified by header",
+          "source_commit": "91d65d861c4e10d2353357edfd33158197e8dc09"
+        }
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/cdown/tzupdate",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T04:53:09.119779",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/tzupdate",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-769910d0853fc2f7/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/anyhow-769910d0853fc2f7/build_script_build-769910d0853fc2f7",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-154181c3c7f699ec/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/getrandom-154181c3c7f699ec/build_script_build-154181c3c7f699ec",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/httparse-1ed4cbf1d953e02a/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/httparse-1ed4cbf1d953e02a/build_script_build-1ed4cbf1d953e02a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/libc-739879c7a748675f/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/libc-739879c7a748675f/build_script_build-739879c7a748675f",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-81402f27ced0e788/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/proc-macro2-81402f27ced0e788/build_script_build-81402f27ced0e788",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-600af7bdcd7275e8/out/libring_core_0_17_14_.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-600af7bdcd7275e8/out/libring_core_0_17_14__test.a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-65c05a4699f438a7/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/ring-65c05a4699f438a7/build_script_build-65c05a4699f438a7",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustix-ed5d51626443ff2a/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustix-ed5d51626443ff2a/build_script_build-ed5d51626443ff2a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustls-3d2edf9b48e95a56/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/rustls-3d2edf9b48e95a56/build_script_build-3d2edf9b48e95a56",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/tzupdate/target/release/build/serde-040fc02ea16ecee3/build-script-build",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1801.1,
+        "recipe_file": "output/tzupdate_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: tzupdate\n\nThe build commands succeeded. Artifact verification: verified: 25 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/tzupdate`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/anyhow-769910d0853fc2f7/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/anyhow-769910d0853fc2f7/build_script_build-769910d0853fc2f7`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/getrandom-154181c3c7f699ec/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/getrandom-154181c3c7f699ec/build_script_build-154181c3c7f699ec`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/httparse-1ed4cbf1d953e02a/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/httparse-1ed4cbf1d953e02a/build_script_build-1ed4cbf1d953e02a`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/libc-739879c7a748675f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/libc-739879c7a748675f/build_script_build-739879c7a748675f`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/proc-macro2-81402f27ced0e788/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/proc-macro2-81402f27ced0e788/build_script_build-81402f27ced0e788`\n- **library_static** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-600af7bdcd7275e8/out/libring_core_0_17_14_.a`\n- **library_static** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-600af7bdcd7275e8/out/libring_core_0_17_14__test.a`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-65c05a4699f438a7/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/ring-65c05a4699f438a7/build_script_build-65c05a4699f438a7`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustix-ed5d51626443ff2a/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustix-ed5d51626443ff2a/build_script_build-ed5d51626443ff2a`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustls-3d2edf9b48e95a56/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/rustls-3d2edf9b48e95a56/build_script_build-3d2edf9b48e95a56`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde-040fc02ea16ecee3/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde-040fc02ea16ecee3/build_script_build-040fc02ea16ecee3`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde_json-128346cff2f9963c/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/build/serde_json-128346cff2f9963c/build_script_build-128346cff2f9963c`\n- **library_shared** (riscv64): `/workspace/repos/tzupdate/target/release/deps/libclap_derive-a682c59920a2534d.so`\n- **binary** (riscv64): `/workspace/repos/tzupdate/target/release/deps/tzupdate-e3dc988035cdceed`\n\n\n**Artifact verification:** verified: 25 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** passed (`cargo test --release`, exit 0)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "25 riscv64 ELF build output(s) verified by header",
+          "source_commit": "91d65d861c4e10d2353357edfd33158197e8dc09"
+        }
       }
     },
     "gitleaks": {
@@ -27038,13 +27340,13 @@
         "build_system": "cargo",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64",
-        "last_built": "2026-07-07T12:23:49.725741",
+        "last_built": "2026-10-17T06:18:41.981260",
         "build_plan": {
           "phases": [
             {
               "name": "setup",
               "commands": [
-                "apt-get update && apt-get install -y --no-install-recommends rustc cargo"
+                "apt-get update && apt-get install -y --no-install-recommends rust"
               ]
             },
             {
@@ -27060,108 +27362,113 @@
         "artifacts": [
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/deps/tldr-7f1108035ee25768",
+            "path": "/workspace/repos/tealdeer/target/release/tldr",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/anyhow-0f52b658a67482b4/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build_script_build-9d3f9c2d1b08e556",
+            "path": "/workspace/repos/tealdeer/target/release/build/anyhow-0f52b658a67482b4/build_script_build-0f52b658a67482b4",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/crc32fast-4c2b0e29f4441c04/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build_script_build-0dde20bf5acab16a",
+            "path": "/workspace/repos/tealdeer/target/release/build/crc32fast-4c2b0e29f4441c04/build_script_build-4c2b0e29f4441c04",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/httparse-41d047d001bd33ef/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build_script_build-d9b8534a6798c6f7",
+            "path": "/workspace/repos/tealdeer/target/release/build/httparse-41d047d001bd33ef/build_script_build-41d047d001bd33ef",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/libc-d15b7776bd35f8cb/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build_script_build-a34121dd3d997585",
+            "path": "/workspace/repos/tealdeer/target/release/build/libc-d15b7776bd35f8cb/build_script_build-d15b7776bd35f8cb",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/proc-macro2-266f393b2a151568/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build_script_build-c2fbfd4791497cf0",
+            "path": "/workspace/repos/tealdeer/target/release/build/proc-macro2-266f393b2a151568/build_script_build-266f393b2a151568",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/quote-1c437086493e91e4/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build_script_build-0b15c8153899a76b",
+            "path": "/workspace/repos/tealdeer/target/release/build/quote-1c437086493e91e4/build_script_build-1c437086493e91e4",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/ring-500a5a72b341633b/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build_script_build-7c055926cb19473e",
+            "path": "/workspace/repos/tealdeer/target/release/build/ring-500a5a72b341633b/build_script_build-500a5a72b341633b",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tealdeer/target/release/build/ring-cde835ffe7db08d8/out/libring_core_0_17_14_.a",
+            "role": "primary"
+          },
+          {
+            "type": "library_static",
+            "path": "/workspace/repos/tealdeer/target/release/build/ring-cde835ffe7db08d8/out/libring_core_0_17_14__test.a",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/rustix-f673209ed7225924/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build_script_build-1a8935de44cfb9af",
+            "path": "/workspace/repos/tealdeer/target/release/build/rustix-f673209ed7225924/build_script_build-f673209ed7225924",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build_script_build-1d403030cf48ff8e",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/tealdeer/target/release/build/ring-c2fb23703b2244bf/build-script-build",
+            "path": "/workspace/repos/tealdeer/target/release/build/rustls-2baedd8624938e50/build-script-build",
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 3148.3,
+        "build_duration_seconds": 2391.8,
         "recipe_file": "output/tealdeer_recipe.md",
-        "recipe_markdown": "# RISC-V Porting Recipe: tealdeer\n\nBuild succeeded.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rustc cargo\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/tldr-7f1108035ee25768`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build_script_build-9d3f9c2d1b08e556`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build_script_build-0dde20bf5acab16a`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build_script_build-d9b8534a6798c6f7`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build_script_build-a34121dd3d997585`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build_script_build-c2fbfd4791497cf0`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build_script_build-0b15c8153899a76b`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build_script_build-7c055926cb19473e`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build_script_build-1a8935de44cfb9af`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build_script_build-1d403030cf48ff8e`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-c2fb23703b2244bf/build-script-build`\n- **library_static** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-0fe174d92b361a80/out/libring_core_0_17_14_.a`\n- **library_static** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-0fe174d92b361a80/out/libring_core_0_17_14__test.a`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/libclap_derive-6e8a2d573d05db96.so`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/librustls_platform_verifier-853d9b1f2336cc8b.so`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/libserde_derive-d0e2af1d559d797c.so`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/tldr-7f1108035ee25768`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustls-9d3f9c2d1b08e556/build_script_build-9d3f9c2d1b08e556`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/httparse-0dde20bf5acab16a/build_script_build-0dde20bf5acab16a`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/libc-d9b8534a6798c6f7/build_script_build-d9b8534a6798c6f7`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/rustix-a34121dd3d997585/build_script_build-a34121dd3d997585`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/anyhow-c2fbfd4791497cf0/build_script_build-c2fbfd4791497cf0`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/quote-0b15c8153899a76b/build_script_build-0b15c8153899a76b`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde-7c055926cb19473e/build_script_build-7c055926cb19473e`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/serde_core-1a8935de44cfb9af/build_script_build-1a8935de44cfb9af`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/crc32fast-1d403030cf48ff8e/build_script_build-1d403030cf48ff8e`\n- **binary** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-c2fb23703b2244bf/build-script-build`\n- **library_static** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-0fe174d92b361a80/out/libring_core_0_17_14_.a`\n- **library_static** (RISC-V): `/workspace/repos/tealdeer/target/release/build/ring-0fe174d92b361a80/out/libring_core_0_17_14__test.a`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/libclap_derive-6e8a2d573d05db96.so`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/librustls_platform_verifier-853d9b1f2336cc8b.so`\n- **library_shared** (RISC-V): `/workspace/repos/tealdeer/target/release/deps/libserde_derive-d0e2af1d559d797c.so`\n\n"
+        "recipe_markdown": "# RISC-V Porting Recipe: tealdeer\n\nThe build commands succeeded. Artifact verification: verified: 28 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/tldr`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/anyhow-0f52b658a67482b4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/anyhow-0f52b658a67482b4/build_script_build-0f52b658a67482b4`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/crc32fast-4c2b0e29f4441c04/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/crc32fast-4c2b0e29f4441c04/build_script_build-4c2b0e29f4441c04`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/httparse-41d047d001bd33ef/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/httparse-41d047d001bd33ef/build_script_build-41d047d001bd33ef`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/libc-d15b7776bd35f8cb/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/libc-d15b7776bd35f8cb/build_script_build-d15b7776bd35f8cb`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/proc-macro2-266f393b2a151568/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/proc-macro2-266f393b2a151568/build_script_build-266f393b2a151568`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/quote-1c437086493e91e4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/quote-1c437086493e91e4/build_script_build-1c437086493e91e4`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/ring-500a5a72b341633b/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/ring-500a5a72b341633b/build_script_build-500a5a72b341633b`\n- **library_static** (riscv64): `/workspace/repos/tealdeer/target/release/build/ring-cde835ffe7db08d8/out/libring_core_0_17_14_.a`\n- **library_static** (riscv64): `/workspace/repos/tealdeer/target/release/build/ring-cde835ffe7db08d8/out/libring_core_0_17_14__test.a`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/rustix-f673209ed7225924/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/rustix-f673209ed7225924/build_script_build-f673209ed7225924`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/rustls-2baedd8624938e50/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/rustls-2baedd8624938e50/build_script_build-2baedd8624938e50`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/serde-14f6b3863518689a/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/serde-14f6b3863518689a/build_script_build-14f6b3863518689a`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/serde_core-d8ce4e02d966cab0/build-script-build`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/build/serde_core-d8ce4e02d966cab0/build_script_build-d8ce4e02d966cab0`\n- **library_shared** (riscv64): `/workspace/repos/tealdeer/target/release/deps/libclap_derive-c58fe178177e83f4.so`\n- **library_shared** (riscv64): `/workspace/repos/tealdeer/target/release/deps/libserde_derive-8f43f68d149d05af.so`\n- **binary** (riscv64): `/workspace/repos/tealdeer/target/release/deps/tldr-8d89eb4820126900`\n\n\n**Artifact verification:** verified: 28 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** skipped: disabled, or no time left in the run budget\n",
+        "verification": {
+          "status": "verified",
+          "reason": "28 riscv64 ELF build output(s) verified by header",
+          "source_commit": "9a44521642a92102243b3022d03fcbe35eac9ab3"
+        }
       }
     },
     "simplehttpserver": {
@@ -41059,9 +41366,15 @@
         "build_system": "cargo",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64",
-        "last_built": "2026-07-09T09:33:41.215779",
+        "last_built": "2026-10-17T05:09:33.368588",
         "build_plan": {
           "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends rust"
+              ]
+            },
             {
               "name": "build",
               "commands": [
@@ -41071,84 +41384,92 @@
           ]
         },
         "dependencies": [],
-        "patches": [
-          "Replace bare str::from_utf8 with std::str::from_utf8 module path in src/side_diff.rs"
-        ],
+        "patches": [],
         "artifacts": [
           {
             "type": "binary",
-            "path": "/workspace/repos/diffutils/util/compare_test_results.py",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/deps/diffutils-5a186bb504ffdf4e",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build-script-build",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build_script_build-c867249182887d4b",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
             "path": "/workspace/repos/diffutils/target/release/diffutils",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/diffutils/util/compare_test_results.py",
+            "path": "/workspace/repos/diffutils/target/release/build/num-traits-8a16b000bf48a8e7/build-script-build",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/deps/diffutils-5a186bb504ffdf4e",
+            "path": "/workspace/repos/diffutils/target/release/build/num-traits-8a16b000bf48a8e7/build_script_build-8a16b000bf48a8e7",
             "role": "primary"
           },
           {
             "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build-script-build",
+            "path": "/workspace/repos/diffutils/target/release/deps/diffutils-8b68ada6bbd581df",
             "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build_script_build-c867249182887d4b",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/target/release/diffutils",
-            "role": "primary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/tests/print-test-results.sh",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/tests/run-upstream-testsuite.sh",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/tests/print-test-results.sh",
-            "role": "secondary"
-          },
-          {
-            "type": "binary",
-            "path": "/workspace/repos/diffutils/tests/run-upstream-testsuite.sh",
-            "role": "secondary"
           }
         ],
-        "build_duration_seconds": 1329.5,
+        "build_duration_seconds": 1396.0,
         "recipe_file": "output/diffutils_recipe.md",
-        "recipe_markdown": "# RISC-V Porting Recipe: diffutils\n\nBuild succeeded.\n\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (None): `/workspace/repos/diffutils/tests/print-test-results.sh`\n- **binary** (None): `/workspace/repos/diffutils/tests/run-upstream-testsuite.sh`\n- **binary** (None): `/workspace/repos/diffutils/util/compare_test_results.py`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/deps/diffutils-5a186bb504ffdf4e`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build_script_build-c867249182887d4b`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/diffutils`\n- **binary** (None): `/workspace/repos/diffutils/tests/print-test-results.sh`\n- **binary** (None): `/workspace/repos/diffutils/tests/run-upstream-testsuite.sh`\n- **binary** (None): `/workspace/repos/diffutils/util/compare_test_results.py`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/deps/diffutils-5a186bb504ffdf4e`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build-script-build`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/build/num-traits-c867249182887d4b/build_script_build-c867249182887d4b`\n- **binary** (RISC-V): `/workspace/repos/diffutils/target/release/diffutils`\n\n"
+        "recipe_markdown": "# RISC-V Porting Recipe: diffutils\n\nThe build commands succeeded. Artifact verification: verified: 4 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/diffutils`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/build/num-traits-8a16b000bf48a8e7/build-script-build`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/build/num-traits-8a16b000bf48a8e7/build_script_build-8a16b000bf48a8e7`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/deps/diffutils-8b68ada6bbd581df`\n\n\n**Artifact verification:** verified: 4 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`cargo test --release`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "4 riscv64 ELF build output(s) verified by header",
+          "source_commit": "8af2bedef1f82771d8479b0d021e29b6bb321262"
+        }
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/uutils/diffutils",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T03:53:09.251758",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/diffutils/target/release/diffutils",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/diffutils/target/release/build/num-traits-d3ddd59b0598098e/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/diffutils/target/release/build/num-traits-d3ddd59b0598098e/build_script_build-d3ddd59b0598098e",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/diffutils/target/release/deps/diffutils-4e5bf778d455a065",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1241.3,
+        "recipe_file": "output/diffutils_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: diffutils\n\nThe build commands succeeded. Artifact verification: verified: 4 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/diffutils`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/build/num-traits-d3ddd59b0598098e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/build/num-traits-d3ddd59b0598098e/build_script_build-d3ddd59b0598098e`\n- **binary** (riscv64): `/workspace/repos/diffutils/target/release/deps/diffutils-4e5bf778d455a065`\n\n\n**Artifact verification:** verified: 4 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`cargo test --release`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "4 riscv64 ELF build output(s) verified by header",
+          "source_commit": "8af2bedef1f82771d8479b0d021e29b6bb321262"
+        }
       }
     },
     "dura": {
@@ -51734,7 +52055,7 @@
         "build_system": "go",
         "architecture": "riscv64",
         "sandbox": "alpine-riscv64",
-        "last_built": "2026-10-13T21:37:00.662150",
+        "last_built": "2026-10-17T03:28:21.489270",
         "build_plan": {
           "phases": [
             {
@@ -51761,8 +52082,9 @@
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 689.7,
+        "build_duration_seconds": 1500.2,
         "recipe_file": "output/reverse_ssh_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: reverse_ssh\n\nThe build commands succeeded. Artifact verification: verified: 1 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add git go\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false ./cmd/server\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/reverse_ssh/server`\n\n\n**Artifact verification:** verified: 1 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`go test ./...`, exit 137)\n",
         "verification": {
           "status": "verified",
           "reason": "1 riscv64 ELF build output(s) verified by header",
@@ -51774,7 +52096,7 @@
         "build_system": "go",
         "architecture": "riscv64",
         "sandbox": "debian-riscv64",
-        "last_built": "2026-10-13T22:03:29.201960",
+        "last_built": "2026-10-17T03:27:48.053381",
         "build_plan": {
           "phases": [
             {
@@ -51801,8 +52123,9 @@
             "role": "primary"
           }
         ],
-        "build_duration_seconds": 860.8,
+        "build_duration_seconds": 781.1,
         "recipe_file": "output/reverse_ssh_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: reverse_ssh\n\nThe build commands succeeded. Artifact verification: verified: 1 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false ./cmd/server\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/reverse_ssh/server`\n\n\n**Artifact verification:** verified: 1 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** failed (`go test ./...`, exit 1)\n",
         "verification": {
           "status": "verified",
           "reason": "1 riscv64 ELF build output(s) verified by header",
@@ -57980,6 +58303,141 @@
           "reason": "36 riscv64 ELF build output(s) verified by header",
           "source_commit": "c5161524980522320c7d3425e714cc0965a869a5"
         }
+      },
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/sharkdp/hyperfine",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T06:20:09.955971",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "env CARGO_BUILD_JOBS=1 cargo build -j 1 --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/hyperfine",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/anyhow-50286e319caea90a/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/anyhow-50286e319caea90a/build_script_build-50286e319caea90a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/getrandom-4ba655833b9fe9f4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/getrandom-4ba655833b9fe9f4/build_script_build-4ba655833b9fe9f4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/hyperfine-90c00ac5cc16714d/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/hyperfine-90c00ac5cc16714d/build_script_build-90c00ac5cc16714d",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/libc-16436ac845b481d4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/nix-b395c5532d31eea4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/nix-b395c5532d31eea4/build_script_build-b395c5532d31eea4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/num-traits-d50545cb6228e6a9/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/num-traits-d50545cb6228e6a9/build_script_build-d50545cb6228e6a9",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/portable-atomic-71b3ee34dbfc6218/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/portable-atomic-71b3ee34dbfc6218/build_script_build-71b3ee34dbfc6218",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/proc-macro2-2dce02dc31d97876/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/proc-macro2-2dce02dc31d97876/build_script_build-2dce02dc31d97876",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/quote-9b63b27ec0c9f015/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/quote-9b63b27ec0c9f015/build_script_build-9b63b27ec0c9f015",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/hyperfine/target/release/build/rust_decimal-60f5b71c600f8c03/build-script-build",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 2152.0,
+        "recipe_file": "output/hyperfine_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: hyperfine\n\nThe build commands succeeded. Artifact verification: verified: 36 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/hyperfine`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/anyhow-50286e319caea90a/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/anyhow-50286e319caea90a/build_script_build-50286e319caea90a`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/getrandom-4ba655833b9fe9f4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/getrandom-4ba655833b9fe9f4/build_script_build-4ba655833b9fe9f4`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/hyperfine-90c00ac5cc16714d/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/hyperfine-90c00ac5cc16714d/build_script_build-90c00ac5cc16714d`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/libc-16436ac845b481d4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/nix-b395c5532d31eea4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/nix-b395c5532d31eea4/build_script_build-b395c5532d31eea4`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/num-traits-d50545cb6228e6a9/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/num-traits-d50545cb6228e6a9/build_script_build-d50545cb6228e6a9`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/portable-atomic-71b3ee34dbfc6218/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/portable-atomic-71b3ee34dbfc6218/build_script_build-71b3ee34dbfc6218`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/proc-macro2-2dce02dc31d97876/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/proc-macro2-2dce02dc31d97876/build_script_build-2dce02dc31d97876`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/quote-9b63b27ec0c9f015/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/quote-9b63b27ec0c9f015/build_script_build-9b63b27ec0c9f015`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/rust_decimal-60f5b71c600f8c03/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/rust_decimal-60f5b71c600f8c03/build_script_build-60f5b71c600f8c03`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/rustix-01ad8a175a32eefb/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/rustix-01ad8a175a32eefb/build_script_build-01ad8a175a32eefb`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde-617ea83f3fc9a69c/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde-617ea83f3fc9a69c/build_script_build-617ea83f3fc9a69c`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde_core-ba00342df5f8c372/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde_core-ba00342df5f8c372/build_script_build-ba00342df5f8c372`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde_json-4f2c02cde8cbf099/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/serde_json-4f2c02cde8cbf099/build_script_build-4f2c02cde8cbf099`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/thiserror-485214954593aedc/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/thiserror-485214954593aedc/build_script_build-485214954593aedc`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/zmij-0c508994734cf33e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/build/zmij-0c508994734cf33e/build_script_build-0c508994734cf33e`\n- **binary** (riscv64): `/workspace/repos/hyperfine/target/release/deps/hyperfine-d67c067fea7466b5`\n- **library_shared** (riscv64): `/workspace/repos/hyperfine/target/release/deps/libserde_derive-86a103059014f84d.so`\n- **library_shared** (riscv64): `/workspace/repos/hyperfine/target/release/deps/libthiserror_impl-5ef44249ee266b6a.so`\n\n\n**Artifact verification:** verified: 36 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** skipped: disabled, or no time left in the run budget\n",
+        "verification": {
+          "status": "verified",
+          "reason": "36 riscv64 ELF build output(s) verified by header",
+          "source_commit": "c5161524980522320c7d3425e714cc0965a869a5"
+        }
       }
     },
     "pacaptr": {
@@ -58083,6 +58541,722 @@
           "status": "verified",
           "reason": "49 riscv64 ELF build output(s) verified by header",
           "source_commit": "5319de6504cdddd541b247388f455ebf47d9cfe2"
+        }
+      }
+    },
+    "zoxide": {
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/ajeetdsouza/zoxide",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T06:48:46.806595",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/zoxide",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/anyhow-11d841b3ca00e4a6/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/anyhow-11d841b3ca00e4a6/build_script_build-11d841b3ca00e4a6",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/libc-12a74184ed2ba156/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/libc-12a74184ed2ba156/build_script_build-12a74184ed2ba156",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/proc-macro2-a103da9cba5ba3b4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/proc-macro2-a103da9cba5ba3b4/build_script_build-a103da9cba5ba3b4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/proc-macro2-diagnostics-dd3c13df7fbb811c/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/proc-macro2-diagnostics-dd3c13df7fbb811c/build_script_build-dd3c13df7fbb811c",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/quote-c92778e7ff676a99/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/quote-c92778e7ff676a99/build_script_build-c92778e7ff676a99",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/serde-f2910341bf275d11/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/serde-f2910341bf275d11/build_script_build-f2910341bf275d11",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/serde_core-bf000f02c73b0a27/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/serde_core-bf000f02c73b0a27/build_script_build-bf000f02c73b0a27",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/zoxide-b683876ff69cdc12/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/zoxide/target/release/build/zoxide-b683876ff69cdc12/build_script_build-b683876ff69cdc12",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zoxide/target/release/deps/libaskama_macros-40755f38a8fe5a79.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zoxide/target/release/deps/libclap_derive-604ecd2f90a6c65b.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/zoxide/target/release/deps/libcolor_print_proc_macro-3f622caa38d4c6f8.so",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1948.5,
+        "recipe_file": "output/zoxide_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: zoxide\n\nThe build commands succeeded. Artifact verification: verified: 24 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/zoxide`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/anyhow-11d841b3ca00e4a6/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/anyhow-11d841b3ca00e4a6/build_script_build-11d841b3ca00e4a6`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/libc-12a74184ed2ba156/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/libc-12a74184ed2ba156/build_script_build-12a74184ed2ba156`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/proc-macro2-a103da9cba5ba3b4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/proc-macro2-a103da9cba5ba3b4/build_script_build-a103da9cba5ba3b4`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/proc-macro2-diagnostics-dd3c13df7fbb811c/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/proc-macro2-diagnostics-dd3c13df7fbb811c/build_script_build-dd3c13df7fbb811c`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/quote-c92778e7ff676a99/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/quote-c92778e7ff676a99/build_script_build-c92778e7ff676a99`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/serde-f2910341bf275d11/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/serde-f2910341bf275d11/build_script_build-f2910341bf275d11`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/serde_core-bf000f02c73b0a27/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/serde_core-bf000f02c73b0a27/build_script_build-bf000f02c73b0a27`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/zoxide-b683876ff69cdc12/build-script-build`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/build/zoxide-b683876ff69cdc12/build_script_build-b683876ff69cdc12`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libaskama_macros-40755f38a8fe5a79.so`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libclap_derive-604ecd2f90a6c65b.so`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libcolor_print_proc_macro-3f622caa38d4c6f8.so`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libouroboros_macro-62db353017610890.so`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libserde_derive-658aed263e42a6fc.so`\n- **library_shared** (riscv64): `/workspace/repos/zoxide/target/release/deps/libtime_macros-bb6639aed85433c5.so`\n- **binary** (riscv64): `/workspace/repos/zoxide/target/release/deps/zoxide-666d27ca78f400bf`\n\n\n**Artifact verification:** verified: 24 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`cargo test --release`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "24 riscv64 ELF build output(s) verified by header",
+          "source_commit": "86b443cffcd74d8dce0570792f1647491ffe5974"
+        }
+      }
+    },
+    "dust": {
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/bootandy/dust",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T04:25:49.291545",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/dust",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-deque-fcca6d200bf9b8a7/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-deque-fcca6d200bf9b8a7/build_script_build-fcca6d200bf9b8a7",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-epoch-e61db947aed2fb74/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-epoch-e61db947aed2fb74/build_script_build-e61db947aed2fb74",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-utils-8c9401b00dbc6615/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/crossbeam-utils-8c9401b00dbc6615/build_script_build-8c9401b00dbc6615",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/du-dust-8743d49dff0ded71/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/du-dust-8743d49dff0ded71/build_script_build-8743d49dff0ded71",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/libc-16436ac845b481d4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/nix-9c44bd1ee2ef4375/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/nix-9c44bd1ee2ef4375/build_script_build-9c44bd1ee2ef4375",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/num-traits-393d8516db54d10c/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/num-traits-393d8516db54d10c/build_script_build-393d8516db54d10c",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/proc-macro2-2dce02dc31d97876/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/proc-macro2-2dce02dc31d97876/build_script_build-2dce02dc31d97876",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/quote-9b63b27ec0c9f015/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/quote-9b63b27ec0c9f015/build_script_build-9b63b27ec0c9f015",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/dust/target/release/build/rayon-core-2bf992f8cc9871e7/build-script-build",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1949.3,
+        "recipe_file": "output/dust_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: dust\n\nThe build commands succeeded. Artifact verification: verified: 37 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/dust/target/release/dust`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-deque-fcca6d200bf9b8a7/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-deque-fcca6d200bf9b8a7/build_script_build-fcca6d200bf9b8a7`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-epoch-e61db947aed2fb74/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-epoch-e61db947aed2fb74/build_script_build-e61db947aed2fb74`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-utils-8c9401b00dbc6615/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/crossbeam-utils-8c9401b00dbc6615/build_script_build-8c9401b00dbc6615`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/du-dust-8743d49dff0ded71/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/du-dust-8743d49dff0ded71/build_script_build-8743d49dff0ded71`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/libc-16436ac845b481d4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/nix-9c44bd1ee2ef4375/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/nix-9c44bd1ee2ef4375/build_script_build-9c44bd1ee2ef4375`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/num-traits-393d8516db54d10c/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/num-traits-393d8516db54d10c/build_script_build-393d8516db54d10c`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/proc-macro2-2dce02dc31d97876/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/proc-macro2-2dce02dc31d97876/build_script_build-2dce02dc31d97876`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/quote-9b63b27ec0c9f015/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/quote-9b63b27ec0c9f015/build_script_build-9b63b27ec0c9f015`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/rayon-core-2bf992f8cc9871e7/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/rayon-core-2bf992f8cc9871e7/build_script_build-2bf992f8cc9871e7`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/rustix-19c1c5eb805de52e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/rustix-19c1c5eb805de52e/build_script_build-19c1c5eb805de52e`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde-617ea83f3fc9a69c/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde-617ea83f3fc9a69c/build_script_build-617ea83f3fc9a69c`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde_core-de4a467056035154/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde_core-de4a467056035154/build_script_build-de4a467056035154`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde_json-4f2c02cde8cbf099/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/serde_json-4f2c02cde8cbf099/build_script_build-4f2c02cde8cbf099`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/thiserror-95df91002a2a1c6f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/thiserror-95df91002a2a1c6f/build_script_build-95df91002a2a1c6f`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/zmij-0c508994734cf33e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/build/zmij-0c508994734cf33e/build_script_build-0c508994734cf33e`\n- **binary** (riscv64): `/workspace/repos/dust/target/release/deps/dust-9ddbbe81f2f52437`\n- **library_shared** (riscv64): `/workspace/repos/dust/target/release/deps/libclap_derive-f17d506f3965d00c.so`\n- **library_shared** (riscv64): `/workspace/repos/dust/target/release/deps/libserde_derive-253b672e519218da.so`\n- **library_shared** (riscv64): `/workspace/repos/dust/target/release/deps/libthiserror_impl-56146cb1bf56859b.so`\n\n\n**Artifact verification:** verified: 37 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`cargo test --release`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "37 riscv64 ELF build output(s) verified by header",
+          "source_commit": "ae5c770d84316c28bc95e2a3cc7f43fea84b1f68"
+        }
+      }
+    },
+    "fd": {
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/sharkdp/fd",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-10-17T05:03:32.370930",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "env CARGO_BUILD_JOBS=1 cargo build -j 1 --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/fd",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/anyhow-50286e319caea90a/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/anyhow-50286e319caea90a/build_script_build-50286e319caea90a",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/crossbeam-utils-52ca7b23fec19083/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/crossbeam-utils-52ca7b23fec19083/build_script_build-52ca7b23fec19083",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/libc-16436ac845b481d4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-3689aa56632c0ab8/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-3689aa56632c0ab8/build_script_build-3689aa56632c0ab8",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-97cb988d2653aba3/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-97cb988d2653aba3/build_script_build-97cb988d2653aba3",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/proc-macro2-a103da9cba5ba3b4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/proc-macro2-a103da9cba5ba3b4/build_script_build-a103da9cba5ba3b4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/quote-c92778e7ff676a99/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/quote-c92778e7ff676a99/build_script_build-c92778e7ff676a99",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/rustix-19c1c5eb805de52e/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/rustix-19c1c5eb805de52e/build_script_build-19c1c5eb805de52e",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/deps/fd-89b2ce40ab347839",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/fd/target/release/deps/libclap_derive-604ecd2f90a6c65b.so",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 2300.3,
+        "recipe_file": "output/fd_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: fd\n\nThe build commands succeeded. Artifact verification: verified: 19 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napk update && apk add rust\n```\n\n### build\n```bash\nenv CARGO_BUILD_JOBS=1 cargo build -j 1 --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/fd/target/release/fd`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/anyhow-50286e319caea90a/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/anyhow-50286e319caea90a/build_script_build-50286e319caea90a`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/crossbeam-utils-52ca7b23fec19083/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/crossbeam-utils-52ca7b23fec19083/build_script_build-52ca7b23fec19083`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/libc-16436ac845b481d4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/libc-16436ac845b481d4/build_script_build-16436ac845b481d4`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-3689aa56632c0ab8/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-3689aa56632c0ab8/build_script_build-3689aa56632c0ab8`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-97cb988d2653aba3/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-97cb988d2653aba3/build_script_build-97cb988d2653aba3`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/proc-macro2-a103da9cba5ba3b4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/proc-macro2-a103da9cba5ba3b4/build_script_build-a103da9cba5ba3b4`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/quote-c92778e7ff676a99/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/quote-c92778e7ff676a99/build_script_build-c92778e7ff676a99`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/rustix-19c1c5eb805de52e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/rustix-19c1c5eb805de52e/build_script_build-19c1c5eb805de52e`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/deps/fd-89b2ce40ab347839`\n- **library_shared** (riscv64): `/workspace/repos/fd/target/release/deps/libclap_derive-604ecd2f90a6c65b.so`\n\n\n**Artifact verification:** verified: 19 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** skipped: disabled, or no time left in the run budget\n",
+        "verification": {
+          "status": "verified",
+          "reason": "19 riscv64 ELF build output(s) verified by header",
+          "source_commit": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc"
+        }
+      },
+      "debian-riscv64": {
+        "repo_url": "https://github.com/sharkdp/fd",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64",
+        "last_built": "2026-10-17T06:32:43.304796",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/fd",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/anyhow-0f52b658a67482b4/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/anyhow-0f52b658a67482b4/build_script_build-0f52b658a67482b4",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/crossbeam-utils-a2dbac4a950ce079/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/crossbeam-utils-a2dbac4a950ce079/build_script_build-a2dbac4a950ce079",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/libc-c4906872a915208e/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/libc-c4906872a915208e/build_script_build-c4906872a915208e",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-74056acc6405ed5f/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-74056acc6405ed5f/build_script_build-74056acc6405ed5f",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-75ca85e9146cda0b/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/nix-75ca85e9146cda0b/build_script_build-75ca85e9146cda0b",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/proc-macro2-18dd8d3bc79ad35e/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/proc-macro2-18dd8d3bc79ad35e/build_script_build-18dd8d3bc79ad35e",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/quote-7ee7bab3e1eec343/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/quote-7ee7bab3e1eec343/build_script_build-7ee7bab3e1eec343",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/rustix-f673209ed7225924/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/build/rustix-f673209ed7225924/build_script_build-f673209ed7225924",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/fd/target/release/deps/fd-49013be791f5534c",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/fd/target/release/deps/libclap_derive-1fed13657e37d9e6.so",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1947.5,
+        "recipe_file": "output/fd_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: fd\n\nThe build commands succeeded. Artifact verification: verified: 19 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/fd/target/release/fd`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/anyhow-0f52b658a67482b4/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/anyhow-0f52b658a67482b4/build_script_build-0f52b658a67482b4`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/crossbeam-utils-a2dbac4a950ce079/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/crossbeam-utils-a2dbac4a950ce079/build_script_build-a2dbac4a950ce079`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/libc-c4906872a915208e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/libc-c4906872a915208e/build_script_build-c4906872a915208e`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-74056acc6405ed5f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-74056acc6405ed5f/build_script_build-74056acc6405ed5f`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-75ca85e9146cda0b/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/nix-75ca85e9146cda0b/build_script_build-75ca85e9146cda0b`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/proc-macro2-18dd8d3bc79ad35e/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/proc-macro2-18dd8d3bc79ad35e/build_script_build-18dd8d3bc79ad35e`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/quote-7ee7bab3e1eec343/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/quote-7ee7bab3e1eec343/build_script_build-7ee7bab3e1eec343`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/rustix-f673209ed7225924/build-script-build`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/build/rustix-f673209ed7225924/build_script_build-f673209ed7225924`\n- **binary** (riscv64): `/workspace/repos/fd/target/release/deps/fd-49013be791f5534c`\n- **library_shared** (riscv64): `/workspace/repos/fd/target/release/deps/libclap_derive-1fed13657e37d9e6.so`\n\n\n**Artifact verification:** verified: 19 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`cargo test --release`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "19 riscv64 ELF build output(s) verified by header",
+          "source_commit": "14dcd92fb76ca0ebc2e82671a275f67c790d25fc"
+        }
+      }
+    },
+    "amass": {
+      "debian-riscv64": {
+        "repo_url": "https://github.com/owasp-amass/amass",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64",
+        "last_built": "2026-10-17T02:50:10.638858",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends git"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "go mod tidy",
+                "go build -buildvcs=false ./cmd/amass"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/amass/amass",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1949.2,
+        "recipe_file": "output/amass_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: amass\n\nThe build commands succeeded. Artifact verification: verified: 1 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends git\n```\n\n### go_prepare_build\n```bash\ngo mod tidy\ngo build -buildvcs=false ./cmd/amass\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/amass/amass`\n\n\n**Artifact verification:** verified: 1 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** timeout (`go test ./...`, exit 137)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "1 riscv64 ELF build output(s) verified by header",
+          "source_commit": "79299dce87b0085db0f2f4ef3e9c52cccb49f514"
+        }
+      }
+    },
+    "cargo-unlock": {
+      "debian-riscv64": {
+        "repo_url": "https://github.com/dtolnay/cargo-unlock",
+        "build_system": "cargo",
+        "architecture": "riscv64",
+        "sandbox": "debian-riscv64",
+        "last_built": "2026-10-17T04:46:09.485335",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apt-get update && apt-get install -y --no-install-recommends rust"
+              ]
+            },
+            {
+              "name": "build",
+              "commands": [
+                "cargo build --release"
+              ]
+            }
+          ]
+        },
+        "dependencies": [],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/cargo-unlock",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/anyhow-b5ddafe27e39999f/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/anyhow-b5ddafe27e39999f/build_script_build-b5ddafe27e39999f",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/proc-macro2-308c500b65a46081/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/proc-macro2-308c500b65a46081/build_script_build-308c500b65a46081",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/quote-4711d943dbd678a3/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/quote-4711d943dbd678a3/build_script_build-4711d943dbd678a3",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/rustix-633d2150a09006aa/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/rustix-633d2150a09006aa/build_script_build-633d2150a09006aa",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde-4d10e5f803afbf1f/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde-4d10e5f803afbf1f/build_script_build-4d10e5f803afbf1f",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde_core-2ad60e353fe91968/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde_core-2ad60e353fe91968/build_script_build-2ad60e353fe91968",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde_json-3342a8dd21a302e3/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/serde_json-3342a8dd21a302e3/build_script_build-3342a8dd21a302e3",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/zmij-e41b834205fe7284/build-script-build",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/build/zmij-e41b834205fe7284/build_script_build-e41b834205fe7284",
+            "role": "primary"
+          },
+          {
+            "type": "binary",
+            "path": "/workspace/repos/cargo-unlock/target/release/deps/cargo_unlock-83e7774614037e70",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cargo-unlock/target/release/deps/libclap_derive-9c57bf73237b2feb.so",
+            "role": "primary"
+          },
+          {
+            "type": "library_shared",
+            "path": "/workspace/repos/cargo-unlock/target/release/deps/libserde_derive-df89687aebd44ff3.so",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 1020.5,
+        "recipe_file": "output/cargo-unlock_recipe.md",
+        "recipe_markdown": "# RISC-V Porting Recipe: cargo-unlock\n\nThe build commands succeeded. Artifact verification: verified: 20 riscv64 ELF build output(s) verified by header.\n\n\n### setup\n```bash\napt-get update && apt-get install -y --no-install-recommends rust\n```\n\n### build\n```bash\ncargo build --release\n```\n\n### Build Artifacts Generated\n\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/cargo-unlock`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/anyhow-b5ddafe27e39999f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/anyhow-b5ddafe27e39999f/build_script_build-b5ddafe27e39999f`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/proc-macro2-308c500b65a46081/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/proc-macro2-308c500b65a46081/build_script_build-308c500b65a46081`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/quote-4711d943dbd678a3/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/quote-4711d943dbd678a3/build_script_build-4711d943dbd678a3`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/rustix-633d2150a09006aa/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/rustix-633d2150a09006aa/build_script_build-633d2150a09006aa`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde-4d10e5f803afbf1f/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde-4d10e5f803afbf1f/build_script_build-4d10e5f803afbf1f`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde_core-2ad60e353fe91968/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde_core-2ad60e353fe91968/build_script_build-2ad60e353fe91968`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde_json-3342a8dd21a302e3/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/serde_json-3342a8dd21a302e3/build_script_build-3342a8dd21a302e3`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/zmij-e41b834205fe7284/build-script-build`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/build/zmij-e41b834205fe7284/build_script_build-e41b834205fe7284`\n- **binary** (riscv64): `/workspace/repos/cargo-unlock/target/release/deps/cargo_unlock-83e7774614037e70`\n- **library_shared** (riscv64): `/workspace/repos/cargo-unlock/target/release/deps/libclap_derive-9c57bf73237b2feb.so`\n- **library_shared** (riscv64): `/workspace/repos/cargo-unlock/target/release/deps/libserde_derive-df89687aebd44ff3.so`\n\n\n**Artifact verification:** verified: 20 riscv64 ELF build output(s) verified by header\n\n**Package tests (not gating):** passed (`cargo test --release`, exit 0)\n",
+        "verification": {
+          "status": "verified",
+          "reason": "20 riscv64 ELF build output(s) verified by header",
+          "source_commit": "88b9270f0b627e1db729a2f6ca41e7373af64c61"
         }
       }
     }
