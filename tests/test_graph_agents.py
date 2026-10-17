@@ -186,6 +186,20 @@ class TestAnalystNode(unittest.TestCase):
         self.assertTrue(out.package_analysis.llm_grounded)
 
 
+class TestAnalystRefusal(unittest.TestCase):
+    """A refused analyst call marks the package and uses the fallback."""
+
+    def test_refusal_marks_the_package(self) -> None:
+        out = TestAnalystNode._run(
+            self,
+            LLMCallOutcome(
+                data=None, used_fallback=False, attempts=1, refused=True
+            ),
+        )
+        self.assertEqual(out.context_cache["llm_refused"], "planner")
+        self.assertFalse(out.package_analysis.llm_grounded)
+
+
 class TestInitNode(unittest.TestCase):
     """Tests for init_node with clone and analysis operations mocked."""
 
@@ -495,6 +509,140 @@ class TestScoutNode(unittest.TestCase):
         self.assertEqual(out.build_status, BuildStatus.PENDING)
         self.assertIsNotNone(out.build_plan)
         self.assertTrue(out.error_history)
+
+    def _run_scout(self, state, outcome):
+        """Run scout_node with the standard environment patches."""
+        from src import graph
+
+        patches = self._patch_scout_environment(graph, outcome)
+        with (
+            patches[0],
+            patches[1] as llm_call,
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            out = graph.scout_node(state)
+        return out, llm_call
+
+    def test_scout_validator_rejects_a_whitelist_blocked_command(
+        self,
+    ) -> None:
+        """A command the sandbox validator blocks never reaches the build."""
+        from src import graph
+
+        captured = {}
+
+        def fake_llm_call(**kwargs):
+            captured["validator"] = kwargs["validator"]
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        state = self._scout_state()
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph.scripted_ops,
+                "get_system_info",
+                return_value={"architecture": "riscv64"},
+            ),
+            mock.patch.object(
+                graph, "collect_build_evidence", return_value="evidence"
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+        ):
+            graph.scout_node(state)
+
+        verdict = captured["validator"](
+            {"phases": [{"name": "setup", "commands": ["cabal --version"]}]}
+        )
+        self.assertFalse(verdict.ok)
+        self.assertIn("cabal --version", verdict.reason)
+        ok = captured["validator"](
+            {"phases": [{"name": "build", "commands": ["make -j4"]}]}
+        )
+        self.assertTrue(ok.ok)
+
+    def test_scout_refusal_uses_fallback_without_an_attempt(self) -> None:
+        outcome = LLMCallOutcome(
+            data=None, used_fallback=False, attempts=1, refused=True
+        )
+        state = self._scout_state()
+        errors_before = len(state.error_history)
+        attempts_before = state.attempt_count
+
+        out, _ = self._run_scout(state, outcome)
+
+        self.assertEqual(out.context_cache["llm_refused"], "scout")
+        self.assertIsNotNone(out.build_plan)
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+        self.assertEqual(len(out.error_history), errors_before)
+        self.assertEqual(out.attempt_count, attempts_before)
+
+    def test_scout_skips_the_llm_after_a_refusal(self) -> None:
+        state = self._scout_state()
+        state.context_cache["llm_refused"] = "planner"
+
+        out, llm_call = self._run_scout(state, None)
+
+        llm_call.assert_not_called()
+        self.assertIsNotNone(out.build_plan)
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+
+    def test_scout_escalates_when_only_blocked_plans_exist(self) -> None:
+        """No guessed fallback plan when every plan needs a blocked tool."""
+        from src import graph
+
+        outcome = LLMCallOutcome(
+            data=None,
+            used_fallback=False,
+            attempts=3,
+            last_error=(
+                "schema validation failed: phase 1 (build): the sandbox "
+                "command validator blocks `cabal build` (Unknown command "
+                "pattern)"
+            ),
+        )
+        state = self._scout_state()
+        state.build_plan = None
+
+        out, _ = self._run_scout(state, outcome)
+
+        self.assertIsNone(out.build_plan)
+        self.assertEqual(out.build_status, BuildStatus.FAILED)
+        self.assertIn(
+            "Command blocked by safety validation",
+            out.error_history[-1].message,
+        )
+        self.assertEqual(out.context_cache["validator_block_replans"], 1)
+        self.assertEqual(graph.route_supervisor_to_next(out), "escalate_node")
+
+    def test_rescout_after_a_validator_block_is_counted(self) -> None:
+        state = self._scout_state()
+        state.add_error(
+            create_error_record(
+                "Build command failed: zig version (exit 1) - Command "
+                "blocked by safety validation: Unknown command pattern",
+                command="zig version",
+            )
+        )
+        outcome = LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        out, _ = self._run_scout(state, outcome)
+
+        self.assertEqual(out.context_cache["validator_block_replans"], 1)
 
 
 class TestFixerInvestigation(unittest.TestCase):
@@ -832,6 +980,103 @@ class TestFixerNode(unittest.TestCase):
             ),
         ):
             return graph.fixer_node(state)
+
+    def test_refused_fixer_call_escalates_the_package(self) -> None:
+        """A refusal is not retried and ends the loop for this package."""
+        from src import graph
+
+        state = self._fixer_state()
+        errors_before = len(state.error_history)
+        outcome = LLMCallOutcome(
+            data=None, used_fallback=False, attempts=1, refused=True
+        )
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ) as llm_call,
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+        ):
+            out = graph.fixer_node(state)
+
+        self.assertEqual(llm_call.call_count, 1)
+        self.assertEqual(out.build_status, BuildStatus.ESCALATED)
+        self.assertEqual(out.context_cache["llm_refused"], "fixer")
+        self.assertEqual(len(out.error_history), errors_before)
+
+    def test_fixer_skips_the_llm_after_a_refusal(self) -> None:
+        from src import graph
+
+        state = self._fixer_state()
+        state.context_cache["llm_refused"] = "planner"
+        with mock.patch.object(graph, "llm_call_with_validation") as call:
+            out = graph.fixer_node(state)
+
+        call.assert_not_called()
+        self.assertEqual(out.build_status, BuildStatus.ESCALATED)
+
+    def test_fix_without_effective_change_skips_the_rebuild(self) -> None:
+        """A fix whose commands all failed goes back to the fixer."""
+        from src import graph
+
+        state = self._fixer_state()
+        state.attempt_count = 1
+        strategy = {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": "install headers",
+                    "actions": [
+                        {"type": "command", "command": "apt-get install x"}
+                    ],
+                }
+            ],
+            "recommended_strategy_id": 1,
+        }
+        outcome = LLMCallOutcome(
+            data=strategy, used_fallback=False, attempts=1
+        )
+        failed = mock.MagicMock(success=False, stderr="E: no package")
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ),
+            mock.patch.object(graph, "execute_command", return_value=failed),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+        ):
+            out = graph.fixer_node(state)
+
+        self.assertEqual(out.attempt_count, 2)
+        self.assertEqual(out.build_status, BuildStatus.FIXING)
+        self.assertEqual(
+            out.fixes_attempted[-1].build_result, "no change applied"
+        )
+        self.assertEqual(graph.route_fix_result(out), "fix_node")
 
     def test_applied_fix_forces_a_full_rebuild(self) -> None:
         """A fix after a verify failure is compiled, not skipped."""
@@ -1245,6 +1490,89 @@ class TestTerminalNodes(unittest.TestCase):
         self.assertIn("make", out.porting_recipe)
         save_learning.assert_called_once_with(state)
 
+    def test_finish_node_falls_back_on_a_refusal(self) -> None:
+        """A refused or empty summary leaves the deterministic recipe."""
+        from src import graph
+
+        for meta in ({"stop_reason": "refusal"}, {"stop_reason": "end_turn"}):
+            state = _state(build_plan=self._plan())
+            response = mock.MagicMock(content="", response_metadata=meta)
+            with (
+                mock.patch.object(
+                    graph, "get_model_for_role", return_value=mock.MagicMock()
+                ),
+                mock.patch.object(graph, "invoke_llm", return_value=response),
+                mock.patch.object(
+                    graph, "response_usage", return_value=(10, 0)
+                ),
+                mock.patch.object(graph, "response_cost", return_value=0.0),
+                mock.patch.object(graph, "log_llm_call"),
+                mock.patch.object(graph, "_save_learning_data"),
+            ):
+                out = graph.finish_node(state)
+
+            self.assertIn("# RISC-V Porting Recipe", out.porting_recipe)
+            refused = meta["stop_reason"] == "refusal"
+            self.assertEqual("llm_refused" in out.context_cache, refused)
+
+    def test_finish_node_skips_the_llm_after_a_refusal(self) -> None:
+        from src import graph
+
+        state = _state(build_plan=self._plan())
+        state.context_cache["llm_refused"] = "fixer"
+        with (
+            mock.patch.object(graph, "invoke_llm") as invoke,
+            mock.patch.object(graph, "_save_learning_data"),
+        ):
+            out = graph.finish_node(state)
+
+        invoke.assert_not_called()
+        self.assertIn("# RISC-V Porting Recipe", out.porting_recipe)
+
+    def test_learned_fixer_example_needs_actions_and_the_error_line(
+        self,
+    ) -> None:
+        from src import graph
+
+        state = _state(build_plan=self._plan())
+        state.build_status = BuildStatus.SUCCESS
+        state.artifact_verification = {"status": "verified"}
+        state.curated_artifacts = [{"filepath": "bin/tool", "role": "primary"}]
+        for strategy, change in (
+            ("add stub", "Created file: doc.go"),
+            ("link support", "Executed: make -C support"),
+        ):
+            state.add_fix_attempt(
+                FixAttempt(
+                    error_category=ErrorCategory.COMPILATION,
+                    strategy=strategy,
+                    changes_made=[change],
+                    success=True,
+                    error_message=(
+                        "Build command failed: make gawk (exit 2) - "
+                        "awkgram.y: warning: 36 shift/reduce conflicts\n"
+                        "make: *** No rule to make target 'support/x.a'."
+                    ),
+                )
+            )
+        with (
+            mock.patch.object(graph, "save_learned_example") as save_example,
+            mock.patch.object(graph, "save_to_recipe_cache"),
+        ):
+            graph._save_learning_data(state)
+        fixer = [
+            c.args[1]
+            for c in save_example.call_args_list
+            if c.args[0] == "fixer"
+        ]
+        self.assertEqual(
+            [f["fix"]["strategy"] for f in fixer], ["link support"]
+        )
+        self.assertEqual(
+            fixer[0]["error_context"]["error_message"],
+            "make: *** No rule to make target 'support/x.a'.",
+        )
+
     def test_save_learning_data_writes_examples_and_recipe_cache(self) -> None:
         """Successful states are learned as scout/fixer/builder examples."""
         from src import graph
@@ -1357,6 +1685,727 @@ class TestTerminalNodes(unittest.TestCase):
             side_effect=RuntimeError("disk full"),
         ):
             graph._save_learning_data(state)
+
+
+class TestFixerRoundOneContinues(unittest.TestCase):
+    """Round 1 continues round 0: the model sees its own request."""
+
+    def test_round_one_sends_history_and_only_the_results(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src import graph
+
+        calls = []
+        thread = [
+            HumanMessage(content="round 0 task"),
+            AIMessage(content='{"investigate": {"commands": ["ls"]}}'),
+        ]
+        fix = {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": "install headers",
+                    "actions": [{"type": "command", "command": "make"}],
+                }
+            ],
+            "recommended_strategy_id": 1,
+        }
+
+        def fake_llm_call(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return LLMCallOutcome(
+                    data={"investigate": {"commands": ["ls"]}},
+                    used_fallback=False,
+                    attempts=1,
+                    messages=thread,
+                )
+            return LLMCallOutcome(data=fix, used_fallback=False, attempts=1)
+
+        state = TestFixerNode._fixer_state(self)
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph, "_run_fixer_investigation", return_value="$ ls\nsrc"
+            ),
+            mock.patch.object(
+                graph,
+                "execute_command",
+                return_value=mock.MagicMock(success=True),
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+        ):
+            graph.fixer_node(state)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[0]["history"])
+        self.assertIs(calls[1]["history"], thread)
+        self.assertIn("Investigation results", calls[1]["prompt"])
+        self.assertNotIn("## Failure", calls[1]["prompt"])
+        self.assertEqual(calls[1]["system_prompt"], calls[0]["system_prompt"])
+
+
+class TestFixerEvidence(unittest.TestCase):
+    """The fixer prompt carries the real exit code, phase, plan and fixes."""
+
+    def _state(self):
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="cmake",
+            build_system_confidence=0.9,
+            phases=[
+                BuildPhase(1, "configure", ["cmake -S . -B build"]),
+                BuildPhase(2, "build", ["cmake --build build"]),
+            ],
+            total_estimated_duration="1m",
+        )
+        state.last_successful_phase = 1
+        message = (
+            "Build command failed: cmake --build build (exit 137) - "
+            "In file included from x.h:1\nwarning: a\nKilled"
+        )
+        state.add_error(
+            create_error_record(
+                message,
+                ErrorCategory.COMPILATION,
+                command="cmake --build build",
+            )
+        )
+        return state
+
+    def test_exit_code_and_phase(self) -> None:
+        from src import graph
+
+        state = self._state()
+        self.assertEqual(
+            graph._exit_code_text(state.last_error),
+            "137 (SIGKILL: the process was killed, usually out of memory)",
+        )
+        self.assertEqual(graph._exit_code_text("no code"), "not reported")
+        self.assertEqual(
+            graph._failed_phase_text(state, "cmake --build build"),
+            "build (phase 2 of 2)",
+        )
+        plan = graph._build_plan_text(state, "cmake --build build")
+        self.assertIn("1. configure (completed)", plan)
+        self.assertIn("`cmake --build build`   <- failed here", plan)
+
+    def test_previous_fixes_show_actions_and_what_followed(self) -> None:
+        from src import graph
+
+        state = self._state()
+        fix = FixAttempt(
+            error_category=ErrorCategory.COMPILATION,
+            strategy="install headers",
+            changes_made=[],
+            success=False,
+            action_results=["`apt-get install x` failed (exit 100): E: none"],
+        )
+        state.add_fix_attempt(fix)
+        state.add_error(
+            create_error_record(
+                "Build command failed: make (exit 2) - a.c:1: error: next",
+                ErrorCategory.COMPILATION,
+                command="make",
+            )
+        )
+        text = graph._previous_fixes_text(state)
+        self.assertIn("Fix 1: install headers (Failed)", text)
+        self.assertIn("failed (exit 100): E: none", text)
+        self.assertIn("then: next error: a.c:1: error: next", text)
+
+    def test_fixer_prompt_has_the_facts(self) -> None:
+        from src import graph
+
+        state = self._state()
+        seen = {}
+
+        def fake_llm_call(**kwargs):
+            seen.update(kwargs)
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "top_level_listing", return_value="CMakeLists.txt"
+            ),
+        ):
+            graph.fixer_node(state)
+        prompt = seen["prompt"]
+        self.assertIn("Exit code: 137 (SIGKILL", prompt)
+        self.assertIn("Failed phase: build (phase 2 of 2)", prompt)
+        self.assertIn("Killed", prompt)
+        self.assertIn("### Top-level files\nCMakeLists.txt", prompt)
+        self.assertNotIn("Phase: fixing", prompt)
+        self.assertNotIn("N/A", prompt)
+        rules = seen["system_prompt"][0]
+        self.assertIn("re-runs the build plan commands", rules)
+
+    def test_stdout_error_is_kept_when_stderr_holds_the_message(self) -> None:
+        from src import graph
+
+        configure = mock.MagicMock(
+            stderr="+ cd libvpx\n+ ./configure --enable-vp8\n+ exit 1",
+            stdout="Configuring for target 'riscv64-linux-gcc'\n"
+            "Unrecognized toolchain 'riscv64-linux-gcc'\n"
+            "Configuration failed. This could reflect a misconfiguration.",
+        )
+        self.assertIn(
+            "Configuration failed", graph._stdout_evidence(configure)
+        )
+        progress = mock.MagicMock(
+            stderr="a.c:1: error: x", stdout="CC a.o\nCC b.o"
+        )
+        self.assertEqual(graph._stdout_evidence(progress), "")
+        no_stderr = mock.MagicMock(stderr="", stdout="error: in message")
+        self.assertEqual(graph._stdout_evidence(no_stderr), "")
+
+    def test_builder_records_the_stdout_tail(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="autotools",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "configure", ["./configure"])],
+            total_estimated_duration="1m",
+        )
+
+        def fake_execute(cmd, *args, **kwargs):
+            if cmd == "./configure":
+                return CommandResult(
+                    cmd, 1, "Configuration failed.", "+ ./configure", 1.0
+                )
+            return CommandResult(str(cmd), 0, "", "", 1.0)
+
+        with (
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            out = graph.builder_node(state)
+        record = out.error_history[-1]
+        self.assertEqual(record.stdout_tail, "Configuration failed.")
+        self.assertNotIn("Configuration failed.", record.message)
+
+    def test_fixer_prompt_shows_the_stdout_tail(self) -> None:
+        from src import graph
+
+        state = self._state()
+        state.error_history[-1].stdout_tail = "Configuration failed."
+        seen = {}
+
+        def fake_llm_call(**kwargs):
+            seen.update(kwargs)
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(graph, "top_level_listing", return_value=""),
+        ):
+            graph.fixer_node(state)
+        self.assertIn(
+            "### Standard output (the end; the output above is stderr)\n"
+            "```\nConfiguration failed.\n```",
+            seen["prompt"],
+        )
+
+    def test_failed_fix_command_is_recorded_with_its_output(self) -> None:
+        from src import graph
+
+        state = self._state()
+        strategy = {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": "two steps",
+                    "actions": [
+                        {"type": "command", "command": "apt-get install x"},
+                        {"type": "command", "command": "make clean"},
+                    ],
+                }
+            ],
+            "recommended_strategy_id": 1,
+        }
+        results = [
+            mock.MagicMock(
+                success=False, stderr="E: Unable to locate x", exit_code=100
+            ),
+            mock.MagicMock(success=True),
+        ]
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph,
+                "llm_call_with_validation",
+                return_value=LLMCallOutcome(
+                    data=strategy, used_fallback=False, attempts=1
+                ),
+            ),
+            mock.patch.object(graph, "execute_command", side_effect=results),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(graph, "top_level_listing", return_value=""),
+        ):
+            out = graph.fixer_node(state)
+        self.assertEqual(
+            out.fixes_attempted[-1].action_results,
+            [
+                "`apt-get install x` failed (exit 100): E: Unable to locate x",
+                "`make clean` ok",
+            ],
+        )
+
+
+class TestStructuredFixer(unittest.TestCase):
+    """The fixer schema: escalate and investigate fields, no comments."""
+
+    def test_every_schema_object_is_closed_and_fully_required(self) -> None:
+        from src import graph
+        from src.artifact_curator import _CURATOR_SCHEMA
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    self.assertFalse(node["additionalProperties"])
+                    self.assertEqual(
+                        sorted(node["required"]), sorted(node["properties"])
+                    )
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for schema in (
+            graph.ANALYST_SCHEMA,
+            graph.SCOUT_SCHEMA,
+            graph.FIXER_SCHEMA,
+            _CURATOR_SCHEMA,
+        ):
+            walk(schema)
+
+    def test_fixer_prompt_has_no_json_comments(self) -> None:
+        from src import graph
+
+        text = graph.FIXER_PROMPT.format(platform_banner="b")
+        self.assertNotIn("//", text)
+        self.assertIn('"escalate": null', text)
+        self.assertNotIn("propose\n  ESCALATE", text)
+        self.assertIn("Never add a stub or placeholder source file", text)
+
+    def _run(self, data):
+        from src import graph
+
+        state = TestFixerNode._fixer_state(self)
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph,
+                "llm_call_with_validation",
+                return_value=LLMCallOutcome(
+                    data=data, used_fallback=False, attempts=1
+                ),
+            ) as call,
+            mock.patch.object(
+                graph,
+                "execute_command",
+                return_value=mock.MagicMock(success=True),
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(graph, "top_level_listing", return_value=""),
+            mock.patch.object(
+                graph, "apply_patch", return_value=True
+            ) as patch,
+        ):
+            out = graph.fixer_node(state)
+        return out, call, patch
+
+    def test_escalate_ends_the_run_with_the_reason(self) -> None:
+        out, call, _ = self._run(
+            {
+                "investigate": None,
+                "escalate": {"reason": "cabal is not available"},
+                "strategies": [],
+                "recommended_strategy_id": 0,
+                "reflection": {"root_cause": "x"},
+            }
+        )
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(out.build_status, BuildStatus.ESCALATED)
+        self.assertIn(
+            "FIXER escalated: cabal is not available",
+            out.error_history[-1].message,
+        )
+        validator = call.call_args.kwargs["validator"]
+        self.assertFalse(
+            validator({"escalate": {"reason": " "}, "strategies": []}).ok
+        )
+
+    def test_null_investigate_with_strategies_is_a_fix(self) -> None:
+        out, call, _ = self._run(
+            {
+                "investigate": None,
+                "escalate": None,
+                "strategies": [
+                    {
+                        "id": 1,
+                        "description": "make clean",
+                        "actions": [
+                            {
+                                "type": "command",
+                                "command": "make clean",
+                                "path": "",
+                                "content": "",
+                            }
+                        ],
+                    }
+                ],
+                "recommended_strategy_id": 1,
+                "reflection": {"root_cause": "stale objects"},
+            }
+        )
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+
+    def test_patch_names_its_file_in_path(self) -> None:
+        _, _, patch = self._run(
+            {
+                "investigate": None,
+                "escalate": None,
+                "strategies": [
+                    {
+                        "id": 1,
+                        "description": "guard",
+                        "actions": [
+                            {
+                                "type": "patch",
+                                "command": "",
+                                "path": "src/a.c",
+                                "content": "--- a/src/a.c\n+++ b/src/a.c\n",
+                            }
+                        ],
+                    }
+                ],
+                "recommended_strategy_id": 1,
+                "reflection": {"root_cause": "x86 only"},
+            }
+        )
+        self.assertTrue(patch.call_args.kwargs["filepath"].endswith("src/a.c"))
+
+
+class TestShortFields(unittest.TestCase):
+    """Analyst fields are bounded at word boundaries; unused fields go."""
+
+    def test_shorten_keeps_whole_words(self) -> None:
+        from src.graph import _shorten
+
+        text = "the agent should locate them before assuming x86 only paths"
+        out = _shorten(text, 40)
+        self.assertTrue(out.endswith("…"))
+        self.assertLessEqual(len(out), 40)
+        self.assertIn(out[:-1].split()[-1], text.split())
+        self.assertEqual(_shorten("  a  b ", 10), "a b")
+
+    def test_schemas_ask_only_for_read_fields(self) -> None:
+        from src import graph
+
+        self.assertNotIn("complexity", graph.ANALYST_SCHEMA["properties"])
+        self.assertEqual(
+            sorted(graph.SCOUT_SCHEMA["properties"]),
+            ["build_system", "phases"],
+        )
+        self.assertEqual(
+            list(graph.FIXER_SCHEMA["properties"]["reflection"]["properties"]),
+            ["root_cause"],
+        )
+
+    def test_root_cause_reaches_the_next_round(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.add_fix_attempt(
+            FixAttempt(
+                error_category=ErrorCategory.COMPILATION,
+                strategy="add guard",
+                changes_made=["Executed: sed -i x a.c"],
+                success=False,
+                root_cause="x86 intrinsics in a.c",
+            )
+        )
+        self.assertIn(
+            "believed cause: x86 intrinsics in a.c",
+            graph._previous_fixes_text(state),
+        )
+
+
+class TestScoutWithoutDuplicates(unittest.TestCase):
+    """The scout reuses the analyst evidence and sends each doc once."""
+
+    def test_scout_reuses_evidence_and_skips_the_readme_copy(self) -> None:
+        from src import graph
+
+        state = TestScoutNode._scout_state(self)
+        state.error_history = []
+        state.last_error = None
+        state.file_content_cache = {
+            "/workspace/repos/b/README.md": "readme text",
+            "/workspace/repos/b/INSTALL": "install text",
+        }
+        state.context_cache["build_evidence"] = (
+            "### Top-level files\nREADME.md\n\n### README.md (excerpt)\nreadme"
+        )
+        seen = {}
+
+        def fake_llm_call(**kwargs):
+            seen.update(kwargs)
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph.scripted_ops,
+                "get_system_info",
+                return_value={"architecture": "riscv64"},
+            ),
+            mock.patch.object(graph, "collect_build_evidence") as collect,
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+        ):
+            graph.scout_node(state)
+        collect.assert_not_called()
+        self.assertIn("## INSTALL\ninstall text", seen["prompt"])
+        self.assertNotIn("## README.md\nreadme text", seen["prompt"])
+
+    def test_rescout_after_a_failure_reads_the_tree_again(self) -> None:
+        from src import graph
+
+        state = TestScoutNode._scout_state(self)
+        state.context_cache["build_evidence"] = "old evidence"
+        state.add_error(
+            create_error_record(
+                "Build command failed: make (exit 2) - x",
+                ErrorCategory.UNKNOWN,
+            )
+        )
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph,
+                "llm_call_with_validation",
+                return_value=LLMCallOutcome(
+                    data=None, used_fallback=False, attempts=1
+                ),
+            ),
+            mock.patch.object(
+                graph.scripted_ops,
+                "get_system_info",
+                return_value={"architecture": "riscv64"},
+            ),
+            mock.patch.object(
+                graph, "collect_build_evidence", return_value="new"
+            ) as collect,
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+        ):
+            graph.scout_node(state)
+        collect.assert_called_once()
+
+
+class TestLearningOnlyRealFixes(unittest.TestCase):
+    """A fix that did not change the error is not learned as a success."""
+
+    def test_only_fixes_that_moved_the_error_count(self) -> None:
+        from datetime import datetime, timedelta
+
+        from src import graph
+
+        state = _state()
+        same = "Build command failed: make (exit 2) - a.c:1: error: zlib.h"
+        t0 = datetime(2026, 10, 16, 12, 0, 0)
+
+        def fix(minute, message):
+            f = FixAttempt(
+                error_category=ErrorCategory.COMPILATION,
+                strategy=f"fix {minute}",
+                changes_made=["Executed: true"],
+                success=False,
+                error_message=message,
+            )
+            f.timestamp = t0 + timedelta(minutes=minute)
+            return f
+
+        def error(minute, message):
+            e = create_error_record(message, ErrorCategory.COMPILATION)
+            e.timestamp = t0 + timedelta(minutes=minute)
+            return e
+
+        state.fixes_attempted = [fix(1, same), fix(3, same)]
+        state.error_history = [error(0, same), error(2, same)]
+        state.build_plan = BuildPlan(
+            build_system="make",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["true"])],
+            total_estimated_duration="1m",
+        )
+        state.last_successful_phase = 1
+        with mock.patch.object(
+            graph,
+            "execute_command",
+            return_value=mock.MagicMock(success=True, stdout="", stderr=""),
+        ):
+            graph.builder_node(state)
+        first, last = state.fixes_attempted
+        self.assertFalse(first.success)
+        self.assertEqual(
+            first.build_result, "the error did not change after this fix"
+        )
+        self.assertTrue(last.success)
+
+    def test_error_regex_tolerates_paths_and_numbers(self) -> None:
+        import re
+
+        from src import graph
+
+        pattern = graph._error_regex(
+            "/workspace/repos/a/src/x.c:12:3: error: zlib.h: No such file"
+        )
+        self.assertTrue(
+            re.search(
+                pattern,
+                "/workspace/repos/b/lib/y.c:99:1: error: zlib.h: no such file",
+                re.IGNORECASE,
+            )
+        )
+
+
+class TestCurateBeforeSummary(unittest.TestCase):
+    """The summarizer sees the curated list, without build probes."""
+
+    def test_summary_prompt_has_no_cmake_probes(self) -> None:
+        from src import graph
+
+        state = _state(
+            build_plan=BuildPlan(
+                build_system="cmake",
+                build_system_confidence=0.9,
+                phases=[BuildPhase(1, "build", ["make"])],
+                total_estimated_duration="1m",
+            )
+        )
+        state.build_artifacts = [
+            {"filepath": "/r/build/libz.a", "type": "library_static"},
+            {
+                "filepath": "/r/build/CMakeFiles/3.22/CompilerIdC/a.out",
+                "type": "binary",
+            },
+        ]
+        seen = {}
+
+        def fake_invoke(llm, messages, timeout=None):
+            seen["prompt"] = messages[0].content
+            return mock.MagicMock(content="## Executive Summary\nok")
+
+        with (
+            mock.patch.object(
+                graph, "get_model_for_role", return_value=mock.MagicMock()
+            ),
+            mock.patch.object(graph, "invoke_llm", side_effect=fake_invoke),
+            mock.patch.object(graph, "response_usage", return_value=(1, 1)),
+            mock.patch.object(graph, "response_cost", return_value=0.0),
+            mock.patch.object(graph, "log_llm_call"),
+            mock.patch.object(
+                graph, "_run_package_tests", return_value={"status": "skipped"}
+            ),
+            mock.patch.object(graph, "_save_learning_data"),
+        ):
+            graph.finish_node(state)
+        self.assertIn("libz.a", seen["prompt"])
+        self.assertNotIn("CompilerIdC", seen["prompt"])
+
+    def test_curation_runs_once_even_when_it_keeps_nothing(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.build_artifacts = [{"filepath": "/r/x", "type": "binary"}]
+        with (
+            mock.patch.object(graph, "get_model_for_role", return_value=None),
+            mock.patch(
+                "src.artifact_curator.curate_artifacts", return_value=[]
+            ) as curate,
+        ):
+            graph._curate_artifacts(state)
+            graph._curate_artifacts(state)
+        curate.assert_called_once()
 
 
 if __name__ == "__main__":
@@ -1689,3 +2738,85 @@ class TestOptimizeNode(unittest.TestCase):
         self.assertEqual(result.reason, "bad binary")
         self.assertEqual(state.api_tokens_in, 14)
         self.assertEqual(state.api_calls_made, 4)
+
+
+class TestPromptSplit(unittest.TestCase):
+    """Static text goes to the system prompt, package data to the user."""
+
+    def _capture(self, node, state, extra_patches=()):
+        """Run ``node`` and return the llm_call_with_validation kwargs."""
+        from src import graph
+
+        seen = {}
+
+        def fake_llm_call(**kwargs):
+            seen.update(kwargs)
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_llm_call
+            ),
+            mock.patch.object(
+                graph.scripted_ops,
+                "get_system_info",
+                return_value={"architecture": "riscv64"},
+            ),
+            mock.patch.object(
+                graph, "collect_build_evidence", return_value="EVIDENCE"
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+        ):
+            node(state)
+        return seen
+
+    def test_analyst(self) -> None:
+        from src import graph
+
+        seen = self._capture(graph.analyst_node, _state())
+        self.assertIn("## Your task", seen["system_prompt"])
+        self.assertIn("## Active sandbox", seen["system_prompt"])
+        self.assertNotIn("EVIDENCE", seen["system_prompt"])
+        self.assertIn("EVIDENCE", seen["prompt"])
+        self.assertNotIn("## Your task", seen["prompt"])
+
+    def test_scout(self) -> None:
+        from src import graph
+
+        state = TestScoutNode._scout_state(self)
+        state.repo_name = "quux-tool"
+        seen = self._capture(graph.scout_node, state)
+        rules, knowledge = seen["system_prompt"]
+        self.assertIn("## Build plan rules", rules)
+        self.assertNotIn(state.repo_name, rules)
+        self.assertTrue(knowledge.startswith("## Platform knowledge"))
+        self.assertIn("EVIDENCE", seen["prompt"])
+        self.assertIn(state.repo_name, seen["prompt"])
+        self.assertNotIn("## Build plan rules", seen["prompt"])
+
+    def test_fixer(self) -> None:
+        from src import graph
+
+        state = TestFixerNode._fixer_state(self)
+        seen = self._capture(graph.fixer_node, state)
+        rules, knowledge = seen["system_prompt"]
+        self.assertIn("## Critical rules", rules)
+        self.assertNotIn("zlib.h", rules)
+        self.assertTrue(knowledge.startswith("## Platform knowledge"))
+        self.assertIn("zlib.h", seen["prompt"])
+        self.assertNotIn("## Critical rules", seen["prompt"])
+        # Same build system → same knowledge text → a cache hit.
+        again = self._capture(
+            graph.fixer_node, TestFixerNode._fixer_state(self)
+        )
+        self.assertEqual(again["system_prompt"], seen["system_prompt"])

@@ -227,6 +227,11 @@ MODEL_PRICES_PER_MTOK = {
 # than billing as free.
 _DEFAULT_PAID_PRICE_PER_MTOK = (3.00, 12.00)
 
+# Prompt-cache prices of Claude models, as multiples of the base input
+# price: a cache read bills 0.1x and a 5-minute cache write 1.25x.
+_CACHE_READ_MULTIPLIER = 0.1
+_CACHE_WRITE_MULTIPLIER = 1.25
+
 
 def is_free_model(model_id: str) -> bool:
     """Return True when ``model_id`` is an OpenRouter free-tier model."""
@@ -235,19 +240,30 @@ def is_free_model(model_id: str) -> bool:
 
 
 def cost_for_usage(
-    model_id: str, input_tokens: int, output_tokens: int
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> float:
     """Compute the USD cost of one LLM call from its token usage.
 
     Free-tier models cost $0; paid models are priced from
     ``MODEL_PRICES_PER_MTOK`` (falling back to a conservative default
-    for unknown paid models).
+    for unknown paid models). For a Claude model, the cached part of
+    the prompt bills at the cache prices; other models bill every
+    input token at the full price, which can only over-count.
 
     Args:
         model_id: Provider model id (e.g. ``gpt-4o``,
             ``qwen/qwen3-coder:free``).
-        input_tokens: Prompt tokens billed for the call.
+        input_tokens: Prompt tokens billed for the call, cache reads
+            and cache writes included (the LangChain usage total).
         output_tokens: Completion tokens billed for the call.
+        cache_read_tokens: Part of ``input_tokens`` read from the
+            prompt cache.
+        cache_write_tokens: Part of ``input_tokens`` written to the
+            prompt cache.
 
     Returns:
         Estimated USD cost of the call.
@@ -257,8 +273,16 @@ def cost_for_usage(
     price_in, price_out = MODEL_PRICES_PER_MTOK.get(
         model_id, _DEFAULT_PAID_PRICE_PER_MTOK
     )
+    read = max(0, cache_read_tokens)
+    write = max(0, cache_write_tokens)
+    if not (model_id or "").startswith("claude"):
+        read = write = 0
+    plain = max(0, input_tokens - read - write)
     return (
-        max(0, input_tokens) * price_in + max(0, output_tokens) * price_out
+        plain * price_in
+        + read * price_in * _CACHE_READ_MULTIPLIER
+        + write * price_in * _CACHE_WRITE_MULTIPLIER
+        + max(0, output_tokens) * price_out
     ) / 1_000_000
 
 

@@ -14,8 +14,12 @@
 Each call is appended to ``agent-call.log`` in the workspace ``logs``
 directory; ``set_llm_log_repo`` switches to a per-repo
 ``agent-call_<repo>.log`` so batch workers keep separate files. The
-logger is a process-wide singleton; batch runs use one process per
-package, so threads in one process would share the current file.
+``.log`` file is for reading and keeps the first 10,000 characters of
+the prompt and of the response; a ``.jsonl`` file next to it (same
+name) keeps one JSON record per call with the full prompt and
+response. The logger is a process-wide singleton; batch runs use one
+process per package, so threads in one process would share the
+current file.
 """
 
 import json
@@ -85,6 +89,22 @@ class LLMCallLogger:
             self.log_file = None
             self._logs_dir = None
 
+    def _write_jsonl(self, record: Dict[str, Any]) -> None:
+        """Append ``record`` (full prompt and response) to the JSONL file.
+
+        The file sits next to ``log_file`` with a ``.jsonl`` suffix. A
+        write error is logged and does not raise.
+        """
+        if not self.log_file:
+            return
+        path = os.path.splitext(self.log_file)[0] + ".jsonl"
+        with self._write_lock:
+            try:
+                with open(path, "a") as f:
+                    f.write(json.dumps(record, default=str) + "\n")
+            except Exception as e:
+                logger.error(f"Failed to write LLM call JSONL: {e}")
+
     def set_repo_name(self, repo_name: str) -> None:
         """Switch to a per-repo log file for multi-process batch safety.
 
@@ -151,6 +171,9 @@ class LLMCallLogger:
         }
 
         self.calls.append(call_record)
+        self._write_jsonl(
+            {**call_record, "prompt": prompt, "response": response}
+        )
 
         # Append right away so a crash does not lose the record.
         if self.log_file:

@@ -233,40 +233,74 @@ COMMON_PORTING_ISSUES = {
 }
 
 
+# Build systems whose own code is not C or C++: the C preprocessor
+# macros and the C/C++ porting issues do not apply to them.
+_NON_C_BUILD_SYSTEMS = frozenset(
+    {"go", "cargo", "rust", "python", "pip", "npm", "node"}
+)
+
+# Porting issues that apply to every build system.
+_GENERIC_ISSUES = frozenset({"memory_ordering", "musl_libc"})
+
+# A platform note that names one of these is only for Go builds.
+_GO_NOTE_MARKERS = ("go.mod", "Go ", "GOTOOLCHAIN", "GOPROXY", "golang")
+
+
+def _note_applies(note: str, build_system: Optional[str]) -> bool:
+    """Return True when a platform note concerns ``build_system``."""
+    if not build_system or build_system == "go":
+        return True
+    return not any(marker in note for marker in _GO_NOTE_MARKERS)
+
+
 def get_system_knowledge_summary(
     profile: Optional[PlatformProfile] = None,
+    build_system: Optional[str] = None,
 ) -> str:
     """Produce a compact knowledge summary for agent prompts.
 
     Distro-specific text (install command, package map, libc,
-    corrections) is rendered from ``profile``. RISC-V architecture
-    knowledge is always included.
+    corrections) is rendered from ``profile``. With a ``build_system``,
+    the block leaves out what cannot apply to it: the C macros and the
+    C/C++ porting issues for a Go, Rust, Python or Node build, and the
+    Go notes for a non-Go build. The text depends only on the profile
+    and the build system, so it stays cacheable across packages.
 
     Args:
         profile: Platform profile to render distro-specific text from.
             Defaults to the active platform profile when ``None``.
+        build_system: The plan's build system (``go``, ``cmake``, ...);
+            ``None`` or ``unknown`` keeps the full block.
 
     Returns:
         The composed system-knowledge prompt block as a string.
     """
     if profile is None:
         profile = get_active_profile()
+    build_system = (build_system or "").lower() or None
+    if build_system == "unknown":
+        build_system = None
+    non_c = build_system in _NON_C_BUILD_SYSTEMS
 
-    install_cmd = f"{profile.pkg_update} && {profile.pkg_install} <package>"
     lines = [
         f"## RISC-V Porting Knowledge ({profile.display_name})",
         "",
         "### Package Installation",
-        f"Install command: `{install_cmd}`",
+        (
+            f"Install: run `{profile.pkg_update}`, then "
+            f"`{profile.pkg_install} <package>` as a separate command; "
+            f"a fixer action never chains commands."
+        ),
         "Canonical name → distro package:",
     ]
     for canonical, pkg in profile.package_map.items():
         lines.append(f"  - {canonical} → `{pkg}`")
 
-    lines.append("")
-    lines.append("### Architecture Detection (C/C++ preprocessor)")
-    for macro, desc in RISCV_PREPROCESSOR_MACROS.items():
-        lines.append(f"  - `{macro}`: {desc}")
+    if not non_c:
+        lines.append("")
+        lines.append("### Architecture Detection (C/C++ preprocessor)")
+        for macro, desc in RISCV_PREPROCESSOR_MACROS.items():
+            lines.append(f"  - `{macro}`: {desc}")
 
     lines.append("")
     lines.append("### Common Porting Issues")
@@ -274,6 +308,8 @@ def get_system_knowledge_summary(
         # musl-specific guidance is wrong (and actively misleading) in
         # a glibc sandbox prompt — skip it there.
         if issue_key == "musl_libc" and profile.libc != "musl":
+            continue
+        if non_c and issue_key not in _GENERIC_ISSUES:
             continue
         lines.append(f"  **{issue_key}**: {issue['root_cause']}")
         lines.append(f"    Fix: {issue['solutions'][0]}")
@@ -303,14 +339,15 @@ def get_system_knowledge_summary(
         "  - RISC-V ISA extensions vary by hardware — detect, do not assume"
     )
     for note in profile.extra_notes:
-        lines.append(f"  - {note}")
+        if _note_applies(note, build_system):
+            lines.append(f"  - {note}")
 
     if profile.name_corrections:
         lines.append("")
         lines.append(f"### Package Name Corrections ({profile.display_name})")
         lines.append(
-            "  Common LLM mistakes — these names are WRONG on this"
-            " distro. Use the correct names:"
+            "  Names from another distro: the agent rewrites the left"
+            " name to the right one. Prefer the right name:"
         )
         for wrong, correct in profile.name_corrections.items():
             lines.append(f"  - `{wrong}` → use `{correct}`")

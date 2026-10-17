@@ -1610,5 +1610,65 @@ class TestValidatorNewlyAllowed(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestWhitelistGaps(unittest.TestCase):
+    """Normal build commands that the October 2026 runs saw rejected."""
+
+    def setUp(self) -> None:
+        self.validator = CommandValidator()
+
+    def test_tool_paths_check_under_their_base_name(self) -> None:
+        for cmd in (
+            "/usr/bin/cargo build --release",
+            "/root/.cargo/bin/rustc --version",
+            "$HOME/.cargo/bin/rustup show",
+            "~/.cargo/bin/cargo build",
+            "/usr/local/go/bin/go build -buildvcs=false .",
+        ):
+            with self.subTest(cmd=cmd):
+                ok, reason = self.validator.is_safe(cmd)
+                self.assertTrue(ok, reason)
+
+    def test_new_tools_pass(self) -> None:
+        for cmd in (
+            "rustup toolchain install stable --profile minimal",
+            "rustc",
+            "composer install --no-interaction --prefer-dist",
+            "php83 /usr/bin/composer install",
+            "pnpm install --frozen-lockfile",
+            "node --version",
+            "zig build --release=fast -Dstrip",
+            "../configure --disable-gdb",
+            "../../configure --prefix=/usr",
+            "./scripts/config -e STATIC -d SELINUX",
+            "./scripts/kconfig/conf --olddefconfig Kconfig",
+            "find . -type d | sort",
+        ):
+            with self.subTest(cmd=cmd):
+                ok, reason = self.validator.is_safe(cmd)
+                self.assertTrue(ok, reason)
+
+    def test_wrapper_paths_stay_blocked(self) -> None:
+        """A path to sh/bash/env would skip the nested-script checks."""
+        for cmd in (
+            "/bin/bash -c 'nmap 1.2.3.4'",
+            "/bin/sh -c 'nmap 1.2.3.4'",
+            "/usr/bin/env nmap 1.2.3.4",
+        ):
+            with self.subTest(cmd=cmd):
+                ok, _ = self.validator.is_safe(cmd)
+                self.assertFalse(ok)
+
+    def test_script_paths_cannot_leave_the_tree(self) -> None:
+        for cmd in ("./a/../../etc/x", "./a/.hidden/x", "./.x"):
+            with self.subTest(cmd=cmd):
+                ok, _ = self.validator.is_safe(cmd)
+                self.assertFalse(ok)
+
+    def test_unknown_tool_path_stays_blocked(self) -> None:
+        ok, reason = self.validator.is_safe("/usr/bin/nmap 1.2.3.4")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Unknown command pattern (not in whitelist)")
+
+
 if __name__ == "__main__":
     unittest.main()

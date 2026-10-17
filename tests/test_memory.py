@@ -1,7 +1,10 @@
 """Unit tests for the Agent Memory System."""
 
 import json
+import os
+import re
 import shutil
+import tempfile
 import threading
 import unittest
 import uuid
@@ -1531,3 +1534,183 @@ class TestRecordOptimization(unittest.TestCase):
         ]
         self.assertIsNone(record["accepted"])
         self.assertNotIn("variant", record)
+
+
+class TestFewShotSelection(unittest.TestCase):
+    """Examples are injected only when they match the case."""
+
+    def setUp(self) -> None:
+        self.examples_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.examples_dir, True)
+
+    def _memory(self, agent, examples):
+        path = os.path.join(self.examples_dir, f"{agent}_examples.json")
+        with open(path, "w") as f:
+            json.dump({"examples": examples}, f)
+        return AgentMemory(agent, examples_dir=Path(self.examples_dir))
+
+    def test_fixer_examples_need_a_matching_error(self) -> None:
+        memory = self._memory(
+            "fixer",
+            [
+                {
+                    "id": "fixer-zlib",
+                    "name": "zlib headers",
+                    "tags": ["make"],
+                    "build_system": "make",
+                    "sandbox": "debian-riscv64",
+                    "error_pattern": "zlib\\.h: no such file",
+                    "fix": {
+                        "strategy": "install zlib1g-dev",
+                        "actions": [
+                            {"type": "command", "command": "apt-get x"}
+                        ],
+                    },
+                },
+                {
+                    "id": "fixer-go",
+                    "name": "go module",
+                    "tags": ["make"],
+                    "build_system": "make",
+                    "sandbox": "debian-riscv64",
+                    "error_context": {
+                        "error_message": "go: cannot find main module"
+                    },
+                    "fix": {
+                        "strategy": "cd src",
+                        "actions": [
+                            {"type": "command", "command": "go build ./x"}
+                        ],
+                    },
+                },
+            ],
+        )
+        ctx = {"build_system": "make", "sandbox": "debian-riscv64"}
+        hits = memory.get_relevant_examples(
+            {**ctx, "error_message": "fatal error: zlib.h: No such file"}
+        )
+        self.assertEqual([e.id for e in hits], ["fixer-zlib"])
+        none = memory.get_relevant_examples(
+            {**ctx, "error_message": "undefined reference to `pthread_create'"}
+        )
+        self.assertEqual(none, [])
+
+    def test_old_prefixed_patterns_and_examples_without_actions(self) -> None:
+        def auto(name, pattern, actions):
+            return {
+                "id": name,
+                "name": name,
+                "tags": ["go"],
+                "build_system": "go",
+                "sandbox": "debian-riscv64",
+                "error_pattern": pattern,
+                "fix": {"strategy": name, "actions": actions},
+            }
+
+        memory = self._memory(
+            "fixer",
+            [
+                auto(
+                    "stub",
+                    "Build\\ command\\ failed:\\ go\\ build\\ \\.\\ "
+                    "\\(exit\\ 1\\)\\ \\-\\ no\\ Go\\ files\\ in",
+                    [],
+                ),
+                auto(
+                    "pcap",
+                    "Build\\ command\\ failed:\\ go\\ build\\ "
+                    "\\-buildvcs=false\\ \\./cmd/x\\ \\(exit\\ 1\\)"
+                    "\\ \\-\\ \\#\\ git",
+                    [{"type": "command", "command": "apt-get install x"}],
+                ),
+                auto(
+                    "ncurses",
+                    "Build\\ command\\ failed:\\ \\./configure\\ "
+                    "\\(exit\\ 1\\)\\ \\-\\ configure:\\ error:\\ "
+                    "NOT\\ FOUND!\\\n\\ \\ ",
+                    [{"type": "command", "command": "apt-get install y"}],
+                ),
+                auto(
+                    "include-head",
+                    "Build\\ command\\ failed:\\ cd\\ build\\ \\&\\&\\ make"
+                    "\\ \\(exit\\ 2\\)\\ \\-\\ In\\ file\\ included\\ fr",
+                    [{"type": "command", "command": "apt-get install p"}],
+                ),
+                auto(
+                    "cmake-head",
+                    re.escape(
+                        "Build command failed: mkdir -p build && cd build "
+                        "&& cmake .. -DCMAKE_BUILD_TYPE="
+                    ),
+                    [{"type": "command", "command": "apt-get install z"}],
+                ),
+            ],
+        )
+        generic = (
+            "Build command failed: go build ./cmd/x (exit 1) - In file "
+            "included from x.c:1:\nfatal error: olm/olm.h: No such file"
+        )
+        self.assertEqual(
+            memory.get_relevant_examples(
+                {
+                    "build_system": "go",
+                    "sandbox": "debian-riscv64",
+                    "error_message": generic,
+                }
+            ),
+            [],
+        )
+        same_command = (
+            "Build command failed: mkdir -p build && cd build && cmake .. "
+            "-DCMAKE_BUILD_TYPE=Release (exit 1) - CMake Error: The source "
+            "directory does not appear to contain CMakeLists.txt."
+        )
+        self.assertEqual(
+            memory.get_relevant_examples(
+                {
+                    "build_system": "go",
+                    "sandbox": "debian-riscv64",
+                    "error_message": same_command,
+                }
+            ),
+            [],
+        )
+        ctx = {"build_system": "go", "sandbox": "debian-riscv64"}
+        go_error = (
+            "Build command failed: go build -buildvcs=false . (exit 1) - "
+            "no Go files in /workspace/repos/netbird"
+        )
+        # No actions: skipped; command words alone: no match.
+        self.assertEqual(
+            memory.get_relevant_examples({**ctx, "error_message": go_error}),
+            [],
+        )
+        other_command = (
+            "Build command failed: sh ./configure --prefix=/usr (exit 1) - "
+            "configure: error: NOT FOUND! curses library"
+        )
+        hits = memory.get_relevant_examples(
+            {**ctx, "error_message": other_command}
+        )
+        self.assertEqual([e.id for e in hits], ["ncurses"])
+
+    def test_scout_examples_need_the_same_build_system(self) -> None:
+        memory = self._memory(
+            "scout",
+            [
+                {
+                    "id": "scout-go",
+                    "name": "Go",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "sandbox": "debian-riscv64",
+                    "plan": {"phases": []},
+                }
+            ],
+        )
+        self.assertEqual(
+            memory.get_relevant_examples(
+                {"build_system": "cmake", "sandbox": "debian-riscv64"}
+            ),
+            [],
+        )

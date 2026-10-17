@@ -292,6 +292,19 @@ def _trailing_success_segment(words: list) -> bool:
     return len(words) > 1 and words[0] == "exit" and words[1] == "0"
 
 
+# A first word that is a tool path: /usr/bin/cargo, $HOME/.cargo/bin/rustc,
+# ~/.cargo/bin/rustup. Group 1 is the base name.
+_TOOL_PATH_RE = re.compile(
+    r"^(?:/|\$HOME/|\$\{HOME\}/|~/)(?:[A-Za-z0-9_.+-]+/)*"
+    r"([A-Za-z][A-Za-z0-9_.+-]*)(?=\s|$)"
+)
+
+# Commands that run other commands; see CommandValidator._validate_nested.
+_WRAPPER_TOOLS = frozenset(
+    {"sh", "bash", "env", "timeout", "flock", "xargs", "nice", "nohup"}
+)
+
+
 class CommandValidator:
     """Whitelist validation for command text that runs in the sandbox.
 
@@ -338,8 +351,14 @@ class CommandValidator:
         # ./bootstrap[.sh], ./setup, etc. Some upstreams (openssl, curl)
         # ship driver scripts without extensions so we keep the suffix
         # optional. The pattern accepts any `./<name>` that starts with
-        # a letter, so it also runs a program that the build made.
-        r"^\./[A-Za-z][A-Za-z0-9_.-]*(\s+.*)?$",
+        # a letter, so it also runs a program that the build made. A
+        # script in a subdirectory (`./scripts/config`) passes too, as
+        # `bash ./scripts/config` already does; no path part may start
+        # with a dot, so `..` cannot leave the tree.
+        r"^\./[A-Za-z][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
+        r"(\s+.*)?$",
+        # The same scripts from a build directory: `../configure`.
+        r"^(?:\.\./)+[A-Za-z][A-Za-z0-9_.-]*(\s+.*)?$",
         r"^autoreconf(\s+.*)?$",
         r"^autoconf(\s+.*)?$",
         r"^automake(\s+.*)?$",
@@ -348,7 +367,14 @@ class CommandValidator:
         r"^autoheader(\s+.*)?$",
         r"^meson(\s+.*)?$",
         r"^cargo(\s+.*)?$",
+        r"^rustup(\s+.*)?$",
+        r"^node(\s+.*)?$",
         r"^npm(\s+.*)?$",
+        r"^pnpm(\s+.*)?$",
+        r"^yarn(\s+.*)?$",
+        r"^zig(\s+.*)?$",
+        r"^composer(\s+.*)?$",
+        r"^php[0-9.]*(\s+.*)?$",
         r"^pip(\s+.*)?$",
         r"^python(?:\s+[\s\S]*)?$",
         r"^python3(?:\s+[\s\S]*)?$",
@@ -374,7 +400,7 @@ class CommandValidator:
         r"^gcc\s+",
         r"^g\+\+\s+",
         r"^clang\s+",
-        r"^rustc\s+",
+        r"^rustc(\s+.*)?$",
         # Testing
         r"^ctest\s+",
         r"^pytest\s+",
@@ -389,8 +415,8 @@ class CommandValidator:
         r"^printf\s+",
         r"^tr\s+",
         r"^cut\s+",
-        r"^sort\s+",
-        r"^uniq\s+",
+        r"^sort(\s+.*)?$",
+        r"^uniq(\s+.*)?$",
         # Environment and Shell
         r"^export\s+",
         r"^env\s+",
@@ -620,9 +646,7 @@ class CommandValidator:
             ok, reason = self._validate_nested(segment, _depth)
             if not ok:
                 return False, reason
-            if not any(
-                re.match(pattern, segment) for pattern in self.SAFE_COMMANDS
-            ):
+            if not self._whitelisted(segment):
                 logger.warning(
                     f"Unknown command segment (consider adding to "
                     f"whitelist): {segment[:100]}"
@@ -639,6 +663,23 @@ class CommandValidator:
                 )
 
         return True, "All segments match safe command patterns"
+
+    def _whitelisted(self, segment: str) -> bool:
+        """Return True when a segment matches a SAFE_COMMANDS pattern.
+
+        A tool named by its full path (``/usr/bin/cargo``,
+        ``/root/.cargo/bin/rustc``, ``$HOME/.cargo/bin/rustup``) is
+        checked under its base name, like the shell runs it.
+        """
+        if any(re.match(p, segment) for p in self.SAFE_COMMANDS):
+            return True
+        match = _TOOL_PATH_RE.match(segment)
+        # A wrapper (sh -c, env, timeout, ...) is only safe through the
+        # nested checks, which need its plain name; keep a path blocked.
+        if not match or match.group(1) in _WRAPPER_TOOLS:
+            return False
+        bare = match.group(1) + segment[match.end() :]
+        return any(re.match(p, bare) for p in self.SAFE_COMMANDS)
 
     def _validate_nested(self, segment: str, depth: int) -> Tuple[bool, str]:
         """Validate commands hidden inside one shell segment.

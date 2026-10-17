@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -1928,6 +1929,45 @@ class TestScriptedOpsFileAndSystemBranches(_RepoBackedTestCase):
         self.assertIn("which cargo", calls)
         self.assertEqual(info["gcc"], "Not installed")
         self.assertEqual(info["architecture"], "unknown")
+
+
+class TestTreeWithoutLsLa(unittest.TestCase):
+    """The repo tree has no ls -la block and keeps directories like digits/."""
+
+    def test_no_ls_la_and_a_strict_git_filter(self) -> None:
+        commands = []
+
+        def fake_execute(cmd, **kwargs):
+            commands.append(str(cmd))
+            return _command_result(cmd)
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch(
+            "src.scripted_ops.execute_command", side_effect=fake_execute
+        ):
+            ScriptedOperations(tmp).get_optimized_tree(tmp)
+        self.assertFalse(any(c.startswith("ls -la") for c in commands))
+        find = next(c for c in commands if "maxdepth 2 -type d" in c)
+        self.assertIn("grep -v -e '/\\.git$' -e '/\\.git/'", find)
+
+    def test_tree_entries_have_no_blank_lines_between_them(self) -> None:
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        def fake_execute(cmd, **kwargs):
+            if "maxdepth 2 -type d" in str(cmd):
+                return _command_result(
+                    cmd,
+                    stdout="/workspace\n/workspace/.github\n/workspace/src\n",
+                )
+            return _command_result(cmd)
+
+        with mock.patch(
+            "src.scripted_ops.execute_command", side_effect=fake_execute
+        ):
+            tree = ScriptedOperations(tmp).get_optimized_tree(tmp)
+        self.assertIn("  .github/\n  src/\n", tree)
 
 
 if __name__ == "__main__":

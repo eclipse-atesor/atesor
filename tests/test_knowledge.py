@@ -62,6 +62,44 @@ class TestSystemKnowledgeSummary(unittest.TestCase):
         out = get_system_knowledge_summary(ALPINE_RISCV)
         self.assertIn("libexecinfo was REMOVED", out)
 
+    def test_install_line_is_two_commands_not_a_chain(self) -> None:
+        """Fixer actions never chain, so the knowledge must not teach it."""
+        for profile in (ALPINE_RISCV, DEBIAN_RISCV):
+            with self.subTest(profile=profile.name):
+                out = get_system_knowledge_summary(profile)
+                self.assertNotIn("&&", out)
+                self.assertIn("as a separate command", out)
+
+    def test_go_build_drops_c_only_sections(self) -> None:
+        out = get_system_knowledge_summary(DEBIAN_RISCV, build_system="go")
+        self.assertNotIn("__riscv_xlen", out)
+        self.assertNotIn("x86_intrinsics", out)
+        self.assertIn("memory_ordering", out)
+        self.assertIn("GOTOOLCHAIN", out)
+        self.assertIn("libssl-dev", out)
+
+    def test_c_build_drops_go_notes(self) -> None:
+        out = get_system_knowledge_summary(DEBIAN_RISCV, build_system="cmake")
+        self.assertIn("__riscv_xlen", out)
+        self.assertIn("x86_intrinsics", out)
+        self.assertNotIn("GOTOOLCHAIN", out)
+        self.assertNotIn("go.mod", out)
+
+    def test_unknown_build_system_keeps_the_full_block(self) -> None:
+        self.assertEqual(
+            get_system_knowledge_summary(DEBIAN_RISCV, build_system="unknown"),
+            get_system_knowledge_summary(DEBIAN_RISCV),
+        )
+
+    def test_go_notes_do_not_contradict_each_other(self) -> None:
+        """The builder upgrades Go itself; no note says to escalate."""
+        for profile in (ALPINE_RISCV, DEBIAN_RISCV):
+            with self.subTest(profile=profile.name):
+                out = get_system_knowledge_summary(profile, build_system="go")
+                self.assertNotIn("escalate --", out)
+                self.assertNotIn("MISSING_TOOLS and escalate", out)
+                self.assertIn("builder downloads that Go release", out)
+
     def test_summary_includes_package_map_entries(self) -> None:
         out = get_system_knowledge_summary(ALPINE_RISCV)
         # Spot-check a few canonicals

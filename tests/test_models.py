@@ -401,6 +401,27 @@ class TestCostForUsage(unittest.TestCase):
 
         self.assertEqual(cost_for_usage("gpt-4o", -5, -5), 0.0)
 
+    def test_claude_cache_tokens_use_cache_prices(self) -> None:
+        """A cache read bills 0.1x and a cache write 1.25x of the input."""
+        from src.models import cost_for_usage
+
+        # 1M input tokens: 600K read, 300K written, 100K plain.
+        cost = cost_for_usage(
+            "claude-sonnet-5-5", 1_000_000, 0, 600_000, 300_000
+        )
+        expected = (100_000 * 2.0 + 600_000 * 0.2 + 300_000 * 2.5) / 1e6
+        self.assertAlmostEqual(cost, expected)
+        self.assertAlmostEqual(
+            cost_for_usage("claude-sonnet-5-5", 1_000_000, 0), 2.0
+        )
+
+    def test_other_models_bill_cache_tokens_in_full(self) -> None:
+        from src.models import cost_for_usage
+
+        self.assertAlmostEqual(
+            cost_for_usage("gpt-4o", 1_000_000, 0, 900_000, 0), 2.50
+        )
+
 
 class TestPrintModelInfo(unittest.TestCase):
     """Tests for selected-provider reporting."""

@@ -153,5 +153,38 @@ class TestLoggerSingleton(unittest.TestCase):
         self.assertEqual(inst.calls.maxlen, 1000)
 
 
+class TestFullCallRecord(unittest.TestCase):
+    """The JSONL file keeps the whole prompt and response."""
+
+    def setUp(self) -> None:
+        self.tmpdir = TestLogCall._tmp(self)
+        inst = LLMCallLogger()
+        self.old = (inst.log_file, inst._logs_dir)
+        inst.log_file = os.path.join(self.tmpdir, "agent-call_pkg.log")
+        inst._logs_dir = self.tmpdir
+
+    def tearDown(self) -> None:
+        inst = LLMCallLogger()
+        inst.log_file, inst._logs_dir = self.old
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_jsonl_has_the_full_text(self) -> None:
+        import json
+
+        prompt = "p" * 25000
+        log_llm_call(
+            agent_role="fixer",
+            prompt=prompt,
+            response="r" * 12000,
+            model="m",
+            metadata={"stop_reason": "end_turn"},
+        )
+        with open(os.path.join(self.tmpdir, "agent-call_pkg.jsonl")) as f:
+            record = json.loads(f.readline())
+        self.assertEqual(record["prompt"], prompt)
+        self.assertEqual(len(record["response"]), 12000)
+        self.assertEqual(record["metadata"]["stop_reason"], "end_turn")
+
+
 if __name__ == "__main__":
     unittest.main()

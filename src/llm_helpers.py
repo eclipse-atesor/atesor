@@ -30,10 +30,10 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from .llm_logger import log_llm_call
 from .models import LLM_REQUEST_TIMEOUT
@@ -80,6 +80,10 @@ class LLMCallOutcome:
     input_tokens: int = 0  # billed prompt tokens across ALL attempts
     output_tokens: int = 0  # billed completion tokens across ALL attempts
     cost_usd: float = 0.0  # real cost across ALL attempts (free tier = 0)
+    refused: bool = False  # True when the model declined (safety stop)
+    # The conversation without the system message, ending with the
+    # accepted reply; a caller continues it through ``history``.
+    messages: list = field(default_factory=list)
 
 
 # Response helpers. extract_content and extract_json_block duplicate
@@ -168,6 +172,133 @@ def response_usage(response: Any) -> tuple:
     return (0, 0)
 
 
+def response_cache_usage(response: Any) -> tuple:
+    """Extract ``(cache_read, cache_write)`` prompt tokens of a response.
+
+    Reads ``usage_metadata["input_token_details"]``. Both counts are
+    already inside the input-token total of ``response_usage``.
+
+    Args:
+        response: The message object returned by ``llm.invoke``.
+
+    Returns:
+        Tuple of prompt tokens read from and written to the cache;
+        ``(0, 0)`` when the provider reported none.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return (0, 0)
+    details = usage.get("input_token_details") or {}
+    if not isinstance(details, dict):
+        return (0, 0)
+    read = int(details.get("cache_read") or 0)
+    write = sum(
+        int(details.get(key) or 0)
+        for key in (
+            "cache_creation",
+            "ephemeral_5m_input_tokens",
+            "ephemeral_1h_input_tokens",
+        )
+    )
+    return (read, write)
+
+
+def system_message(blocks: Any, llm: Any) -> list:
+    """Build the system message list for ``llm`` from static text blocks.
+
+    The static instructions (role, rules, schema, banner, knowledge)
+    are the same on every call of a role, so they go first, in the
+    system prompt. For a Claude model each block carries a prompt-cache
+    breakpoint: a later call reads it at 0.1x of the input price. A
+    prefix below the model's minimum cache size is simply not cached.
+
+    Args:
+        blocks: One text, a list of texts, or None.
+        llm: The model the message is for.
+
+    Returns:
+        ``[SystemMessage]``, or ``[]`` when there is no text.
+    """
+    if not blocks:
+        return []
+    if isinstance(blocks, str):
+        blocks = [blocks]
+    texts = [b for b in blocks if b]
+    if not texts:
+        return []
+    if str(_model_id(llm)).startswith("claude"):
+        return [
+            SystemMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                    for text in texts
+                ]
+            )
+        ]
+    return [SystemMessage(content="\n\n".join(texts))]
+
+
+def bind_output_schema(llm: Any, schema: Optional[dict]) -> Any:
+    """Return ``llm`` set to answer in the JSON shape of ``schema``.
+
+    Claude models get the schema as structured output
+    (``output_config.format``; langchain-anthropic converts it), so a
+    reply cannot carry prose, fences or tool-call markup. Other models
+    are returned unchanged and rely on the prompt.
+
+    Args:
+        llm: The chat model.
+        schema: A JSON schema, or None.
+
+    Returns:
+        A model to invoke.
+    """
+    if not schema or not str(_model_id(llm)).startswith("claude"):
+        return llm
+    return llm.bind(response_format=schema)
+
+
+def response_stop_reason(response: Any) -> str:
+    """Return why the provider stopped generating ``response``.
+
+    Reads the Anthropic ``stop_reason`` (``end_turn``, ``max_tokens``,
+    ``refusal``, ...) or the OpenAI-style ``finish_reason`` from
+    ``response_metadata``.
+
+    Args:
+        response: The message object returned by ``llm.invoke``.
+
+    Returns:
+        The stop reason, or an empty string when the provider gave
+        none.
+    """
+    meta = getattr(response, "response_metadata", None)
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("stop_reason") or meta.get("finish_reason") or "")
+
+
+def is_refusal(response: Any) -> bool:
+    """Return True when the provider declined the request.
+
+    A refusal (Anthropic ``stop_reason == "refusal"``, OpenAI-style
+    ``finish_reason == "content_filter"``) comes back as HTTP 200 with
+    little or no text. Sending the same prompt again gets the same
+    answer, so callers must not retry it.
+
+    Args:
+        response: The message object returned by ``llm.invoke``.
+
+    Returns:
+        True for a safety refusal.
+    """
+    return response_stop_reason(response) in ("refusal", "content_filter")
+
+
 def response_cost(llm: Any, response: Any) -> float:
     """Return the real USD cost of ``response`` produced by ``llm``.
 
@@ -182,19 +313,34 @@ def response_cost(llm: Any, response: Any) -> float:
     from .models import cost_for_usage
 
     tokens_in, tokens_out = response_usage(response)
-    return cost_for_usage(_model_id(llm), tokens_in, tokens_out)
+    cache_read, cache_write = response_cache_usage(response)
+    return cost_for_usage(
+        _model_id(llm), tokens_in, tokens_out, cache_read, cache_write
+    )
 
 
 # Validated LLM call with retry and fallback
 
-# Default critique appended to the *next* attempt when the last one fails.
-# Kept short on purpose — the previous prompt is already in the LLM's context
-# on the retry turn, we don't need to repeat it.
+# Critique sent after a rejected reply. The rejected reply itself goes
+# into the conversation as an assistant turn just before it, so the
+# model sees what it wrote and can correct only the named problem.
 _DEFAULT_CRITIQUE = (
-    "Your previous response was rejected. Reason: {reason}\n"
-    "Re-read the original instructions and emit ONLY a valid JSON object "
-    "that conforms to the schema. No prose, no markdown fences, no commentary."
+    "Your previous reply (above) was rejected. Reason: {reason}\n"
+    "Correct that problem and reply with the complete JSON object again. "
+    "No prose, no markdown fences, no commentary."
 )
+
+
+def _assistant_turn(response: Any, raw: str) -> Any:
+    """Return the reply to keep in the conversation for a retry.
+
+    The provider's own message is kept when there is one: a Claude reply
+    holds its signed thinking blocks, which the API accepts back only
+    unchanged.
+    """
+    if isinstance(response, AIMessage):
+        return response
+    return AIMessage(content=raw)
 
 
 def llm_call_with_validation(
@@ -211,6 +357,9 @@ def llm_call_with_validation(
     timeout: int = LLM_WALL_TIMEOUT,
     fallback_llms: Optional[list] = None,
     rotate_on_timeout: bool = False,
+    system_prompt: Any = None,
+    history: Optional[list] = None,
+    output_schema: Optional[dict] = None,
 ) -> LLMCallOutcome:
     """Call ``llm`` with ``prompt``, parse, validate, retry, fall back.
 
@@ -250,6 +399,16 @@ def llm_call_with_validation(
         rotate_on_timeout: When True, a timeout rotates too, and a
             timeout on the last pool member ends the call instead of
             asking the same model again.
+        system_prompt: Static instruction text (one string or a list
+            of blocks) sent as the system message, ahead of ``prompt``;
+            see ``system_message``.
+        history: Earlier turns of this conversation (an earlier
+            outcome's ``messages``), sent between the system message
+            and ``prompt``.
+        output_schema: JSON schema of the reply. For a Claude model the
+            request carries it as structured output (see
+            ``bind_output_schema``), so the reply is JSON of that shape;
+            ``validator`` still checks the content.
 
     Returns:
         An ``LLMCallOutcome`` describing the parsed data and how it was
@@ -258,7 +417,10 @@ def llm_call_with_validation(
     from .models import cost_for_usage
 
     metadata = dict(audit_metadata or {})
-    messages: list = [HumanMessage(content=prompt)]
+    system = system_message(system_prompt, llm)
+    messages: list = (
+        system + list(history or []) + [HumanMessage(content=prompt)]
+    )
     attempts = 0
     last_reason = "no attempts made"
     # Real usage accounting, accumulated across every attempt (failed
@@ -275,23 +437,41 @@ def llm_call_with_validation(
     active_llm = llm_pool[0]
     critique_retries_used = 0
     max_total_attempts = (max_retries + 1) + len(llm_pool)
+    # Set when the last answering model declined the request. A refusal
+    # is final for that model: the same prompt gets the same answer.
+    refused = False
     # Pool indices that already spent their one Retry-After wait, so an
     # upstream that keeps 429ing can't trap us in a sleep loop.
     waited_pool_indices: set = set()
 
     while attempts < max_total_attempts:
         attempts += 1
+        call_llm = bind_output_schema(active_llm, output_schema)
         try:
             response = (
-                invoke_fn(active_llm, messages, timeout=timeout)
+                invoke_fn(call_llm, messages, timeout=timeout)
                 if _accepts_timeout(invoke_fn)
-                else invoke_fn(active_llm, messages)
+                else invoke_fn(call_llm, messages)
             )
         except Exception as exc:
             last_reason = f"LLM invocation raised: {exc}"
             logger.warning(
                 f"[{role}] attempt {attempts} "
                 f"(model={_model_id(active_llm)}): {last_reason}"
+            )
+            # An attempt that raised is in the audit log as well, so the
+            # log counts every request the provider may have billed.
+            log_llm_call(
+                agent_role=role,
+                prompt=_format_messages_for_log(messages),
+                response="",
+                model=_model_id(active_llm),
+                metadata={
+                    **metadata,
+                    "attempt": attempts,
+                    "pool_idx": pool_idx,
+                    "error": str(exc)[:500],
+                },
             )
             # Account-level daily cap ("free-models-per-day"): rotation
             # cannot help — the cap covers EVERY free model on the
@@ -391,8 +571,13 @@ def llm_call_with_validation(
 
         raw = extract_content(getattr(response, "content", response))
         tokens_in, tokens_out = response_usage(response)
+        cache_read, cache_write = response_cache_usage(response)
         call_cost = cost_for_usage(
-            _model_id(active_llm), tokens_in, tokens_out
+            _model_id(active_llm),
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
         )
         total_tokens_in += tokens_in
         total_tokens_out += tokens_out
@@ -405,8 +590,38 @@ def llm_call_with_validation(
             cost_usd=call_cost,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            metadata={**metadata, "attempt": attempts, "pool_idx": pool_idx},
+            metadata={
+                **metadata,
+                "attempt": attempts,
+                "pool_idx": pool_idx,
+                "stop_reason": response_stop_reason(response),
+                "cache_read": cache_read,
+                "cache_write": cache_write,
+            },
         )
+
+        # A safety refusal is not a transient fault: a critique retry
+        # sends the same prompt and gets the same refusal. Only another
+        # model can answer, so rotate when the pool has one, else stop.
+        if is_refusal(response):
+            last_reason = (
+                "the model refused the request "
+                f"(stop_reason={response_stop_reason(response)})"
+            )
+            logger.warning(
+                f"[{role}] attempt {attempts} "
+                f"(model={_model_id(active_llm)}): {last_reason}"
+            )
+            if pool_idx + 1 < len(llm_pool):
+                pool_idx += 1
+                active_llm = llm_pool[pool_idx]
+                logger.warning(
+                    f"[{role}] rotating to fallback model #{pool_idx} "
+                    f"after a refusal: {_model_id(active_llm)}"
+                )
+                continue
+            refused = True
+            break
 
         # Empty / whitespace-only content signals a provider-side issue
         # (soft rate-limit that returned 200 with no body, safety filter,
@@ -456,6 +671,7 @@ def llm_call_with_validation(
                 continue
             if critique_retries_used < max_retries:
                 critique_retries_used += 1
+                messages.append(_assistant_turn(response, raw))
                 messages.append(
                     HumanMessage(
                         content=critique_template.format(reason=last_reason)
@@ -474,12 +690,15 @@ def llm_call_with_validation(
                 input_tokens=total_tokens_in,
                 output_tokens=total_tokens_out,
                 cost_usd=total_cost,
+                messages=messages[len(system) :]
+                + [_assistant_turn(response, raw)],
             )
 
         last_reason = f"schema validation failed: {verdict.reason}"
         logger.warning(f"[{role}] attempt {attempts}: {last_reason}")
         if critique_retries_used < max_retries:
             critique_retries_used += 1
+            messages.append(_assistant_turn(response, raw))
             messages.append(
                 HumanMessage(
                     content=critique_template.format(reason=last_reason)
@@ -503,6 +722,7 @@ def llm_call_with_validation(
                 input_tokens=total_tokens_in,
                 output_tokens=total_tokens_out,
                 cost_usd=total_cost,
+                refused=refused,
             )
         except Exception as exc:
             logger.exception(f"[{role}] fallback factory raised: {exc}")
@@ -515,6 +735,7 @@ def llm_call_with_validation(
         input_tokens=total_tokens_in,
         output_tokens=total_tokens_out,
         cost_usd=total_cost,
+        refused=refused,
     )
 
 
@@ -714,7 +935,8 @@ def _format_messages_for_log(messages: list) -> str:
     """Render the message thread into a single string for the audit log."""
     parts = []
     for i, m in enumerate(messages):
-        content = getattr(m, "content", str(m))
+        # A system message holds a list of text blocks; log their text.
+        content = extract_content(getattr(m, "content", str(m)))
         parts.append(f"--- message {i} ({type(m).__name__}) ---\n{content}")
     return "\n".join(parts)
 
@@ -727,4 +949,9 @@ __all__ = [
     "extract_json_block",
     "response_usage",
     "response_cost",
+    "response_stop_reason",
+    "response_cache_usage",
+    "system_message",
+    "bind_output_schema",
+    "is_refusal",
 ]
