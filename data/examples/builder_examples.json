@@ -2115,6 +2115,29 @@
       "id": "builder-auto-152",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: berty build execution",
+      "tags": [
+        "go",
+        "berty"
+      ],
+      "build_system": "go",
+      "repo_name": "berty",
+      "phases": [
+        {
+          "name": "build",
+          "commands": [
+            "cd tool/tyber/go && go build -buildvcs=false ./cmd/websocket"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from berty.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-153",
+      "source": "auto",
+      "timestamp": "2026-10-19"
     }
   ]
 }

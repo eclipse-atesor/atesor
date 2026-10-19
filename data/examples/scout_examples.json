@@ -2591,6 +2591,35 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: berty (go)",
+      "tags": [
+        "go",
+        "berty"
+      ],
+      "build_system": "go",
+      "repo_name": "berty",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "build",
+            "commands": [
+              "cd tool/tyber/go && go build -buildvcs=false ./cmd/websocket"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful berty build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-150",
+      "source": "auto",
+      "timestamp": "2026-10-19"
     }
   ]
 }

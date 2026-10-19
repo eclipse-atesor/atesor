@@ -1156,6 +1156,41 @@
       "id": "fixer-auto-028",
       "source": "auto",
       "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: Neo-cowsay - cmd/ is a separate Go module; the plan's root-level build…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "Neo-cowsay",
+      "error_pattern": "main\\ module\\ \\(github\\.com/code\\-hex/neo\\-cowsay/v2\\)\\ does\\ not\\ contain\\ package\\ github\\.com/code\\-hex/neo\\-cowsay/v2/cmd/cowthink",
+      "error_context": {
+        "error_message": "main module (github.com/Code-Hex/Neo-cowsay/v2) does not contain package github.com/Code-Hex/Neo-cowsay/v2/cmd/cowthink"
+      },
+      "fix": {
+        "strategy": "cmd/ is a separate Go module; the plan's root-level build cannot see it. Build the cowthink and cowsay binaries from inside cmd/ with explicit -o output files, then run the plan command as-is only if it still fails (it needs a root-level cmd/cowthink package, so we make it resolvable via go.work).",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cd cmd && CGO_ENABLED=0 go build -buildvcs=false -o ../bin/cowthink ./cowthink"
+          },
+          {
+            "type": "command",
+            "command": "cd cmd && CGO_ENABLED=0 go build -buildvcs=false -o ../bin/cowsay ./cowsay"
+          },
+          {
+            "type": "command",
+            "command": "go work init . ./cmd"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from Neo-cowsay.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-029",
+      "source": "auto",
+      "timestamp": "2026-10-19"
     }
   ]
 }
