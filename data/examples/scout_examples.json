@@ -2094,6 +2094,503 @@
       "id": "scout-auto-136",
       "source": "auto",
       "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: pv (autotools)",
+      "tags": [
+        "autotools",
+        "pv"
+      ],
+      "build_system": "autotools",
+      "repo_name": "pv",
+      "trigger": {
+        "build_system": "autotools",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "autotools",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends build-essential autoconf automake libtool pkg-config"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "./configure"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "make -j$(nproc)"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful pv build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-137",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: mabel (go)",
+      "tags": [
+        "go",
+        "mabel"
+      ],
+      "build_system": "go",
+      "repo_name": "mabel",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ."
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful mabel build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-138",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: tget (go)",
+      "tags": [
+        "go",
+        "tget"
+      ],
+      "build_system": "go",
+      "repo_name": "tget",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/tget"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful tget build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-139",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: wiretap (go)",
+      "tags": [
+        "go",
+        "wiretap"
+      ],
+      "build_system": "go",
+      "repo_name": "wiretap",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "cd src && go mod tidy",
+              "go build -buildvcs=false ."
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful wiretap build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-140",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: toru (go)",
+      "tags": [
+        "go",
+        "toru"
+      ],
+      "build_system": "go",
+      "repo_name": "toru",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/toru"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful toru build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-141",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: wgcf (go)",
+      "tags": [
+        "go",
+        "wgcf"
+      ],
+      "build_system": "go",
+      "repo_name": "wgcf",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "go version",
+              "apt-get update",
+              "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git",
+              "go mod download"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "go build -buildvcs=false -o wgcf ."
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful wgcf build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-142",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: iputils (meson)",
+      "tags": [
+        "meson",
+        "iputils"
+      ],
+      "build_system": "meson",
+      "repo_name": "iputils",
+      "trigger": {
+        "build_system": "meson",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "meson",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "meson setup builddir -DSKIP_TESTS=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "ninja -C builddir"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful iputils build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-143",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: iproute2 (make)",
+      "tags": [
+        "make",
+        "iproute2"
+      ],
+      "build_system": "make",
+      "repo_name": "iproute2",
+      "trigger": {
+        "build_system": "make",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "make",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends build-essential make bison flex libmnl-dev libelf-dev libselinux1-dev libatm1-dev libdb-dev"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "sh configure /usr/include && grep -E '^HAVE_' config.mk || true"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "make -j$(nproc)"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful iproute2 build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-144",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: gitleaks (go)",
+      "tags": [
+        "go",
+        "gitleaks"
+      ],
+      "build_system": "go",
+      "repo_name": "gitleaks",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/config -buildvcs=false ./cmd/generate/config"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful gitleaks build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-145",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: nanopb (cmake)",
+      "tags": [
+        "cmake",
+        "nanopb"
+      ],
+      "build_system": "cmake",
+      "repo_name": "nanopb",
+      "trigger": {
+        "build_system": "cmake",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cmake",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends cmake build-essential libprotobuf-dev python3 python3-pip python3-dev meson make"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cd build && make -j$(nproc)"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful nanopb build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-146",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: highway (cmake)",
+      "tags": [
+        "cmake",
+        "highway"
+      ],
+      "build_system": "cmake",
+      "repo_name": "highway",
+      "trigger": {
+        "build_system": "cmake",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cmake",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update",
+              "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential make",
+              "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libatomic1"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHWY_ENABLE_TESTS=OFF -DHWY_ENABLE_EXAMPLES=OFF"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cd build && cmake --build . -j$(nproc) --target hwy hwy_contrib"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful highway build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-147",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: bingrep (cargo)",
+      "tags": [
+        "cargo",
+        "bingrep"
+      ],
+      "build_system": "cargo",
+      "repo_name": "bingrep",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends rust"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cargo build --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful bingrep build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-148",
+      "source": "auto",
+      "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: tzupdate (cargo)",
+      "tags": [
+        "cargo",
+        "tzupdate"
+      ],
+      "build_system": "cargo",
+      "repo_name": "tzupdate",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends rust"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cargo build --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful tzupdate build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-149",
+      "source": "auto",
+      "timestamp": "2026-10-17"
     }
   ]
 }

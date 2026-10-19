@@ -984,6 +984,178 @@
       "id": "fixer-auto-023",
       "source": "auto",
       "timestamp": "2026-10-13"
+    },
+    {
+      "name": "Auto: pv - Install gettext (autopoint and the gette",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "pv",
+      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)\\ \\-\\ aclocal:\\ warning:\\ couldn't\\ open\\ dir",
+      "fix": {
+        "strategy": "Install gettext (autopoint and the gettext m4 macros) and autotools, then regenerate configure with autoreconf -fi, which runs autopoint to copy the gettext macros into m4/",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends autoconf automake libtool gettext autopoint pkg-config make"
+          },
+          {
+            "type": "command",
+            "command": "mkdir -p m4"
+          },
+          {
+            "type": "command",
+            "command": "autoreconf -fi"
+          },
+          {
+            "type": "command",
+            "command": "./configure --prefix=/usr"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from pv.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-024",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: mabel - Upgrade anacrolix/mmsg to latest, which ",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "mabel",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\.\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.com/anacrol",
+      "fix": {
+        "strategy": "Upgrade anacrolix/mmsg to latest, which has riscv64 type definitions, then rebuild",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go get github.com/anacrolix/mmsg@latest"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
+          },
+          {
+            "type": "command",
+            "command": "go build -buildvcs=false ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mabel.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-025",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: tget - Upgrade anacrolix/mmsg to a release that",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "tget",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/tget\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.co",
+      "fix": {
+        "strategy": "Upgrade anacrolix/mmsg to a release that supports linux/riscv64 (uses x/sys/unix types), then rebuild",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go get github.com/anacrolix/mmsg@latest"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
+          },
+          {
+            "type": "command",
+            "command": "go build -buildvcs=false -o tget ./cmd/tget"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tget.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-026",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: toru - Upgrade anacrolix/mmsg to latest version",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "toru",
+      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/toru\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.co",
+      "fix": {
+        "strategy": "Upgrade anacrolix/mmsg to latest version which supports riscv64 (uses x/sys/unix types), then tidy",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go get github.com/anacrolix/mmsg@latest"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
+          },
+          {
+            "type": "command",
+            "command": "go build -buildvcs=false -o toru ./cmd/toru"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from toru.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-027",
+      "source": "auto",
+      "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: iputils - Install libcap development files so meso",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "iputils",
+      "error_pattern": "Build\\ command\\ failed:\\ meson\\ setup\\ builddir\\ \\-DSKIP_TESTS=true\\ \\-DBUILD_MANS=false\\ ",
+      "fix": {
+        "strategy": "Install libcap development files so meson can find the 'cap' library, then reconfigure from a clean build dir",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libcap-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf builddir"
+          },
+          {
+            "type": "command",
+            "command": "meson setup builddir -DSKIP_TESTS=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from iputils.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-028",
+      "source": "auto",
+      "timestamp": "2026-10-14"
     }
   ]
 }
