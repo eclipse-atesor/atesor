@@ -20,7 +20,7 @@
 
 **[Documentation](https://eclipse.dev/atesor/docs/)** · [Website](https://eclipse.dev/atesor/) · [Packages](https://eclipse.dev/atesor/downloads/) · [Mailing list](https://accounts.eclipse.org/mailing-list/atesor-dev)
 
-<sub>Supported by</sub>
+<sub>Recognized by</sub>
 
 <a href="https://10xengineers.ai"><img src=".github/brand/partners/10xengineers.png" alt="10xEngineers" height="64"></a>&nbsp;&nbsp;
 <a href="https://www.eclipse.org"><img src=".github/brand/partners/eclipse-foundation.png" alt="Eclipse Foundation" height="64"></a>&nbsp;&nbsp;
