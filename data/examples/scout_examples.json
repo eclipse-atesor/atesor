@@ -2591,6 +2591,118 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: cargo-unlock (cargo)",
+      "tags": [
+        "cargo",
+        "cargo-unlock"
+      ],
+      "build_system": "cargo",
+      "repo_name": "cargo-unlock",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "rustc --version && cargo --version"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cargo build --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cargo-unlock build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-150",
+      "source": "auto",
+      "timestamp": "2026-10-24"
+    },
+    {
+      "name": "Auto: fd (cargo)",
+      "tags": [
+        "cargo",
+        "fd"
+      ],
+      "build_system": "cargo",
+      "repo_name": "fd",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "rustc --version && cargo --version"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cd /workspace/repos/fd && cargo build --release --locked"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful fd build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-151",
+      "source": "auto",
+      "timestamp": "2026-10-24"
+    },
+    {
+      "name": "Auto: zstd (cmake)",
+      "tags": [
+        "cmake",
+        "zstd"
+      ],
+      "build_system": "cmake",
+      "repo_name": "zstd",
+      "trigger": {
+        "build_system": "cmake",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cmake",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apk update && apk add build-base cmake"
+            ]
+          },
+          {
+            "name": "configure",
+            "commands": [
+              "mkdir -p build",
+              "cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cd build && make -j$(nproc)"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful zstd build.",
+      "sandbox": "alpine-riscv64",
+      "id": "scout-auto-152",
+      "source": "auto",
+      "timestamp": "2026-10-24"
     }
   ]
 }

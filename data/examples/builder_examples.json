@@ -2115,6 +2115,100 @@
       "id": "builder-auto-152",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: cargo-unlock build execution",
+      "tags": [
+        "cargo",
+        "cargo-unlock"
+      ],
+      "build_system": "cargo",
+      "repo_name": "cargo-unlock",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "rustc --version && cargo --version"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cargo build --release"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from cargo-unlock.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-153",
+      "source": "auto",
+      "timestamp": "2026-10-24"
+    },
+    {
+      "name": "Auto: fd build execution",
+      "tags": [
+        "cargo",
+        "fd"
+      ],
+      "build_system": "cargo",
+      "repo_name": "fd",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "rustc --version && cargo --version"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd /workspace/repos/fd && cargo build --release --locked"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from fd.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-154",
+      "source": "auto",
+      "timestamp": "2026-10-24"
+    },
+    {
+      "name": "Auto: zstd build execution",
+      "tags": [
+        "cmake",
+        "zstd"
+      ],
+      "build_system": "cmake",
+      "repo_name": "zstd",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apk update && apk add build-base cmake"
+          ]
+        },
+        {
+          "name": "configure",
+          "commands": [
+            "mkdir -p build",
+            "cd build && cmake .. -DCMAKE_BUILD_TYPE=Release"
+          ]
+        },
+        {
+          "name": "build",
+          "commands": [
+            "cd build && make -j$(nproc)"
+          ]
+        }
+      ],
+      "timeout_recommendation": "600s",
+      "reasoning": "Auto-learned build execution from zstd.",
+      "sandbox": "alpine-riscv64",
+      "id": "builder-auto-155",
+      "source": "auto",
+      "timestamp": "2026-10-24"
     }
   ]
 }
