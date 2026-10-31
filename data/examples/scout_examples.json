@@ -2591,6 +2591,78 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: go-fasttld (go)",
+      "tags": [
+        "go",
+        "go-fasttld"
+      ],
+      "build_system": "go",
+      "repo_name": "go-fasttld",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/cmd -buildvcs=false ./cmd"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful go-fasttld build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-150",
+      "source": "auto",
+      "timestamp": "2026-10-31"
+    },
+    {
+      "name": "Auto: go-fasttld (go)",
+      "tags": [
+        "go",
+        "go-fasttld"
+      ],
+      "build_system": "go",
+      "repo_name": "go-fasttld",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apk update && apk add git go"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/cmd -buildvcs=false ./cmd"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful go-fasttld build.",
+      "sandbox": "alpine-riscv64",
+      "id": "scout-auto-151",
+      "source": "auto",
+      "timestamp": "2026-10-31"
     }
   ]
 }
