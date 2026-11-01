@@ -2591,6 +2591,547 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: byp4xx (go)",
+      "tags": [
+        "go",
+        "byp4xx"
+      ],
+      "build_system": "go",
+      "repo_name": "byp4xx",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod init github.com/lobuhi/byp4xx",
+              "go mod tidy",
+              "go build -buildvcs=false ."
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful byp4xx build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-150",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: cariddi (go)",
+      "tags": [
+        "go",
+        "cariddi"
+      ],
+      "build_system": "go",
+      "repo_name": "cariddi",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/cariddi"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cariddi build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-151",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: certspotter (go)",
+      "tags": [
+        "go",
+        "certspotter"
+      ],
+      "build_system": "go",
+      "repo_name": "certspotter",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/certspotter"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful certspotter build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-152",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: cfspeed (go)",
+      "tags": [
+        "go",
+        "cfspeed"
+      ],
+      "build_system": "go",
+      "repo_name": "cfspeed",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/cfspeed -buildvcs=false ."
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cfspeed build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-153",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: certstream-server-go (go)",
+      "tags": [
+        "go",
+        "certstream-server-go"
+      ],
+      "build_system": "go",
+      "repo_name": "certstream-server-go",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/certstream-server-go"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful certstream-server-go build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-154",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: cheat (go)",
+      "tags": [
+        "go",
+        "cheat"
+      ],
+      "build_system": "go",
+      "repo_name": "cheat",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/cheat"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cheat build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-155",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: codesearch (go)",
+      "tags": [
+        "go",
+        "codesearch"
+      ],
+      "build_system": "go",
+      "repo_name": "codesearch",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/cindex"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful codesearch build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-156",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: cookiemonster (go)",
+      "tags": [
+        "go",
+        "cookiemonster"
+      ],
+      "build_system": "go",
+      "repo_name": "cookiemonster",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/cookiemonster"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cookiemonster build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-157",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: crlfuzz (go)",
+      "tags": [
+        "go",
+        "crlfuzz"
+      ],
+      "build_system": "go",
+      "repo_name": "crlfuzz",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/crlfuzz"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful crlfuzz build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-158",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: cli53 (go)",
+      "tags": [
+        "go",
+        "cli53"
+      ],
+      "build_system": "go",
+      "repo_name": "cli53",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/cli53"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful cli53 build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-159",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: csprecon (go)",
+      "tags": [
+        "go",
+        "csprecon"
+      ],
+      "build_system": "go",
+      "repo_name": "csprecon",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/csprecon"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful csprecon build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-160",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: crtsher (go)",
+      "tags": [
+        "go",
+        "crtsher"
+      ],
+      "build_system": "go",
+      "repo_name": "crtsher",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/crtsher"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful crtsher build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-161",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: csvtk (go)",
+      "tags": [
+        "go",
+        "csvtk"
+      ],
+      "build_system": "go",
+      "repo_name": "csvtk",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "mkdir -p ./.atesor-bin && go build -o ./.atesor-bin/csvtk -buildvcs=false ./csvtk"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful csvtk build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-162",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: subfinder (go)",
+      "tags": [
+        "go",
+        "subfinder"
+      ],
+      "build_system": "go",
+      "repo_name": "subfinder",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/subfinder"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful subfinder build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-163",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: tldfinder (go)",
+      "tags": [
+        "go",
+        "tldfinder"
+      ],
+      "build_system": "go",
+      "repo_name": "tldfinder",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends git"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "go mod tidy",
+              "go build -buildvcs=false ./cmd/tldfinder"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful tldfinder build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-164",
+      "source": "auto",
+      "timestamp": "2026-11-01"
     }
   ]
 }

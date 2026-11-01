@@ -1156,6 +1156,64 @@
       "id": "fixer-auto-028",
       "source": "auto",
       "timestamp": "2026-10-14"
+    },
+    {
+      "name": "Auto: teldrive - Create the missing ui/dist/ directory with a minimal…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "teldrive",
+      "error_pattern": "ui/ui\\.go:\\d+:\\ pattern\\ all:dist:\\ no\\ matching\\ files\\ found",
+      "error_context": {
+        "error_message": "ui/ui.go:7:12: pattern all:dist: no matching files found"
+      },
+      "fix": {
+        "strategy": "Create the missing ui/dist/ directory with a minimal static asset so the //go:embed all:dist directive finds matching files.",
+        "actions": [
+          {
+            "type": "command",
+            "command": "mkdir -p ui/dist"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from teldrive.",
+      "sandbox": "debian-riscv64",
+      "id": "fixer-auto-029",
+      "source": "auto",
+      "timestamp": "2026-11-01"
+    },
+    {
+      "name": "Auto: curl - Install libpsl-dev package to provide LIBPSL_INCLUDE_DIR…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "curl",
+      "error_pattern": "cmake\\ error\\ at\\ \\S+:\\d+\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake:290 (message):"
+      },
+      "fix": {
+        "strategy": "Install libpsl-dev package to provide LIBPSL_INCLUDE_DIR and LIBPSL_LIBRARY",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add libpsl-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from curl.",
+      "sandbox": "alpine-riscv64",
+      "id": "fixer-auto-030",
+      "source": "auto",
+      "timestamp": "2026-11-01"
     }
   ]
 }
