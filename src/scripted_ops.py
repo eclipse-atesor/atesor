@@ -296,6 +296,129 @@ def _go_file_builds_for(filename: str, content: str, arch: str) -> bool:
     return all(_eval_plus_build(e, arch) is not False for e in plus_build)
 
 
+# A Go file is a program only for `package main` on its own line, and
+# only when its build constraints and file-name suffix allow linux/riscv64
+# (see _go_file_builds_for). An `ignore` helper (`go run gen.go`) or a
+# `tinygo` main never builds here (run 80: go-fasttld, gogo).
+_GO_PACKAGE_MAIN_RE = re.compile(r"^\s*package\s+main\s*(//.*)?$", re.M)
+
+
+# Path parts that mark test, example or tool code, not the program.
+_GO_SIDE_PARTS = frozenset(
+    {
+        "bench",
+        "benchmarks",
+        "codegen",
+        "contrib",
+        "demo",
+        "demos",
+        "e2e",
+        "fixtures",
+        "gen",
+        "generate",
+        "generator",
+        "hack",
+        "integration",
+        "mock",
+        "mocks",
+        "sample",
+        "samples",
+        "script",
+        "scripts",
+        "tool",
+        "tools",
+        "vendor",
+    }
+)
+
+
+def _is_go_main_file(path: str) -> bool:
+    """Return True when ``path`` is a Go source of a main package."""
+    if not path.endswith(".go") or path.endswith("_test.go"):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    if not _GO_PACKAGE_MAIN_RE.search(head):
+        return False
+    return _go_file_builds_for(os.path.basename(path), head, "riscv64")
+
+
+def _is_side_go_path(rel_dir: str) -> bool:
+    """Return True for a directory of tests, examples or tools.
+
+    A part matches exactly (``tools``), or starts or ends with ``test``
+    (``testdata``, ``vendortest``), or starts with ``example``.
+    """
+    parts = [p.lower() for p in rel_dir.split("/") if p]
+    return any(
+        p in _GO_SIDE_PARTS
+        or p.startswith(("test", "example"))
+        or p.endswith(("test", "tests"))
+        for p in parts
+    )
+
+
+def _score_go_main(rel_dir: str, repo_basename: str) -> int:
+    """Score a main-package directory; 0 means test or tool code.
+
+    Prefers cmd/<repo>, then cmd/*, then the module root, then others.
+    """
+    d = rel_dir.lower()
+    if d == f"cmd/{repo_basename}":
+        return 10
+    parts = d.split("/") if d else []
+    if any(p == "internal" for p in parts) or _is_side_go_path(d):
+        return 0
+    if parts and parts[-1] == repo_basename:
+        return 9
+    if d.startswith("cmd/"):
+        return 7
+    if not d:
+        return 6
+    if parts[-1] in ("cli", "client"):
+        return 4
+    return 3
+
+
+def _readme_text(repo_path: str) -> str:
+    """Return the top-level README in lower case, or "" if there is none."""
+    for name in ("README.md", "README", "README.rst", "README.txt"):
+        path = os.path.join(repo_path, name)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as handle:
+                    return handle.read(200_000).lower()
+            except OSError:
+                return ""
+    return ""
+
+
+def _go_output_name(
+    module_root: str, main_dir: str, repo_basename: str
+) -> str:
+    """Return an explicit `-o` name, or "" when Go's default is safe.
+
+    Go names the binary after the package directory; that fails when a
+    directory of the same name exists where the build runs (`go build
+    ./cmd`, `go build ./server`).
+    """
+    base = os.path.basename(main_dir) if main_dir else ""
+    if not base:
+        return ""
+    if base in ("cmd", "main", "src", "app", "cli", "client"):
+        return repo_basename
+    if os.path.isdir(os.path.join(module_root, base)):
+        return (
+            f"{repo_basename}-{base}"
+            if base != repo_basename
+            else (f"{base}-bin")
+        )
+    return ""
+
+
 class ScriptedOperations:
     """Deterministic repository operations that never call an LLM.
 
@@ -412,10 +535,12 @@ class ScriptedOperations:
     # Fail-fast git environment: apply on every git subprocess so a
     # missing credential or hanging SSH prompt exits immediately
     # instead of stalling for 60+ seconds. Cheap and safe to always
-    # pass.
+    # pass. The askpass program fails: /bin/echo answered git's prompt
+    # with the prompt text, so a clone without the token still sent a
+    # username and password (ENScan_GO: "Invalid username or token").
     _GIT_FAIL_FAST_ENV: Dict[str, str] = {
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "/bin/echo",
+        "GIT_ASKPASS": "/bin/false",
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
     }
 
@@ -766,13 +891,20 @@ class ScriptedOperations:
                     )
 
     def _init_submodules_if_present(self, container_repo_path: str) -> None:
-        """Run ``git submodule update --init --recursive``, best effort.
+        """Fetch the repo's submodules, best effort.
 
         Runs only when the cloned repo contains a top-level
         ``.gitmodules``; downgrades any failure to a warning. Many Go
         repos (aliyun-cli, upstream vendor mirrors) resolve their
         real Go packages from a submodule, and skipping this step
         surfaces later as ``no required module provides package``.
+
+        A shallow fetch of the pinned commits comes first: the full
+        history of a large submodule (gnulib) did not arrive within the
+        old 300 s limit under QEMU (run 80). When the shallow fetch
+        fails (a server can refuse it), the half-made module repos are
+        removed, because they make every later update fail with
+        ``Unable to find current revision``, and a full fetch follows.
         """
         check = execute_command(
             f"test -f {container_repo_path}/.gitmodules",
@@ -781,12 +913,36 @@ class ScriptedOperations:
         if not check.success:
             return
         logger.info("Repository declares submodules; initializing recursively")
-        result = execute_command(
-            f"cd {container_repo_path} && "
-            f"git submodule update --init --recursive",
+        repo = shlex.quote(container_repo_path)
+        shallow = execute_command(
+            f"cd {repo} && git submodule update --init --recursive "
+            f"--depth 1 --jobs 4",
             use_docker=True,
             extra_env=self._git_env(),
-            timeout=300,
+            timeout=600,
+        )
+        if shallow.success:
+            return
+        logger.warning(
+            "Shallow submodule fetch failed; retrying with full history: "
+            "%s",
+            (shallow.stderr or "")[:200],
+        )
+        execute_command(
+            f"cd {repo} && git submodule deinit --all --force",
+            use_docker=True,
+            timeout=120,
+        )
+        execute_command(
+            f"cd {repo} && rm -rf .git/modules",
+            use_docker=True,
+            timeout=120,
+        )
+        result = execute_command(
+            f"cd {repo} && git submodule update --init --recursive --jobs 4",
+            use_docker=True,
+            extra_env=self._git_env(),
+            timeout=1500,
         )
         if not result.success:
             logger.warning(
@@ -1441,13 +1597,24 @@ class ScriptedOperations:
         For repos without ``go.mod`` (old GOPATH-style), sets
         ``needs_go_init=True``.
 
+        With several ``go.mod`` files, the module that holds the
+        project's programs wins: the root module when it has a main
+        package, never a test, example or tool module. A file counts as
+        a main package only for ``package main`` on its own line and no
+        ``ignore`` build constraint (a ``go:generate`` helper is not a
+        program). ``build_command`` runs in the module directory and
+        names its output when the default name is a directory.
+
         Args:
             repo_path: Path to the repository root.
 
         Returns:
             A dict describing where the main package is located, with
-            the keys ``has_main``, ``main_path``, ``module_dir``,
-            ``build_command``, ``needs_go_init``, ``has_go_mod`` and
+            the keys ``has_main``, ``main_path`` (relative to the
+            module), ``module_dir``, ``build_command`` (to run in the
+            module directory), ``plan_command`` (to run at the repo
+            root: ``cd <module_dir> &&`` and ``-o`` when needed),
+            ``needs_go_init``, ``has_go_mod``, ``has_go_sum`` and
             ``has_go_files``. ``has_go_files`` is True only for a repo
             with ``.go`` files and no ``go.mod``. The key
             ``all_main_paths`` is present only when the chosen module
@@ -1458,8 +1625,10 @@ class ScriptedOperations:
             "main_path": "",
             "module_dir": "",
             "build_command": "go build .",
+            "plan_command": "go build .",
             "needs_go_init": False,
             "has_go_mod": False,
+            "has_go_sum": False,
             "has_go_files": False,
         }
 
@@ -1483,125 +1652,88 @@ class ScriptedOperations:
                 for root, dirs, files in os.walk(repo_path):
                     _prune_vendored_dirs(dirs)
                     for f in files:
-                        if f.endswith(".go"):
-                            try:
-                                with open(
-                                    os.path.join(root, f),
-                                    "r",
-                                    encoding="utf-8",
-                                    errors="ignore",
-                                ) as fh:
-                                    if "package main" in fh.read():
-                                        rel_path = root.replace(
-                                            repo_path, ""
-                                        ).lstrip("/")
-                                        result["has_main"] = True
-                                        result["main_path"] = rel_path or "."
-                                        result["build_command"] = "go build ."
-                                        return result
-                            except Exception:
-                                pass
+                        if _is_go_main_file(os.path.join(root, f)):
+                            rel_path = root.replace(repo_path, "").lstrip("/")
+                            result["has_main"] = True
+                            result["main_path"] = rel_path or "."
+                            result["build_command"] = "go build ."
+                            return result
             return result
 
         result["has_go_mod"] = True
+        module_roots = {root for root, _ in go_mod_files}
+        repo_basename = os.path.basename(repo_path).lower()
 
-        # Prefer the go.mod whose root has main.go, cmd/ or a main
-        # package (see _score_go_subdir); on a tie, keep the first.
-        best_mod = go_mod_files[0]
+        # Main packages per module; a nested module's tree belongs to
+        # that module, not to its parent.
+        mains_by_module = {}
+        for root, module_dir in go_mod_files:
+            mains = []
+            for walk_root, dirs, files in os.walk(root):
+                _prune_vendored_dirs(dirs)
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if os.path.join(walk_root, d) not in module_roots
+                ]
+                if any(
+                    _is_go_main_file(os.path.join(walk_root, f)) for f in files
+                ):
+                    mains.append(walk_root.replace(root, "").lstrip("/"))
+            mains_by_module[(root, module_dir)] = mains
+
+        def score_module(key) -> tuple:
+            _, module_dir = key
+            mains = mains_by_module[key]
+            good = [m for m in mains if _score_go_main(m, repo_basename) > 0]
+            side = _is_side_go_path(module_dir)
+            return (
+                0 if side else 1,
+                1 if good else 0,
+                1 if module_dir == "" and good else 0,
+                max(
+                    (_score_go_main(m, repo_basename) for m in good), default=0
+                ),
+                -module_dir.count("/") - (1 if module_dir else 0),
+            )
+
+        best_mod = max(go_mod_files, key=score_module)
         if len(go_mod_files) > 1:
-            scored = [
-                (root, d, self._score_go_subdir(root, repo_path))
-                for root, d in go_mod_files
-            ]
-            scored.sort(key=lambda x: x[2], reverse=True)
-            best_mod = (scored[0][0], scored[0][1])
             logger.info(
-                f"Chose go.mod at '{scored[0][1]}' (score={scored[0][2]}) "
-                f"out of {len(scored)} candidates"
+                f"Chose go.mod at '{best_mod[1] or '.'}' out of "
+                f"{len(go_mod_files)} candidates"
             )
 
         go_mod_path, module_dir = best_mod
         result["module_dir"] = module_dir
+        result["has_go_sum"] = os.path.isfile(
+            os.path.join(go_mod_path, "go.sum")
+        )
+        prefix = f"cd {module_dir} && " if module_dir else ""
+        result["plan_command"] = f"{prefix}go build ."
 
-        main_files = []
-        for root, dirs, files in os.walk(go_mod_path):
-            _prune_vendored_dirs(dirs)
-            for f in files:
-                if f.endswith(".go"):
-                    filepath = os.path.join(root, f)
-                    try:
-                        with open(
-                            filepath, "r", encoding="utf-8", errors="ignore"
-                        ) as file:
-                            content = file.read()
-                            if "package main" in content:
-                                rel_path = root.replace(
-                                    go_mod_path, ""
-                                ).lstrip("/")
-                                main_files.append(
-                                    {
-                                        "file": f,
-                                        "dir": rel_path,
-                                        "full_path": os.path.join(root, f),
-                                    }
-                                )
-                    except Exception:
-                        pass
-
-        if main_files:
+        main_dirs = mains_by_module[best_mod]
+        if main_dirs:
             result["has_main"] = True
-            # Prefer: cmd/<reponame> > cmd/* without test/example >
-            # root > other.
-            repo_basename = os.path.basename(repo_path).lower()
+            readme = _readme_text(repo_path)
 
-            def score_main(m: dict) -> int:
-                d = m["dir"].lower()
-                # Hard-penalize codegen helpers, contrib utilities,
-                # examples, and tests.
-                if any(
-                    seg in d.split("/")
-                    for seg in (
-                        "gen",
-                        "contrib",
-                        "example",
-                        "examples",
-                        "test",
-                        "tests",
-                        "internal",
-                        "tools",
-                        "scripts",
-                        "hack",
-                        "vendor",
-                    )
-                ):
-                    if not d.startswith(f"cmd/{repo_basename}"):
-                        return 0
-                if d == f"cmd/{repo_basename}":
-                    return 10  # perfect match
-                if (
-                    d.startswith("cmd/")
-                    and "test" not in d
-                    and "example" not in d
-                    and "integration" not in d
-                ):
-                    return 7
-                if not d:
-                    return 6  # root main — prefer over arbitrary subdirs
-                if d.startswith("cmd/"):
-                    return 2
-                if "test" in d or "example" in d or "integration" in d:
-                    return 1
-                return 3
+            def main_rank(rel_dir: str) -> tuple:
+                # Several cmd/* tools tie on score; the README names the
+                # main tool most often (gobusybox: makebb, not gomodbb).
+                base = os.path.basename(rel_dir).lower()
+                return (
+                    _score_go_main(rel_dir, repo_basename),
+                    readme.count(base) if base else 0,
+                )
 
-            main = max(main_files, key=score_main)
-            result["all_main_paths"] = [m["dir"] or "." for m in main_files]
-
-            if main["dir"]:
-                result["main_path"] = main["dir"]
-                result["build_command"] = f"go build ./{main['dir']}"
-            else:
-                result["main_path"] = "."
-                result["build_command"] = "go build ."
+            main_dir = max(sorted(main_dirs), key=main_rank)
+            result["all_main_paths"] = [d or "." for d in main_dirs]
+            result["main_path"] = main_dir or "."
+            target = f"./{main_dir}" if main_dir else "."
+            out = _go_output_name(go_mod_path, main_dir, repo_basename)
+            output = f"-o {out} " if out else ""
+            result["build_command"] = f"go build {target}"
+            result["plan_command"] = f"{prefix}go build {output}{target}"
 
         return result
 

@@ -31,6 +31,7 @@ import time
 from typing import Optional, Tuple
 
 from src import sandbox
+from src.evidence import has_error_line, strip_go_download_noise
 from src.sandbox import SandboxUnavailableError
 from src.state import CommandResult
 from src.target import is_native
@@ -373,9 +374,13 @@ class CommandValidator:
         r"^pnpm(\s+.*)?$",
         r"^yarn(\s+.*)?$",
         r"^zig(\s+.*)?$",
+        # Haskell (hadolint): run 80 blocked `cabal build`.
+        r"^cabal(\s+.*)?$",
+        r"^ghc(\s+.*)?$",
+        r"^stack(\s+.*)?$",
         r"^composer(\s+.*)?$",
         r"^php[0-9.]*(\s+.*)?$",
-        r"^pip(\s+.*)?$",
+        r"^pip3?(\s+.*)?$",
         r"^python(?:\s+[\s\S]*)?$",
         r"^python3(?:\s+[\s\S]*)?$",
         r"^perl(?:\s+[\s\S]*)?$",
@@ -1069,6 +1074,122 @@ class DockerConfig(metaclass=_DockerConfigMeta):
 # Command execution
 
 
+# Added to stderr when the command time limit stopped a command; its
+# start is state.TIME_LIMIT_MARK, which classify_error checks.
+TIME_LIMIT_NOTE = (
+    "[atesor] stopped at the command time limit ({} s). This is not a "
+    "memory kill: the build output so far is kept, so running the same "
+    "command again continues the build."
+)
+
+
+# A command that the host slept through for this long met a dropped ssh
+# session or a stopped container, not a build error (nuclei: exit 255
+# after a night with the laptop lid closed).
+_HOST_SLEEP_SECONDS = 600
+# A stopped container ends an exec at once: exit 137 and no output at
+# all, one to ten seconds into the command (zstd run 5, libwebp run 4).
+_DEAD_CONTAINER_SECONDS = 10
+_CONTAINER_STOPPED_RE = re.compile(r"(?i)\bcontainer \S+ is not running\b")
+
+
+def infrastructure_fault(result: CommandResult) -> str:
+    """Return why a failed command looks like an infrastructure fault.
+
+    The signs come from the exit status and the output, never from the
+    error category: the host slept 10 minutes or more during the
+    command; the host stopped waiting for the sandbox (exit -1, "timed
+    out after"); exit 137 within 10 s with no output at all; exit 255
+    with no error line in the output; or the container engine says that
+    the container does not run. A stop at the command time limit is no
+    fault: the builder resumes that command.
+
+    Returns:
+        A short reason, or "" for an ordinary failure.
+    """
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    slept = float(getattr(result, "slept_seconds", 0.0) or 0.0)
+    if slept >= _HOST_SLEEP_SECONDS:
+        return (
+            f"the host slept for {slept / 60:.0f} minutes during the command"
+        )
+    if result.exit_code == -1 and "timed out after" in stderr:
+        return "the sandbox did not answer before the host-side timeout"
+    if getattr(result, "timed_out", False):
+        return ""
+    if (
+        result.exit_code == 137
+        and not (stdout + stderr).strip()
+        and result.duration_seconds < _DEAD_CONTAINER_SECONDS
+    ):
+        return (
+            "the command was killed at once with no output (the container "
+            "stopped)"
+        )
+    if result.exit_code == 255 and not has_error_line(
+        strip_go_download_noise(stderr + "\n" + stdout)
+    ):
+        return (
+            "exit 255 with no error line (the ssh session or the container "
+            "dropped)"
+        )
+    if _CONTAINER_STOPPED_RE.search(stderr) or sandbox.not_running(
+        result.exit_code, stderr
+    ):
+        return "the container is not running"
+    return ""
+
+
+def ensure_build_container() -> str:
+    """Start the build container when it stopped; never raises.
+
+    The builder's infrastructure guard calls this before it runs a
+    command again. See ``sandbox.ensure_container_running``.
+
+    Returns:
+        ``"running"``, ``"started"``, ``"missing"`` or ``"failed"``, or
+        ``"unknown"`` when the check itself failed (the machine did not
+        answer).
+    """
+    try:
+        return sandbox.ensure_container_running(DockerConfig.CONTAINER_NAME)
+    except Exception as exc:
+        logger.warning(f"Could not check the build container: {exc}")
+        return "unknown"
+
+
+def _kill_in_sandbox(command: str) -> None:
+    """Kill the sandbox processes of a stopped command; never raises.
+
+    Best effort: ``pkill -9 -f`` with the first word of the command, in
+    the build container (docker exec, or ssh and podman exec on
+    native).
+    """
+    try:
+        cmd_token = command.strip().split()[0] if command.strip() else ""
+        if not cmd_token:
+            return
+        kill = sandbox.build_exec_argv(
+            DockerConfig.CONTAINER_NAME, ["pkill", "-9", "-f", cmd_token]
+        )
+        if kill.native:
+            sandbox.run_call(kill, 10)
+        else:
+            subprocess.run(kill.argv, capture_output=True, timeout=10)
+    except Exception as kill_exc:  # pragma: no cover - best effort
+        logger.debug(f"pkill after a stop failed (non-fatal): {kill_exc}")
+
+
+def _slept_seconds(wall_seconds: float, mono_start: float) -> float:
+    """Return the seconds of a run that the host spent asleep.
+
+    The monotonic clock stops while the host sleeps; the wall clock
+    does not. Their difference over one command is the sleep time.
+    """
+    return max(0.0, round(wall_seconds - (time.monotonic() - mono_start), 1))
+
+
 def execute_command(
     command: str,
     cwd: Optional[str] = None,
@@ -1128,6 +1249,8 @@ def execute_command(
         command = " ".join(shlex.quote(str(part)) for part in command)
 
     start_time = time.time()
+    # Wall time minus monotonic time is the time the host slept.
+    mono_start = time.monotonic()
 
     # If we are ALREADY in Docker, we cannot use docker exec normally
     # and we don't need to. The native target reaches its container
@@ -1330,12 +1453,28 @@ def execute_command(
                 )
                 logger.warning(f"stderr: {result.stderr[:200]}")
 
+        # The in-container `timeout --signal=KILL` exits 137 at the
+        # limit, the same code as a memory kill; the run time tells
+        # them apart.
+        limit = max(timeout - 30, 10)
+        timed_out = (
+            use_docker and result.returncode == 137 and duration >= limit - 5
+        )
+        stderr = result.stderr
+        if timed_out:
+            stderr = (stderr or "") + "\n" + TIME_LIMIT_NOTE.format(limit)
+            logger.warning(
+                f"Command stopped at its {limit} s time limit: "
+                f"{command[:60]}"
+            )
         return CommandResult(
             command=command,
             exit_code=result.returncode,
             stdout=result.stdout,
-            stderr=result.stderr,
+            stderr=stderr,
             duration_seconds=duration,
+            timed_out=timed_out,
+            slept_seconds=_slept_seconds(duration, mono_start),
         )
 
     except subprocess.TimeoutExpired:
@@ -1347,29 +1486,7 @@ def execute_command(
         # we never leave a build (QEMU or native) running after a timeout.
         # This is best-effort and never raises.
         if use_docker:
-            try:
-                cmd_token = (
-                    command.strip().split()[0] if command.strip() else ""
-                )
-                if cmd_token:
-                    # The same argv prefix as the command: docker exec,
-                    # or ssh and podman exec on native.
-                    kill = sandbox.build_exec_argv(
-                        DockerConfig.CONTAINER_NAME,
-                        ["pkill", "-9", "-f", cmd_token],
-                    )
-                    if kill.native:
-                        sandbox.run_call(kill, 10)
-                    else:
-                        subprocess.run(
-                            kill.argv,
-                            capture_output=True,
-                            timeout=10,
-                        )
-            except Exception as kill_exc:  # pragma: no cover - best effort
-                logger.debug(
-                    f"post-timeout pkill failed (non-fatal): {kill_exc}"
-                )
+            _kill_in_sandbox(command)
 
         return CommandResult(
             command=command,
@@ -1377,11 +1494,20 @@ def execute_command(
             stdout="",
             stderr=f"Command timed out after {timeout} seconds",
             duration_seconds=duration,
+            slept_seconds=_slept_seconds(duration, mono_start),
         )
 
     except SandboxUnavailableError:
         # The machine is unreachable. @agent_node escalates the run, so
         # the fixer never sees a lost connection as a build error.
+        raise
+
+    except KeyboardInterrupt:
+        # Ctrl-C, or SIGTERM from the batch kill (main.py raises this
+        # for it): the command in the sandbox must not run on (jj and
+        # k9s left their builds and tests running on the board).
+        if use_docker:
+            _kill_in_sandbox(command)
         raise
 
     except Exception as e:
@@ -1393,6 +1519,7 @@ def execute_command(
             stdout="",
             stderr=str(e),
             duration_seconds=duration,
+            slept_seconds=_slept_seconds(duration, mono_start),
         )
 
 

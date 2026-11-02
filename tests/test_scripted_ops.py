@@ -1972,3 +1972,138 @@ class TestTreeWithoutLsLa(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGoDetectionRun80(_RepoBackedTestCase):
+    """Go module and target choices that failed in batch run 80."""
+
+    def test_module_in_subdir_gets_a_cd_in_the_plan_command(self) -> None:
+        _write(self.repo, "v2/go.mod", "module x/v2\n")
+        _write(self.repo, "v2/go.sum", "")
+        _write(self.repo, "v2/cmd/tinygo/main.go", "package main\n")
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["module_dir"], "v2")
+        self.assertEqual(info["build_command"], "go build ./cmd/tinygo")
+        self.assertEqual(
+            info["plan_command"], "cd v2 && go build ./cmd/tinygo"
+        )
+        self.assertTrue(info["has_go_sum"])
+
+    def test_readme_breaks_a_tie_between_cmd_tools(self) -> None:
+        """gobusybox: four cmd/* tools; the README names makebb most."""
+        _write(self.repo, "src/go.mod", "module x\n")
+        _write(self.repo, "src/go.sum", "")
+        for tool in ("gencmddeps", "gomodbb", "makebb"):
+            _write(self.repo, f"src/cmd/{tool}/main.go", "package main\n")
+        _write(
+            self.repo,
+            "README.md",
+            "Run makebb to build. makebb takes commands. See gomodbb.\n",
+        )
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["main_path"], "cmd/makebb")
+        self.assertEqual(
+            info["plan_command"], "cd src && go build ./cmd/makebb"
+        )
+
+    def test_generator_file_is_not_a_program(self) -> None:
+        _write(self.repo, "go.mod", "module x\n")
+        _write(
+            self.repo,
+            "data/gen.go",
+            "//go:build ignore\n\npackage main\n",
+        )
+        _write(self.repo, "cmd/tool/main.go", "package main\n")
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["main_path"], "cmd/tool")
+        self.assertNotIn("data", info["all_main_paths"])
+
+    def test_main_for_another_compiler_is_not_a_program(self) -> None:
+        _write(self.repo, "v2/go.mod", "module x/v2\n")
+        _write(self.repo, "v2/main.go", "package main\n")
+        _write(
+            self.repo,
+            "v2/cmd/tinygo/main.go",
+            "//go:build tinygo\n// +build tinygo\n\npackage main\n",
+        )
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["plan_command"], "cd v2 && go build .")
+
+    def test_package_main_must_be_the_package_clause(self) -> None:
+        _write(self.repo, "go.mod", "module x\n")
+        _write(
+            self.repo, "lib.go", "// see package main in cmd\npackage lib\n"
+        )
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertFalse(info["has_main"])
+
+    def test_root_module_wins_over_a_nested_tool_module(self) -> None:
+        _write(self.repo, "go.mod", "module x\n")
+        _write(self.repo, "cmd/repo/main.go", "package main\n")
+        _write(self.repo, "pkg/gobash/go.mod", "module gobash\n")
+        _write(self.repo, "pkg/gobash/main.go", "package main\n")
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["module_dir"], "")
+        self.assertEqual(info["main_path"], "cmd/repo")
+
+    def test_test_module_loses_to_the_source_module(self) -> None:
+        _write(self.repo, "vendortest/go.mod", "module vt\n")
+        _write(self.repo, "vendortest/cmd/a/main.go", "package main\n")
+        _write(self.repo, "src/go.mod", "module src\n")
+        _write(self.repo, "src/cmd/b/main.go", "package main\n")
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["module_dir"], "src")
+
+    def test_output_name_avoids_a_directory_of_the_same_name(self) -> None:
+        _write(self.repo, "go.mod", "module x\n")
+        _write(self.repo, "cmd/main.go", "package main\n")
+        info = self._ops().find_go_main_package(self.repo)
+        self.assertEqual(info["plan_command"], "go build -o repo ./cmd")
+
+
+class TestShallowSubmodulesFirst:
+    """Submodules: shallow first, then a clean full fetch."""
+
+    def test_shallow_success_needs_no_full_fetch(
+        self, stub_execute_command
+    ) -> None:
+        calls: list = []
+
+        def fake(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("timeout")))
+            return CommandResult(str(cmd), 0, "", "", 0.0)
+
+        stub_execute_command("src.scripted_ops", fake)
+        ScriptedOperations()._init_submodules_if_present("/workspace/repos/w")
+        updates = [c for c, _ in calls if "submodule update" in str(c)]
+        assert len(updates) == 1 and "--depth 1" in updates[0]
+
+    def test_failed_shallow_fetch_cleans_up_then_fetches_fully(
+        self, stub_execute_command
+    ) -> None:
+        calls: list = []
+
+        def fake(cmd, **kwargs):
+            calls.append(str(cmd))
+            failed = "--depth 1" in str(cmd)
+            return CommandResult(str(cmd), 1 if failed else 0, "", "", 0.0)
+
+        stub_execute_command("src.scripted_ops", fake)
+        ScriptedOperations()._init_submodules_if_present("/workspace/repos/w")
+        later = calls[
+            calls.index(next(c for c in calls if "--depth 1" in c)) :
+        ]
+        assert any("deinit --all --force" in c for c in later)
+        assert any("rm -rf .git/modules" in c for c in later)
+        assert "--depth" not in later[-1] and "submodule update" in later[-1]
+
+
+class TestGitPresentsNoFakeCredential(unittest.TestCase):
+    """A clone without the token answers no login prompt."""
+
+    def test_askpass_fails_instead_of_echoing_the_prompt(self) -> None:
+        from src.scripted_ops import ScriptedOperations
+
+        env = ScriptedOperations._GIT_FAIL_FAST_ENV
+        self.assertEqual(env["GIT_ASKPASS"], "/bin/false")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")

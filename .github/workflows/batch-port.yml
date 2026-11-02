@@ -158,6 +158,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -372,6 +373,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -449,6 +451,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -556,6 +559,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -715,6 +719,7 @@ jobs:
           Included files:
           - data/recipe_cache.json
           - data/examples/*.json
+          - data/failures.json (failed fixes, per package and error)
 
           Merge policy used in CI:
           - Recipe cache entries: newest `last_built` wins per

@@ -21,7 +21,8 @@ Layout produced::
     ├── agent_<repo>.log         # main.py per-package debug log (optional)
     ├── optimized/               # accepted variant artifacts
     │                            # (--optimize only, manifest v3)
-    └── <repo>/                  # source tree (excluding .git/, symlinks)
+    └── <repo>/                  # source tree (excluding .git/ and
+                                 # symlinks that leave the tree)
         └── ...
 
 Used by ``main.py --package`` and the CI batch workflow to produce
@@ -33,6 +34,7 @@ import json
 import logging
 import os
 import re
+import stat
 import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -144,6 +146,44 @@ def _safe_zip_path(packages_dir: str, base_name: str) -> str:
         n += 1
 
 
+def _in_tree_link_target(link: str, repo_path: str) -> Optional[str]:
+    """Return the text of a symlink that stays inside ``repo_path``.
+
+    The link text must be relative, and both its plain path and its
+    resolved path must lie inside the repo, so the link resolves to the
+    same file after the zip is unpacked. None for any other link: an
+    absolute or outside target, or a target that does not exist.
+    """
+    try:
+        text = os.readlink(link)
+    except OSError:
+        return None
+    if os.path.isabs(text):
+        return None
+    roots = (os.path.abspath(repo_path), os.path.realpath(repo_path))
+
+    def inside(path: str) -> bool:
+        return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+    plain = os.path.normpath(
+        os.path.join(os.path.abspath(os.path.dirname(link)), text)
+    )
+    resolved = os.path.realpath(link)
+    if not (inside(plain) and inside(resolved)):
+        return None
+    if not os.path.exists(resolved):
+        return None
+    return text
+
+
+def _write_link(zf: zipfile.ZipFile, arcname: str, text: str) -> None:
+    """Add a symlink entry to ``zf``; ``unzip`` restores it as a link."""
+    info = zipfile.ZipInfo(arcname)
+    info.create_system = 3  # Unix: the mode below holds the file type
+    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    zf.writestr(info, text)
+
+
 def _add_repo_tree(
     zf: zipfile.ZipFile,
     repo_path: str,
@@ -153,27 +193,41 @@ def _add_repo_tree(
 
     Excludes:
       * directories named in ``_EXCLUDED_DIRS`` (e.g. ``.git``)
-      * any symlink (file or dir) — security: avoids packaging files
-        outside ``repo_path`` if a malicious tree links to them.
+      * a symlink (file or dir) whose target is outside ``repo_path``,
+        absolute or missing — security: avoids packaging files outside
+        ``repo_path`` if a malicious tree links to them.
 
-    Returns ``(files_added, symlinks_skipped)``.
+    A symlink inside the tree stays a symlink entry: lz4's stable names
+    (``lib/liblz4.so.1``, ``programs/lz4``) are links into its
+    ``cachedObjs/<hash>/`` build directories.
+
+    Returns ``(files_added, symlinks_skipped)``; a kept link counts as
+    added.
     """
     files_added = 0
     symlinks_skipped = 0
 
+    def add_link(full: str) -> None:
+        nonlocal files_added, symlinks_skipped
+        text = _in_tree_link_target(full, repo_path)
+        if text is None:
+            symlinks_skipped += 1
+            logger.warning("Skipping symlink in package: %s", full)
+            return
+        rel_p = os.path.relpath(full, start=repo_path)
+        _write_link(zf, os.path.join(arc_root, rel_p), text)
+        files_added += 1
+
     for root, dirs, files in os.walk(repo_path, followlinks=False):
         # Even with followlinks=False, os.walk lists symlinked
-        # directories in ``dirs``; filter them out to count and log them.
+        # directories in ``dirs``; they are links, never walked.
         kept_dirs = []
         for d in dirs:
             full = os.path.join(root, d)
             if d in _EXCLUDED_DIRS:
                 continue
             if os.path.islink(full):
-                symlinks_skipped += 1
-                logger.warning(
-                    "Skipping symlinked directory in package: %s", full
-                )
+                add_link(full)
                 continue
             kept_dirs.append(d)
         dirs[:] = kept_dirs
@@ -181,8 +235,7 @@ def _add_repo_tree(
         for fname in files:
             abs_p = os.path.join(root, fname)
             if os.path.islink(abs_p):
-                symlinks_skipped += 1
-                logger.warning("Skipping symlink in package: %s", abs_p)
+                add_link(abs_p)
                 continue
             try:
                 rel_p = os.path.relpath(abs_p, start=repo_path)

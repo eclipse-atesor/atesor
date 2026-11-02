@@ -522,3 +522,17 @@ class TestArtifactScannerRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExpectedNamesFromPaths(unittest.TestCase):
+    """A path the analyst names gives its file name."""
+
+    def test_a_relative_path_gives_its_basename(self) -> None:
+        from src.artifact_scanner import _safe_expected_names
+
+        self.assertEqual(
+            _safe_expected_names(
+                ["src/fping", "./bin/tool", "../evil", "/x/y"]
+            ),
+            ["fping", "tool"],
+        )

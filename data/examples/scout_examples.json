@@ -422,7 +422,10 @@
       "repo_name": "age",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/age",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -546,7 +549,10 @@
       "repo_name": "dasel",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/dasel",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -587,7 +593,10 @@
       "repo_name": "anew",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -669,7 +678,10 @@
       "repo_name": "age",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/age",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -710,7 +722,10 @@
       "repo_name": "dasel",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/dasel",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -792,7 +807,10 @@
       "repo_name": "assetfinder",
       "trigger": {
         "build_system": "go",
-        "has_main": false
+        "has_main": false,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -827,7 +845,10 @@
       "repo_name": "assetfinder",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1492,7 +1513,10 @@
       "repo_name": "rescope",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/rescope",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1528,7 +1552,10 @@
       "repo_name": "reverse_ssh",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/server",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1564,7 +1591,10 @@
       "repo_name": "rekor",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/rekor-server",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1602,7 +1632,10 @@
       "repo_name": "termshark",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/termshark",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1679,7 +1712,10 @@
       "repo_name": "diffoci",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/diffoci",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1715,7 +1751,10 @@
       "repo_name": "aliyun-cli",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./main",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1760,7 +1799,10 @@
       "repo_name": "BucketLoot",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/bucketloot",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1796,7 +1838,10 @@
       "repo_name": "cloudflared",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/cloudflared",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1832,7 +1877,10 @@
       "repo_name": "rdap-client",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1868,7 +1916,10 @@
       "repo_name": "regclient",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/regsync",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -1904,7 +1955,10 @@
       "repo_name": "restic",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/restic",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2146,7 +2200,10 @@
       "repo_name": "mabel",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2182,7 +2239,10 @@
       "repo_name": "tget",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/tget",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2218,7 +2278,10 @@
       "repo_name": "wiretap",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "src",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2254,7 +2317,10 @@
       "repo_name": "toru",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/toru",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2290,7 +2356,10 @@
       "repo_name": "wgcf",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": ".",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",
@@ -2412,7 +2481,10 @@
       "repo_name": "gitleaks",
       "trigger": {
         "build_system": "go",
-        "has_main": true
+        "has_main": true,
+        "main_path": "./cmd/generate/config",
+        "module_dir": "",
+        "has_cgo": false
       },
       "plan": {
         "build_system": "go",

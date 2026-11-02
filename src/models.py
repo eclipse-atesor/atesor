@@ -299,6 +299,11 @@ def create_llm(role: AgentRole) -> BaseChatModel:
     return _create_llm_with_model(role, _resolve_model_name(role))
 
 
+# Routers that pick from paid models only; they are never fallbacks.
+_PAID_ROUTERS = ("openrouter/auto",)
+_paid_router_warned = False
+
+
 def _openrouter_fallback_ids() -> List[str]:
     """Return the ordered OpenRouter fallback model ids.
 
@@ -311,7 +316,7 @@ def _openrouter_fallback_ids() -> List[str]:
     NOTE: ``openrouter/auto`` is deliberately NOT in the defaults — the
     Auto Router selects from PAID models only, so on a zero-credit
     account it is a guaranteed 402 that just burns a daily-quota
-    request.
+    request. It is dropped from ``OPENROUTER_FALLBACK_MODELS`` too.
     """
     raw = os.getenv("OPENROUTER_FALLBACK_MODELS", "")
     ids = [m.strip() for m in raw.split(",") if m.strip()]
@@ -328,6 +333,17 @@ def _openrouter_fallback_ids() -> List[str]:
             "qwen/qwen3-next-80b-a3b-instruct:free",
             "nvidia/nemotron-3-super-120b-a12b:free",
         ]
+    paid = [m for m in ids if m in _PAID_ROUTERS]
+    if paid:
+        global _paid_router_warned
+        if not _paid_router_warned:
+            _paid_router_warned = True
+            logger.warning(
+                f"OPENROUTER_FALLBACK_MODELS: dropped {', '.join(paid)}; "
+                "it routes to paid models only (libwebp, brotli: 402 "
+                "errors and $0.19 of optimizer calls)"
+            )
+        ids = [m for m in ids if m not in _PAID_ROUTERS]
     if OPENROUTER_FREE_ROUTER not in ids:
         ids.append(OPENROUTER_FREE_ROUTER)
     return ids

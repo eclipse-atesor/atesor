@@ -252,6 +252,30 @@ def log_llm_call(
     )
 
 
+def log_data_effect(record: Dict[str, Any]) -> None:
+    """Append the run's data-effect record to the call log (JSONL only).
+
+    The record says what the learned data gave this run: the examples
+    the prompts carried, the ones a working fix copied, and whether a
+    cached recipe was the plan. ``.github/scripts/data_effect.py`` reads
+    these records. Never raises.
+
+    Args:
+        record: The fields of the record; ``record`` and ``timestamp``
+            are added.
+    """
+    try:
+        _llm_logger._write_jsonl(
+            {
+                "record": "data_effect",
+                "timestamp": datetime.now().isoformat(),
+                **record,
+            }
+        )
+    except Exception as e:  # never sink a finished port
+        logger.error(f"Failed to write the data-effect record: {e}")
+
+
 def set_llm_log_repo(repo_name: str) -> None:
     """Switch the LLM call log to a per-repo file for batch safety.
 

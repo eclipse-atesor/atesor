@@ -21,6 +21,7 @@ from unittest import mock
 
 from src import target
 from src.sandbox import SandboxUnavailableError
+from src.state import CommandResult
 from src.tools import (
     CommandValidator,
     DockerConfig,
@@ -536,6 +537,35 @@ class TestExecuteCommand(unittest.TestCase):
             self.assertFalse(res.success)
             self.assertIn("Command blocked", res.stderr)
             mrun.assert_not_called()
+
+    def test_exit_137_at_the_time_limit_is_marked(self) -> None:
+        times = [1000.0]
+
+        def clock():
+            # First call is the start; later calls are 1770 s on.
+            value = times[0]
+            times[0] = 2770.0
+            return value
+
+        with (
+            mock.patch("src.tools.subprocess.run") as mrun,
+            mock.patch("src.tools.time.time", side_effect=clock),
+        ):
+            mrun.return_value = SimpleNamespace(
+                returncode=137, stdout="", stderr="Compiling x"
+            )
+            res = execute_command("make", timeout=1800)
+        self.assertTrue(res.timed_out)
+        self.assertIn("command time limit (1770 s)", res.stderr)
+
+    def test_quick_exit_137_is_not_marked(self) -> None:
+        with mock.patch("src.tools.subprocess.run") as mrun:
+            mrun.return_value = SimpleNamespace(
+                returncode=137, stdout="", stderr="Killed"
+            )
+            res = execute_command("make", timeout=1800)
+        self.assertFalse(res.timed_out)
+        self.assertNotIn("time limit", res.stderr)
 
     def test_validate_false_bypasses_validator(self) -> None:
         with mock.patch("src.tools.subprocess.run") as mrun:
@@ -1672,3 +1702,111 @@ class TestWhitelistGaps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHaskellTools(unittest.TestCase):
+    """hadolint needs cabal (blocked in run 80)."""
+
+    def test_cabal_ghc_stack_pass(self) -> None:
+        v = CommandValidator()
+        for cmd in (
+            "cabal update",
+            "cabal build exe:hadolint",
+            "ghc --version",
+            "stack build",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(v.is_safe(cmd)[0])
+
+
+class TestInfrastructureFault(unittest.TestCase):
+    """A dead container or session is told apart from a build error."""
+
+    @staticmethod
+    def _result(code, stdout="", stderr="", seconds=1.0, **extra):
+        return CommandResult("make", code, stdout, stderr, seconds, **extra)
+
+    def test_fault_signs(self) -> None:
+        from src.tools import infrastructure_fault
+
+        faults = [
+            self._result(2, stderr="x", slept_seconds=7200.0),
+            self._result(-1, stderr="Command timed out after 1800 seconds"),
+            self._result(137, seconds=2.0),
+            self._result(
+                255,
+                stderr="go: downloading example.com/a v1.0.0\n",
+            ),
+            self._result(
+                1,
+                stderr="Error response from daemon: container abc is not "
+                "running",
+            ),
+        ]
+        for result in faults:
+            with self.subTest(code=result.exit_code):
+                self.assertTrue(infrastructure_fault(result))
+
+    def test_ordinary_failures(self) -> None:
+        from src.tools import infrastructure_fault
+
+        ordinary = [
+            self._result(2, stderr="a.c:1:1: error: x"),
+            self._result(137, stdout="Killed", seconds=30.0),
+            self._result(137, seconds=1770.0, timed_out=True),
+            self._result(255, stderr="tool: fatal error: bad input"),
+            self._result(137, seconds=60.0),
+        ]
+        for result in ordinary:
+            with self.subTest(code=result.exit_code, out=result.stderr):
+                self.assertEqual(infrastructure_fault(result), "")
+
+    def test_slept_seconds_is_wall_minus_monotonic(self) -> None:
+        from src import tools
+
+        with mock.patch.object(tools.time, "monotonic", return_value=110.0):
+            self.assertEqual(tools._slept_seconds(3610.0, 100.0), 3600.0)
+            self.assertEqual(tools._slept_seconds(5.0, 100.0), 0.0)
+
+    def test_ensure_build_container_never_raises(self) -> None:
+        from src import tools
+
+        with mock.patch.object(
+            tools.sandbox, "ensure_container_running", return_value="started"
+        ):
+            self.assertEqual(tools.ensure_build_container(), "started")
+        with mock.patch.object(
+            tools.sandbox,
+            "ensure_container_running",
+            side_effect=RuntimeError("no answer"),
+        ):
+            self.assertEqual(tools.ensure_build_container(), "unknown")
+
+
+class TestPip3IsAllowed(unittest.TestCase):
+    """pip3 runs like pip (the plan's whitelist item for S5)."""
+
+    def test_pip3_install(self) -> None:
+        ok, reason = CommandValidator().is_safe_single(
+            "pip3 install --break-system-packages meson"
+        )
+        self.assertTrue(ok, reason)
+
+
+class TestInterruptKillsTheSandboxCommand(unittest.TestCase):
+    """Ctrl-C or SIGTERM leaves no build running in the sandbox."""
+
+    def test_the_command_is_killed_and_the_interrupt_goes_on(self) -> None:
+        from src import tools
+
+        with (
+            mock.patch.object(
+                tools.subprocess, "run", side_effect=KeyboardInterrupt
+            ),
+            mock.patch.object(tools, "_kill_in_sandbox") as kill,
+            mock.patch.object(tools, "is_native", return_value=False),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                tools.execute_command("make -j4", validate=False)
+        kill.assert_called_once()
+        self.assertTrue(kill.call_args.args[0].startswith("make"))
