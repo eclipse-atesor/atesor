@@ -306,6 +306,98 @@
       "sandbox": "alpine-riscv64"
     },
     {
+      "id": "fixer-012",
+      "name": "CGO Compilation - Missing GCC (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "gcc"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "C compiler \"gcc\" not found|\\bgcc: (command )?not found",
+      "error_context": {
+        "error_message": "cgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH"
+      },
+      "fix": {
+        "analysis": "The package uses cgo and no C compiler is installed.",
+        "strategy": "Install build-essential (gcc, g++, make)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends build-essential"
+          }
+        ]
+      },
+      "reasoning": "cgo needs a C compiler; build-essential provides gcc on Debian."
+    },
+    {
+      "id": "fixer-013",
+      "name": "SQLite CGO Dependency Missing (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "sqlite"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "sqlite3\\.h: No such file or directory",
+      "error_context": {
+        "error_message": "fatal error: sqlite3.h: No such file or directory"
+      },
+      "fix": {
+        "analysis": "go-sqlite3 compiles SQLite through cgo and needs its headers.",
+        "strategy": "Install the SQLite development package",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libsqlite3-dev"
+          }
+        ]
+      },
+      "reasoning": "Debian ships sqlite3.h in libsqlite3-dev."
+    },
+    {
+      "id": "fixer-014",
+      "name": "Missing CMake (Debian)",
+      "tags": [
+        "cmake",
+        "missing-tool"
+      ],
+      "build_system": "cmake",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "\\bcmake:? (command )?not found",
+      "error_context": {
+        "error_message": "bash: line 1: cmake: command not found"
+      },
+      "fix": {
+        "analysis": "CMake is not installed.",
+        "strategy": "Install cmake",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends cmake"
+          }
+        ]
+      },
+      "reasoning": "Debian's cmake package provides the cmake command."
+    },
+    {
       "name": "Auto: fping - Generate the missing configure script wi",
       "tags": [
         "autotools",
@@ -800,23 +892,1474 @@
       }
     },
     {
-      "id": "fixer-012",
-      "name": "CGO Compilation - Missing GCC (Debian)",
+      "name": "Auto: sbctl - Install pcsc-lite-dev (provides libpcsclite.pc) and…",
       "tags": [
         "go",
-        "cgo",
-        "gcc"
+        "auto-fix"
       ],
       "build_system": "go",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "C compiler \"gcc\" not found|\\bgcc: (command )?not found",
+      "repo_name": "sbctl",
+      "error_pattern": "package\\ libpcsclite\\ was\\ not\\ found\\ in\\ the\\ pkg\\-config\\ search\\ path\\.",
       "error_context": {
-        "error_message": "cgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH"
+        "error_message": "Package libpcsclite was not found in the pkg-config search path."
       },
       "fix": {
-        "analysis": "The package uses cgo and no C compiler is installed.",
-        "strategy": "Install build-essential (gcc, g++, make)",
+        "strategy": "Install pcsc-lite-dev (provides libpcsclite.pc) and pkgconf, which the go-piv cgo build needs",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add pcsc-lite-dev pkgconf build-base"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sbctl.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-029"
+    },
+    {
+      "name": "Auto: vim - Install ncurses-dev so vim configure finds a terminal…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "vim",
+      "error_pattern": "configure:\\ error:\\ not\\ found!",
+      "error_context": {
+        "error_message": "configure: error: NOT FOUND!"
+      },
+      "fix": {
+        "strategy": "Install ncurses-dev so vim configure finds a terminal library",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add ncurses-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from vim.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-030"
+    },
+    {
+      "name": "Auto: dbin - Fix search.go call: pass slice by value and assign the…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "dbin",
+      "error_pattern": "\\./search\\.go:\\d+(?::\\d+)?:\\ cannot\\ use\\ \\&urepoindex\\ \\(value\\ of\\ type\\ \\*\\[\\]binaryentry\\)\\ as\\ \\[\\]binaryentry\\ value\\ in\\ argument\\ to\\ filterbentries",
+      "error_context": {
+        "error_message": "./search.go:53:20: cannot use &uRepoIndex (value of type *[]binaryEntry) as []binaryEntry value in argument to filterBEntries"
+      },
+      "fix": {
+        "strategy": "Fix search.go call: pass slice by value and assign the filtered result back",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i '53s/filterBEntries(&uRepoIndex,/uRepoIndex = filterBEntries(uRepoIndex,/' search.go"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from dbin.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-031"
+    },
+    {
+      "name": "Auto: goop - Bump go directive in go.mod to 1.21 (slices needs go1.21)…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "goop",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ goid",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/phuslu/log@v1.0.75/logger.go:1565:41: undefined: goid"
+      },
+      "fix": {
+        "strategy": "Bump go directive in go.mod to 1.21 (slices needs go1.21) and update phuslu/log to a version with riscv64 goid support",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's/^go 1\\.14$/go 1.21/' go.mod"
+          },
+          {
+            "type": "command",
+            "command": "go get github.com/phuslu/log@latest"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from goop.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-032"
+    },
+    {
+      "name": "Auto: sshportal - Transient proxy.golang.org stream error while downloading…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "sshportal",
+      "error_pattern": "github\\.com/sabban/bastion/pkg/logchannel:\\ github\\.com/sabban/bastion@v0\\.\\d+\\.\\d+\\-\\d+\\-b9d3c9b1f4d3:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/sabban/bastion/pkg/logchannel: github.com/sabban/bastion@v0.0.0-20180110125408-b9d3c9b1f4d3: read \"https://proxy.golang.org/github.com/sabban/bastion/@v/v0.0.0-20180110125408-b9d3c9b1f4d3.z"
+      },
+      "fix": {
+        "strategy": "Transient proxy.golang.org stream error while downloading a module zip; retry the download with GOPROXY fallback to direct",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "env GOPROXY=https://proxy.golang.org,direct go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sshportal.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-033"
+    },
+    {
+      "name": "Auto: sshportal - Define _LARGEFILE64_SOURCE for cgo so musl exposes…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "sshportal",
+      "error_pattern": "sqlite3\\-binding\\.c:\\d+(?::\\d+)?:\\ error:\\ 'pread64'\\ undeclared\\ here\\ \\(not\\ in\\ a\\ function\\);\\ did\\ you\\ mean\\ 'pread'\\?",
+      "error_context": {
+        "error_message": "sqlite3-binding.c:34494:42: error: 'pread64' undeclared here (not in a function); did you mean 'pread'?"
+      },
+      "fix": {
+        "strategy": "Define _LARGEFILE64_SOURCE for cgo so musl exposes pread64/pwrite64/off64_t in the bundled sqlite amalgamation",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "env CGO_CFLAGS=-D_LARGEFILE64_SOURCE go build -buildvcs=false ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sshportal.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-034"
+    },
+    {
+      "name": "Auto: zopfli - Pass CMAKE_POLICY_VERSION_MINIMUM=3.5 to cmake so the old…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "zopfli",
+      "error_pattern": "cmake\\ error\\ at\\ cmakelists\\.txt:\\d+(?::\\d+)?\\ \\(cmake_minimum_required\\):",
+      "error_context": {
+        "error_message": "CMake Error at CMakeLists.txt:1 (cmake_minimum_required):"
+      },
+      "fix": {
+        "strategy": "Pass CMAKE_POLICY_VERSION_MINIMUM=3.5 to cmake so the old cmake_minimum_required(2.8.11) is accepted",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release",
+            "command": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from zopfli.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-035"
+    },
+    {
+      "name": "Auto: flac - Disable manpage installation since pandoc is unavailable…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "flac",
+      "error_pattern": "cmake\\ error\\ at\\ cmakelists\\.txt:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at CMakeLists.txt:333 (message):"
+      },
+      "fix": {
+        "strategy": "Disable manpage installation since pandoc is unavailable, by adding -DINSTALL_MANPAGES=OFF to the configure command",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWITH_OGG=ON -DENABLE_MULTITHREADING=ON -DBUILD_PROGRAMS=ON -DBUILD_CXXLIBS=ON -DBUILD_EXAMPLES=OFF -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF",
+            "command": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWITH_OGG=ON -DENABLE_MULTITHREADING=ON -DBUILD_PROGRAMS=ON -DBUILD_CXXLIBS=ON -DBUILD_EXAMPLES=OFF -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DINSTALL_MANPAGES=OFF"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from flac.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-036"
+    },
+    {
+      "name": "Auto: dav1d - Fix the final ls: with default-library=both, dav1d's…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "dav1d",
+      "error_pattern": "ls:\\ cannot\\ access\\ 'build/src/libdav1d\\.a':\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "ls: cannot access 'build/src/libdav1d.a': No such file or directory"
+      },
+      "fix": {
+        "strategy": "Fix the final ls: with default-library=both, dav1d's static lib is named libdav1d_a? Actually the executable is built under build/tools/dav1d only if enable_tools is true; the ls misses real artifacts. Check the actual output paths with find instead of guessing.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "ls -la build/src/libdav1d.so build/src/libdav1d.a build/tools/dav1d",
+            "command": "find build -maxdepth 3 ( -name libdav1d* -o -name dav1d -type f )"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from dav1d.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-037"
+    },
+    {
+      "name": "Auto: dav1d - Quote the find expression so the shell does not parse…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "dav1d",
+      "error_pattern": "bash:\\ \\-c:\\ line\\ \\d+:\\ syntax\\ error\\ near\\ unexpected\\ token\\ `\\('",
+      "error_context": {
+        "error_message": "bash: -c: line 1: syntax error near unexpected token `('"
+      },
+      "fix": {
+        "strategy": "Quote the find expression so the shell does not parse parentheses and the glob",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "find build -maxdepth 3 ( -name libdav1d* -o -name dav1d -type f )",
+            "command": "find build -maxdepth 3 \\( -name 'libdav1d*' -o -name dav1d -type f \\)"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from dav1d.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-038"
+    },
+    {
+      "name": "Auto: msgpack-c - Fetch c_master into an explicit remote-tracking ref (the…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "msgpack-c",
+      "error_pattern": "fatal:\\ 'origin/c_master'\\ is\\ not\\ a\\ commit\\ and\\ a\\ branch\\ 'c_master'\\ cannot\\ be\\ created\\ from\\ it",
+      "error_context": {
+        "error_message": "fatal: 'origin/c_master' is not a commit and a branch 'c_master' cannot be created from it"
+      },
+      "fix": {
+        "strategy": "Fetch c_master into an explicit remote-tracking ref (the shallow/single-branch clone has no origin/c_master ref), then check it out",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "git fetch origin c_master && git checkout -B c_master origin/c_master",
+            "command": "git fetch origin +refs/heads/c_master:refs/remotes/origin/c_master && git checkout -B c_master origin/c_master"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from msgpack-c.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-039"
+    },
+    {
+      "name": "Auto: eget - The proxy hit a transient network error while `go mod…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "eget",
+      "error_pattern": "github\\.com/stretchr/testify/assert:\\ github\\.com/stretchr/testify@v1\\.\\d+\\.\\d+:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/stretchr/testify/assert: github.com/stretchr/testify@v1.8.0: read \"https://proxy.golang.org/github.com/stretchr/testify/@v/v1.8.0.zip\": stream error: stream ID 23; INTERNAL_ERROR; received "
+      },
+      "fix": {
+        "strategy": "The proxy hit a transient network error while `go mod tidy` fetched a test-only dependency. Replace `go mod tidy` with `go mod download`, which uses the existing go.sum and only fetches what the build needs.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "go mod download"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from eget.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-040"
+    },
+    {
+      "name": "Auto: mabel - Use a local copy of anacrolix/mmsg with riscv64 files…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "mabel",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ mmsghdr",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/anacrolix/mmsg@v1.0.0/socket/mmsghdr_unix.go:11:17: undefined: mmsghdr"
+      },
+      "fix": {
+        "strategy": "Use a local copy of anacrolix/mmsg with riscv64 files (cloned from arm64, same generic syscall ABI) via a go.mod replace",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cp -r /root/go/pkg/mod/github.com/anacrolix/mmsg@v1.0.0 /tmp/mmsg-riscv"
+          },
+          {
+            "type": "command",
+            "command": "chmod -R u+w /tmp/mmsg-riscv"
+          },
+          {
+            "type": "command",
+            "command": "cp /tmp/mmsg-riscv/socket/zsys_linux_arm64.go /tmp/mmsg-riscv/socket/zsys_linux_riscv64.go"
+          },
+          {
+            "type": "command",
+            "command": "cp /tmp/mmsg-riscv/socket/sys_linux_arm64.go /tmp/mmsg-riscv/socket/sys_linux_riscv64.go"
+          },
+          {
+            "type": "command",
+            "command": "sed -i s/arm64/riscv64/g /tmp/mmsg-riscv/socket/zsys_linux_riscv64.go /tmp/mmsg-riscv/socket/sys_linux_riscv64.go"
+          },
+          {
+            "type": "command",
+            "command": "go mod edit -replace github.com/anacrolix/mmsg=/tmp/mmsg-riscv"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mabel.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-041"
+    },
+    {
+      "name": "Auto: mabel - Build with CGO_CFLAGS=-std=gnu11 -Dbool=_Bool workaround…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "mabel",
+      "error_pattern": "\\./utp_types\\.h:\\d+(?::\\d+)?:\\ error:\\ two\\ or\\ more\\ data\\ types\\ in\\ declaration\\ specifiers",
+      "error_context": {
+        "error_message": "./utp_types.h:120:15: error: two or more data types in declaration specifiers"
+      },
+      "fix": {
+        "strategy": "Build with CGO_CFLAGS=-std=gnu11 -Dbool=_Bool workaround: GCC 15 defaults to C23 where bool is a keyword, so force an older C standard for go-libutp",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "env CGO_CFLAGS=-std=gnu99 CGO_CXXFLAGS=-std=gnu++14 go build -buildvcs=false ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mabel.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-042"
+    },
+    {
+      "name": "Auto: gawk - Timestamps made make try to regenerate aclocal.m4 with…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "gawk",
+      "error_pattern": "\\S+:\\ line\\ \\d+:\\ aclocal\\-\\d+\\.\\d+:\\ not\\ found",
+      "error_context": {
+        "error_message": "/workspace/repos/gawk/build-aux/missing: line 81: aclocal-1.16: not found"
+      },
+      "fix": {
+        "strategy": "Timestamps made make try to regenerate aclocal.m4 with aclocal-1.16, which is missing. Touch the generated autotools files in dependency order so make skips regeneration.",
+        "actions": [
+          {
+            "type": "command",
+            "command": "touch aclocal.m4"
+          },
+          {
+            "type": "command",
+            "command": "touch configure configh.in Makefile.in config.status"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from gawk.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-043"
+    },
+    {
+      "name": "Auto: gawk - Install bison (provides yacc) so make can regenerate…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "gawk",
+      "error_pattern": "make\\[\\d+\\]:\\ yacc:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "make[2]: yacc: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Install bison (provides yacc) so make can regenerate awkgram.c",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add bison"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from gawk.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-044"
+    },
+    {
+      "name": "Auto: busybox - Disable the tc applet in .config, since newer kernel…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "busybox",
+      "error_pattern": "networking/tc\\.c:\\d+(?::\\d+)?:\\ error:\\ 'tca_cbq_max'\\ undeclared\\ \\(first\\ use\\ in\\ this\\ function\\);\\ did\\ you\\ mean\\ 'tca_cbs_max'\\?",
+      "error_context": {
+        "error_message": "networking/tc.c:236:27: error: 'TCA_CBQ_MAX' undeclared (first use in this function); did you mean 'TCA_CBS_MAX'?"
+      },
+      "fix": {
+        "strategy": "Disable the tc applet in .config, since newer kernel headers (linux-headers) removed CBQ definitions, then rebuild",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config"
+          },
+          {
+            "type": "command",
+            "command": "sed -i 's/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from busybox.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-045"
+    },
+    {
+      "name": "Auto: htop - Install ncurses-dev (wide-char ncurses headers/libs) so…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "htop",
+      "error_pattern": "configure:\\ error:\\ cannot\\ find\\ required\\ curses/ncurses\\ library",
+      "error_context": {
+        "error_message": "configure: error: cannot find required curses/ncurses library"
+      },
+      "fix": {
+        "strategy": "Install ncurses-dev (wide-char ncurses headers/libs) so configure finds curses",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add ncurses-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from htop.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-046"
+    },
+    {
+      "name": "Auto: e2fsprogs - Reconfigure with NLS disabled so gettext calls don't need…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "e2fsprogs",
+      "error_pattern": "collect2:\\ error:\\ ld\\ returned\\ \\d+\\ exit\\ status",
+      "error_context": {
+        "error_message": "collect2: error: ld returned 1 exit status"
+      },
+      "fix": {
+        "strategy": "Reconfigure with NLS disabled so gettext calls don't need libintl on musl",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "./configure --disable-nls"
+          },
+          {
+            "type": "command",
+            "command": "make distclean"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from e2fsprogs.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-047"
+    },
+    {
+      "name": "Auto: less - Install ncurses-dev so configure finds a terminal library",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "checking\\ for\\ working\\ terminal\\ libraries\\.\\.\\.\\ cannot\\ find\\ terminal\\ libraries\\ \\-\\ configure\\ failed",
+      "error_context": {
+        "error_message": "checking for working terminal libraries... Cannot find terminal libraries - configure failed"
+      },
+      "fix": {
+        "strategy": "Install ncurses-dev so configure finds a terminal library",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add ncurses-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-048"
+    },
+    {
+      "name": "Auto: less - Generate funcs.h with the less Makefile.aut rule…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "make:\\ \\*\\*\\*\\ no\\ rule\\ to\\ make\\ target\\ 'funcs\\.h',\\ needed\\ by\\ 'main\\.o'\\.\\ stop\\.",
+      "error_context": {
+        "error_message": "make: *** No rule to make target 'funcs.h', needed by 'main.o'.  Stop."
+      },
+      "fix": {
+        "strategy": "Generate funcs.h with the less Makefile.aut rule (mkfuncs-like awk/sed step) by removing the stale empty file and running the funcs.h target of Makefile.aut",
+        "actions": [
+          {
+            "type": "command",
+            "command": "rm -f funcs.h"
+          },
+          {
+            "type": "command",
+            "command": "make -f Makefile.aut funcs.h"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-049"
+    },
+    {
+      "name": "Auto: less - Generate lessmsg.inc via Makefile.aut's lessmsg.inc target…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "make:\\ \\*\\*\\*\\ no\\ rule\\ to\\ make\\ target\\ 'lessmsg\\.inc',\\ needed\\ by\\ 'main\\.o'\\.\\ stop\\.",
+      "error_context": {
+        "error_message": "make: *** No rule to make target 'lessmsg.inc', needed by 'main.o'.  Stop."
+      },
+      "fix": {
+        "strategy": "Generate lessmsg.inc via Makefile.aut's lessmsg.inc target (needs only the sources, no nroff), then rebuild via the plan",
+        "actions": [
+          {
+            "type": "command",
+            "command": "make -f Makefile.aut lessmsg.inc"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-050"
+    },
+    {
+      "name": "Auto: grep - Install gperf and other grep bootstrap prerequisites…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "grep",
+      "error_pattern": "bootstrap:\\ error:\\ 'gperf'\\ not\\ found",
+      "error_context": {
+        "error_message": "bootstrap: Error: 'gperf' not found"
+      },
+      "fix": {
+        "strategy": "Install gperf and other grep bootstrap prerequisites (gettext, texinfo, bison, rsync, wget, perl, tar, xz)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add gperf gettext gettext-dev texinfo bison rsync wget perl tar xz git"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from grep.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-051"
+    },
+    {
+      "name": "Auto: grep - Reconfigure with warnings not treated as errors (disable…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "grep",
+      "error_pattern": "dfasearch\\.c:\\d+(?::\\d+)?:\\ error:\\ function\\ might\\ be\\ candidate\\ for\\ attribute\\ 'cold'\\ \\[\\-werror=suggest\\-attribute=cold\\]",
+      "error_context": {
+        "error_message": "dfasearch.c:55:1: error: function might be candidate for attribute 'cold' [-Werror=suggest-attribute=cold]"
+      },
+      "fix": {
+        "strategy": "Reconfigure with warnings not treated as errors (disable gnulib's -Werror via --disable-gcc-warnings) and rebuild",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "./configure --disable-gcc-warnings"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from grep.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-052"
+    },
+    {
+      "name": "Auto: overlayfs-tools - Install attr (provides setfattr) before configuring meson",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "overlayfs-tools",
+      "error_pattern": "meson\\.build:\\d+(?::\\d+)?:\\ error:\\ program\\ 'setfattr'\\ not\\ found\\ or\\ not\\ executable",
+      "error_context": {
+        "error_message": "meson.build:14:21: ERROR: Program 'setfattr' not found or not executable"
+      },
+      "fix": {
+        "strategy": "Install attr (provides setfattr) before configuring meson",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add attr"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from overlayfs-tools.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-053"
+    },
+    {
+      "name": "Auto: nvme-cli - The tests/fuzz mock library uses glibc-only stat64…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "nvme-cli",
+      "error_pattern": "ninja:\\ job\\ failed:\\ gcc\\ \\-itests/fuzz/fuzz\\-device\\.p\\ \\-itests/fuzz\\ \\-i\\.\\./tests/fuzz\\ \\-isrc\\ \\-i\\.\\./src\\ \\-i\\.\\ \\-i\\.\\.\\ \\-iccan\\ \\-i\\.\\./ccan\\ \\-ilibnvme/src\\ \\-i\\.\\./libnvme/src\\ \\-i/usr/include/json\\-c\\ \\-fdiagnostics\\-color=always\\ ",
+      "error_context": {
+        "error_message": "ninja: job failed: gcc -Itests/fuzz/fuzz-device.p -Itests/fuzz -I../tests/fuzz -Isrc -I../src -I. -I.. -Iccan -I../ccan -Ilibnvme/src -I../libnvme/src -I/usr/include/json-c -fdiagnostics-color=always "
+      },
+      "fix": {
+        "strategy": "The tests/fuzz mock library uses glibc-only stat64 interposers that musl lacks; disable the tests in the meson setup so the real nvme binary is built",
+        "actions": [
+          {
+            "type": "command",
+            "command": "rm -rf .build"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "make",
+            "command": "meson setup .build -Dtests=false -Dlibnvme:tests=false && meson compile -C .build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from nvme-cli.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-054"
+    },
+    {
+      "name": "Auto: ttyd - Install libwebsockets and json-c dev packages, then re-run…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "ttyd",
+      "error_pattern": "fatal:\\ no\\ names\\ found,\\ cannot\\ describe\\ anything\\.",
+      "error_context": {
+        "error_message": "fatal: No names found, cannot describe anything."
+      },
+      "fix": {
+        "strategy": "Install libwebsockets and json-c dev packages, then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add libwebsockets-dev json-c-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyd.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-055"
+    },
+    {
+      "name": "Auto: tmux - Install ncurses-dev and bison (missing curses dev library…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "tmux",
+      "error_pattern": "configure:\\ error:\\ \"curses\\ not\\ found\"",
+      "error_context": {
+        "error_message": "configure: error: \"curses not found\""
+      },
+      "fix": {
+        "strategy": "Install ncurses-dev and bison (missing curses dev library and yacc), then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add ncurses-dev bison"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tmux.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-056"
+    },
+    {
+      "name": "Auto: unionfs-fuse - Install fuse3 development headers (needed by…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "unionfs-fuse",
+      "error_pattern": "cmake\\ error\\ at\\ \\S+:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at /usr/share/cmake/Modules/FindPkgConfig.cmake:1093 (message):"
+      },
+      "fix": {
+        "strategy": "Install fuse3 development headers (needed by pkg_check_modules), then rerun configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add fuse3-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from unionfs-fuse.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-057"
+    },
+    {
+      "name": "Auto: tar - Install GNU wget (BusyBox wget lacks --mirror) plus…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "tar",
+      "error_pattern": "bootstrap:\\ could\\ not\\ fetch\\ auxiliary\\ files",
+      "error_context": {
+        "error_message": "bootstrap: could not fetch auxiliary files"
+      },
+      "fix": {
+        "strategy": "Install GNU wget (BusyBox wget lacks --mirror) plus gettext/autopoint, git, and tools bootstrap needs, then rerun bootstrap and configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add wget gettext gettext-dev git bison gperf texinfo rsync xz tar perl"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "sh bootstrap && ./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tar.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-058"
+    },
+    {
+      "name": "Auto: tar - Bootstrap succeeded (the 404 was only a wget robots.txt…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "tar",
+      "error_pattern": "\\d+\\-\\d+\\-\\d+\\ \\d+:\\d+(?::\\d+)?\\ error\\ \\d+:\\ not\\ found\\.",
+      "error_context": {
+        "error_message": "2026-11-02 14:17:04 ERROR 404: Not Found."
+      },
+      "fix": {
+        "strategy": "Bootstrap succeeded (the 404 was only a wget robots.txt warning). Configure refuses to run as root, so set FORCE_UNSAFE_CONFIGURE=1 in the plan command.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "sh bootstrap && ./configure",
+            "command": "sh bootstrap && FORCE_UNSAFE_CONFIGURE=1 ./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tar.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-059"
+    },
+    {
+      "name": "Auto: awk - Install bison, which the makefile needs to generate…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "awk",
+      "error_pattern": "make:\\ bison:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "make: bison: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Install bison, which the makefile needs to generate awkgram.tab.c",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add bison"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from awk.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-060"
+    },
+    {
+      "name": "Auto: openvpn - Switch to the official autotools build: install autotools…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "openvpn",
+      "error_pattern": "cmake\\ error\\ at\\ cmakelists\\.txt:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at CMakeLists.txt:27 (message):"
+      },
+      "fix": {
+        "strategy": "Switch to the official autotools build: install autotools deps, run autoreconf, configure, and replace the cmake plan commands",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add automake autoconf libtool linux-headers lzo-dev libnl3-dev libcap-ng-dev linux-pam-dev"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release",
+            "command": "autoreconf -fi && ./configure"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "cd build && make -j$(nproc)",
+            "command": "make -j$(nproc)"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from openvpn.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-061"
+    },
+    {
+      "name": "Auto: curl - Install libpsl-dev (and libidn2-dev) so curl's cmake finds…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "curl",
+      "error_pattern": "cmake\\ error\\ at\\ \\S+:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake:290 (message):"
+      },
+      "fix": {
+        "strategy": "Install libpsl-dev (and libidn2-dev) so curl's cmake finds Libpsl, then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add libpsl-dev libidn2-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from curl.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-062"
+    },
+    {
+      "name": "Auto: libsodium - Run autogen.sh with sh (it may lack exec bit or fail…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "libsodium",
+      "error_pattern": "bash:\\ line\\ \\d+:\\ \\./configure:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "bash: line 1: ./configure: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Run autogen.sh with sh (it may lack exec bit or fail silently) to generate configure, using autoreconf as the generator",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cd /workspace/repos/libsodium && autoreconf -fi"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from libsodium.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-063"
+    },
+    {
+      "name": "Auto: axel - Install autoconf-archive (provides AX_IS_RELEASE etc.) and…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "axel",
+      "error_pattern": "configure\\.ac:\\d+(?::\\d+)?:\\ error:\\ autoconf\\-archive\\ is\\ required",
+      "error_context": {
+        "error_message": "configure.ac:15: error: autoconf-archive is required"
+      },
+      "fix": {
+        "strategy": "Install autoconf-archive (provides AX_IS_RELEASE etc.) and gettext macros, then rerun configure (plan runs autoreconf)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add autoconf-archive gettext-dev"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "autoreconf -fi && ./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from axel.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-064"
+    },
+    {
+      "name": "Auto: axel - doc/axel.1 is regenerated with txt2man because autoreconf…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "axel",
+      "error_pattern": "\\S+:\\ line\\ \\d+:\\ txt2man:\\ not\\ found",
+      "error_context": {
+        "error_message": "/workspace/repos/axel/build-aux/missing: line 85: txt2man: not found"
+      },
+      "fix": {
+        "strategy": "doc/axel.1 is regenerated with txt2man because autoreconf changed timestamps; touch the generated man page so make considers it up to date (or skip regeneration)",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "make -j$(nproc)",
+            "command": "make -j$(nproc) TXT2MAN=true"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from axel.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-065"
+    },
+    {
+      "name": "Auto: gitdorks_go - Transient proxy.golang.org stream error; retry with direct…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "gitdorks_go",
+      "error_pattern": "golang\\.org/x/sys/unix:\\ golang\\.org/x/sys@v0\\.\\d+\\.\\d+\\-\\d+\\-99c3d69c2c27:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "golang.org/x/sys/unix: golang.org/x/sys@v0.0.0-20220128215802-99c3d69c2c27: read \"https://proxy.golang.org/golang.org/x/sys/@v/v0.0.0-20220128215802-99c3d69c2c27.zip\": stream error: stream ID 43; INTE"
+      },
+      "fix": {
+        "strategy": "Transient proxy.golang.org stream error; retry with direct fallback by setting GOPROXY to proxy with direct fallback in the tidy command",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "env GOPROXY=https://proxy.golang.org,direct go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from gitdorks_go.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-066"
+    },
+    {
+      "name": "Auto: gocryptfs - Transient proxy download error; go.sum already has the…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "gocryptfs",
+      "error_pattern": "github\\.com/hanwen/go\\-fuse/v2/fs:\\ github\\.com/hanwen/go\\-fuse/v2@v2\\.\\d+\\.\\d+\\-\\d+\\.\\d+\\-2d50fff207d7:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/hanwen/go-fuse/v2/fs: github.com/hanwen/go-fuse/v2@v2.12.1-0.20261018182834-2d50fff207d7: read \"https://proxy.golang.org/github.com/hanwen/go-fuse/v2/@v/v2.12.1-0.20261018182834-2d50fff207d"
+      },
+      "fix": {
+        "strategy": "Transient proxy download error; go.sum already has the deps, so skip the network-dependent go mod tidy and download modules with retry via go mod download",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "go mod download"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from gocryptfs.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-067"
+    },
+    {
+      "name": "Auto: godnsbench - Transient proxy.golang.org stream error; retry go mod…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "godnsbench",
+      "error_pattern": "github\\.com/google/pprof/profile:\\ github\\.com/google/pprof@v0\\.\\d+\\.\\d+\\-\\d+\\-a8630aee4ab9:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/google/pprof/profile: github.com/google/pprof@v0.0.0-20240903155634-a8630aee4ab9: read \"https://proxy.golang.org/github.com/google/pprof/@v/v0.0.0-20240903155634-a8630aee4ab9.zip\": stream e"
+      },
+      "fix": {
+        "strategy": "Transient proxy.golang.org stream error; retry go mod tidy, with a fallback proxy list (goproxy.io, then direct)",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "env GOPROXY=https://proxy.golang.org,https://goproxy.io,direct go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from godnsbench.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-068"
+    },
+    {
+      "name": "Auto: iputils - Install libcap development files (static and shared)…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "iputils",
+      "error_pattern": "meson\\.build:\\d+(?::\\d+)?:\\ error:\\ c\\ shared\\ or\\ static\\ library\\ 'cap'\\ not\\ found",
+      "error_context": {
+        "error_message": "meson.build:103:14: ERROR: C shared or static library 'cap' not found"
+      },
+      "fix": {
+        "strategy": "Install libcap development files (static and shared) required by meson.build dependency 'cap'",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk add libcap-dev libcap-static"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from iputils.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-069"
+    },
+    {
+      "name": "Auto: slirp4netns - Install the missing glib, libslirp, libcap and libseccomp…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "slirp4netns",
+      "error_pattern": "configure:\\ error:\\ package\\ requirements\\ \\(glib\\-\\d+\\.\\d+\\)\\ were\\ not\\ met:",
+      "error_context": {
+        "error_message": "configure: error: Package requirements (glib-2.0) were not met:"
+      },
+      "fix": {
+        "strategy": "Install the missing glib, libslirp, libcap and libseccomp dev packages so pkg-config can find them",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add glib-dev libslirp-dev libcap-dev libseccomp-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from slirp4netns.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-070"
+    },
+    {
+      "name": "Auto: wget2 - Install missing bootstrap prerequisites (lzip, plus…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "wget2",
+      "error_pattern": "bootstrap:\\ error:\\ 'lzip'\\ not\\ found",
+      "error_context": {
+        "error_message": "bootstrap: Error: 'lzip' not found"
+      },
+      "fix": {
+        "strategy": "Install missing bootstrap prerequisites (lzip, plus gettext, texinfo, rsync, autopoint, flex, bison etc. needed by wget2 bootstrap) via apk",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apk update"
+          },
+          {
+            "type": "command",
+            "command": "apk add lzip gettext-dev texinfo rsync flex bison gperf git python3 wget tar xz"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from wget2.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-071"
+    },
+    {
+      "name": "Auto: jaeles - Build mattn/go-sqlite3 with musl-compatible LFS defines so…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "jaeles",
+      "error_pattern": "sqlite3\\-binding\\.c:\\d+(?::\\d+)?:\\ error:\\ 'pread64'\\ undeclared\\ here\\ \\(not\\ in\\ a\\ function\\);\\ did\\ you\\ mean\\ 'pread'\\?",
+      "error_context": {
+        "error_message": "sqlite3-binding.c:33886:42: error: 'pread64' undeclared here (not in a function); did you mean 'pread'?"
+      },
+      "fix": {
+        "strategy": "Build mattn/go-sqlite3 with musl-compatible LFS defines so pread64/pwrite64/off64_t are declared",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "env CGO_CFLAGS=-D_LARGEFILE64_SOURCE go build -buildvcs=false ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from jaeles.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-072"
+    },
+    {
+      "name": "Auto: ttyimg - Upgrade boltdb/bolt to the maintained…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "ttyimg",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ maxmapsize",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/boltdb/bolt@v1.3.1/db.go:317:12: undefined: maxMapSize"
+      },
+      "fix": {
+        "strategy": "Upgrade boltdb/bolt to the maintained go.etcd.io/bbolt-compatible fork? Simpler: bump github.com/boltdb/bolt via replace to go.etcd.io/bbolt, which supports riscv64",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go mod edit -replace github.com/boltdb/bolt=go.etcd.io/bbolt@v1.3.11"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyimg.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-073"
+    },
+    {
+      "name": "Auto: ttyimg - Replace the boltdb/bolt import path with go.etcd.io/bbolt…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "ttyimg",
+      "error_pattern": "\\./main\\.go:\\d+(?::\\d+)?:\\ undefined:\\ bolt",
+      "error_context": {
+        "error_message": "./main.go:30:13: undefined: bolt"
+      },
+      "fix": {
+        "strategy": "Replace the boltdb/bolt import path with go.etcd.io/bbolt in the Go sources, matching the go.mod replace; import is then named bbolt and code uses bolt. so alias it",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's#\"github.com/boltdb/bolt\"#bolt \"go.etcd.io/bbolt\"#' main.go images_query.go"
+          },
+          {
+            "type": "command",
+            "command": "go mod edit -dropreplace github.com/boltdb/bolt"
+          },
+          {
+            "type": "command",
+            "command": "go get go.etcd.io/bbolt@v1.3.11"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyimg.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-074"
+    },
+    {
+      "name": "Auto: tldfinder - The proxy.golang.org download failed with a transient…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "tldfinder",
+      "error_pattern": "github\\.com/dsnet/compress/bzip2:\\ github\\.com/dsnet/compress@v0\\.\\d+\\.\\d+\\-\\d+\\.\\d+\\-f66993602bf5:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/dsnet/compress/bzip2: github.com/dsnet/compress@v0.0.2-0.20210315054119-f66993602bf5: read \"https://proxy.golang.org/github.com/dsnet/compress/@v/v0.0.2-0.20210315054119-f66993602bf5.zip\": "
+      },
+      "fix": {
+        "strategy": "The proxy.golang.org download failed with a transient stream INTERNAL_ERROR. Retry go mod tidy with GOFLAGS=-mod=mod and a fallback to direct fetch via GOPROXY.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "GOPROXY=https://proxy.golang.org,direct go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tldfinder.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-075"
+    },
+    {
+      "name": "Auto: code - Remove stale partial config files, then run the…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "code",
+      "error_pattern": "make\\[\\d+\\]:\\ \\*\\*\\*\\ no\\ rule\\ to\\ make\\ target\\ '\\.\\./config\\.h',\\ needed\\ by\\ 'libnet\\-tools\\.a'\\.\\ stop\\.",
+      "error_context": {
+        "error_message": "make[1]: *** No rule to make target '../config.h', needed by 'libnet-tools.a'.  Stop."
+      },
+      "fix": {
+        "strategy": "Remove stale partial config files, then run the interactive configure.sh non-interactively, feeding blank answers (defaults) via process substitution",
+        "actions": [
+          {
+            "type": "command",
+            "command": "rm -f config.h config.make config.new"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'bash ./configure.sh config.in < <(yes \"\")'"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from code.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-076"
+    },
+    {
+      "name": "Auto: code - Install libselinux development headers so HAVE_SELINUX=1…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "code",
+      "error_pattern": "netstat\\.c:\\d+(?::\\d+)?:\\ fatal\\ error:\\ selinux/selinux\\.h:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "netstat.c:102:10: fatal error: selinux/selinux.h: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Install libselinux development headers so HAVE_SELINUX=1 from the generated config builds",
         "actions": [
           {
             "type": "command",
@@ -824,30 +2367,565 @@
           },
           {
             "type": "command",
-            "command": "apt-get install -y --no-install-recommends build-essential"
+            "command": "apt-get install -y --no-install-recommends libselinux1-dev pkg-config"
           }
         ]
       },
-      "reasoning": "cgo needs a C compiler; build-essential provides gcc on Debian."
+      "reasoning": "Auto-learned fix from code.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-077"
     },
     {
-      "id": "fixer-013",
-      "name": "SQLite CGO Dependency Missing (Debian)",
+      "name": "Auto: code - Install BlueZ development headers so the…",
       "tags": [
-        "go",
-        "cgo",
-        "sqlite"
+        "make",
+        "auto-fix"
       ],
-      "build_system": "go",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "sqlite3\\.h: No such file or directory",
+      "build_system": "make",
+      "repo_name": "code",
+      "error_pattern": "netstat\\.c:\\d+(?::\\d+)?:\\ fatal\\ error:\\ bluetooth/bluetooth\\.h:\\ no\\ such\\ file\\ or\\ directory",
       "error_context": {
-        "error_message": "fatal error: sqlite3.h: No such file or directory"
+        "error_message": "netstat.c:106:10: fatal error: bluetooth/bluetooth.h: No such file or directory"
       },
       "fix": {
-        "analysis": "go-sqlite3 compiles SQLite through cgo and needs its headers.",
-        "strategy": "Install the SQLite development package",
+        "strategy": "Install BlueZ development headers so the HAVE_AFBLUETOOTH=1 config builds",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libbluetooth-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from code.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-078"
+    },
+    {
+      "name": "Auto: udon - The go mod tidy failure is a transient proxy download…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "udon",
+      "error_pattern": "github\\.com/stretchr/testify/assert:\\ github\\.com/stretchr/testify@v1\\.\\d+\\.\\d+:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/stretchr/testify/assert: github.com/stretchr/testify@v1.7.1: read \"https://proxy.golang.org/github.com/stretchr/testify/@v/v1.7.1.zip\": stream error: stream ID 109; INTERNAL_ERROR; received"
+      },
+      "fix": {
+        "strategy": "The go mod tidy failure is a transient proxy download error for test-only deps. go.sum is already committed, so replace go mod tidy with go mod download and retry the fetch.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "go mod download"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from udon.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-079"
+    },
+    {
+      "name": "Auto: whoiswatcher - Retry go mod tidy with a retry-friendly setup: download…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "whoiswatcher",
+      "error_pattern": "github\\.com/likexian/gokit/assert:\\ github\\.com/likexian/gokit@v0\\.\\d+\\.\\d+:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/likexian/gokit/assert: github.com/likexian/gokit@v0.25.15: read \"https://proxy.golang.org/github.com/likexian/gokit/@v/v0.25.15.zip\": stream error: stream ID 11; INTERNAL_ERROR; received fr"
+      },
+      "fix": {
+        "strategy": "Retry go mod tidy with a retry-friendly setup: download modules first with GOFLAGS=-mod=mod and fallback to direct GOPROXY to bypass the flaky proxy stream error",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "env GOPROXY=https://proxy.golang.org,direct GOFLAGS=-mod=mod go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from whoiswatcher.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-080"
+    },
+    {
+      "name": "Auto: axel - Install autoconf-archive and gettext so autoreconf finds…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "axel",
+      "error_pattern": "configure\\.ac:\\d+(?::\\d+)?:\\ error:\\ autoconf\\-archive\\ is\\ required",
+      "error_context": {
+        "error_message": "configure.ac:15: error: autoconf-archive is required"
+      },
+      "fix": {
+        "strategy": "Install autoconf-archive and gettext so autoreconf finds AX_IS_RELEASE and the gettext macros",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends autoconf-archive gettext autopoint"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "autoreconf -fi && ./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from axel.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-081"
+    },
+    {
+      "name": "Auto: axel - Install txt2man so the doc/axel.1 rule can run instead of…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "axel",
+      "error_pattern": "\\S+:\\ line\\ \\d+:\\ txt2man:\\ command\\ not\\ found",
+      "error_context": {
+        "error_message": "/workspace/repos/axel/build-aux/missing: line 85: txt2man: command not found"
+      },
+      "fix": {
+        "strategy": "Install txt2man so the doc/axel.1 rule can run instead of the missing wrapper",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends txt2man"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from axel.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-082"
+    },
+    {
+      "name": "Auto: Picocrypt-CLI - Run go build from the picocrypt module directory by fixing…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "Picocrypt-CLI",
+      "error_pattern": "go:\\ cannot\\ find\\ main\\ module,\\ but\\ found\\ \\.git/config\\ in\\ \\S+",
+      "error_context": {
+        "error_message": "go: cannot find main module, but found .git/config in /workspace/repos/Picocrypt-CLI"
+      },
+      "fix": {
+        "strategy": "Run go build from the picocrypt module directory by fixing the plan command, and output the binary to a file path",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "cd picocrypt && go build -buildvcs=false -o picocrypt-bin ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from Picocrypt-CLI.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-083"
+    },
+    {
+      "name": "Auto: pv - Install gettext and autopoint so the AM_GNU_GETTEXT macros…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "pv",
+      "error_pattern": "configure\\.ac:\\d+(?::\\d+)?:\\ error:\\ possibly\\ undefined\\ macro:\\ am_gnu_gettext_version",
+      "error_context": {
+        "error_message": "configure.ac:19: error: possibly undefined macro: AM_GNU_GETTEXT_VERSION"
+      },
+      "fix": {
+        "strategy": "Install gettext and autopoint so the AM_GNU_GETTEXT macros exist, create m4 dir, then regenerate configure with autoreconf -fi",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends gettext autopoint autoconf automake libtool pkg-config make"
+          },
+          {
+            "type": "command",
+            "command": "mkdir -p m4"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "autoreconf -fi && ./configure --prefix=/usr"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from pv.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-084"
+    },
+    {
+      "name": "Auto: sunbeam - Network flake on proxy.golang.org during go mod tidy; go…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "sunbeam",
+      "error_pattern": "github\\.com/charmbracelet/x/exp/golden:\\ github\\.com/charmbracelet/x/exp/golden@v0\\.\\d+\\.\\d+\\-\\d+\\-61de596daa2b:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/charmbracelet/x/exp/golden: github.com/charmbracelet/x/exp/golden@v0.0.0-20240815200342-61de596daa2b: read \"https://proxy.golang.org/github.com/charmbracelet/x/exp/golden/@v/v0.0.0-20240815"
+      },
+      "fix": {
+        "strategy": "Network flake on proxy.golang.org during go mod tidy; go mod tidy is unneeded since go.sum exists. Replace it with go mod download, which skips test-only deps of dependencies.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "go mod download"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sunbeam.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-085"
+    },
+    {
+      "name": "Auto: sunbeam - Retry go mod download with GOPROXY falling back to direct…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "sunbeam",
+      "error_pattern": "go:\\ github\\.com/saracen/walker@v0\\.\\d+\\.\\d+:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "go: github.com/saracen/walker@v0.1.3: read \"https://proxy.golang.org/github.com/saracen/walker/@v/v0.1.3.zip\": stream error: stream ID 117; INTERNAL_ERROR; received from peer"
+      },
+      "fix": {
+        "strategy": "Retry go mod download with GOPROXY falling back to direct, and GOFLAGS=-mod=mod disabled; use alternate proxy to avoid flaky HTTP/2 stream errors",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod download",
+            "command": "env GOPROXY=https://goproxy.io,https://proxy.golang.org,direct GODEBUG=http2client=0 go mod download"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sunbeam.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-086"
+    },
+    {
+      "name": "Auto: termshark - Transient proxy.golang.org stream error; retry with go mod…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "termshark",
+      "error_pattern": "github\\.com/antchfx/xpath:\\ github\\.com/antchfx/xpath@v1\\.\\d+\\.\\d+:\\ read\\ \"https:\\S+\":\\ stream\\ error:\\ stream\\ id\\ \\d+;\\ internal_error;\\ received\\ from\\ peer",
+      "error_context": {
+        "error_message": "github.com/antchfx/xpath: github.com/antchfx/xpath@v1.1.11: read \"https://proxy.golang.org/github.com/antchfx/xpath/@v/v1.1.11.zip\": stream error: stream ID 941; INTERNAL_ERROR; received from peer"
+      },
+      "fix": {
+        "strategy": "Transient proxy.golang.org stream error; retry with go mod download first via a plan command that retries and falls back to direct proxy",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go mod tidy",
+            "command": "go env -w GOPROXY=https://proxy.golang.org,direct && go mod download && go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from termshark.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-087"
+    },
+    {
+      "name": "Auto: tget - Upgrade the indirect mmsg dependency to its latest…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "tget",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ mmsghdr",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/anacrolix/mmsg@v1.0.0/socket/mmsghdr_unix.go:11:17: undefined: mmsghdr"
+      },
+      "fix": {
+        "strategy": "Upgrade the indirect mmsg dependency to its latest release, which may include riscv64 support",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go get github.com/anacrolix/mmsg@latest"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from tget.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-088"
+    },
+    {
+      "name": "Auto: ttyimg - Upgrade boltdb/bolt to the maintained fork…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "ttyimg",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ maxmapsize",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/boltdb/bolt@v1.3.1/db.go:317:12: undefined: maxMapSize"
+      },
+      "fix": {
+        "strategy": "Upgrade boltdb/bolt to the maintained fork go.etcd.io/bbolt via replace directive, which supports riscv64",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go mod edit -replace github.com/boltdb/bolt=go.etcd.io/bbolt@v1.3.11"
+          },
+          {
+            "type": "command",
+            "command": "go mod tidy"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyimg.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-089"
+    },
+    {
+      "name": "Auto: ttyimg - The replace to go.etcd.io/bbolt makes the package name…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "ttyimg",
+      "error_pattern": "\\./main\\.go:\\d+(?::\\d+)?:\\ undefined:\\ bolt",
+      "error_context": {
+        "error_message": "./main.go:30:13: undefined: bolt"
+      },
+      "fix": {
+        "strategy": "The replace to go.etcd.io/bbolt makes the package name 'bbolt', so the source's 'bolt' identifier is undefined. Alias the import as bolt in both files.",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's#^\\(\\s*\\)\"github.com/boltdb/bolt\"#\\1bolt \"github.com/boltdb/bolt\"#' main.go images_query.go"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyimg.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-090"
+    },
+    {
+      "name": "Auto: dbin - Fix search.go to pass the slice by value and assign the…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "dbin",
+      "error_pattern": "\\./search\\.go:\\d+(?::\\d+)?:\\ cannot\\ use\\ \\&urepoindex\\ \\(value\\ of\\ type\\ \\*\\[\\]binaryentry\\)\\ as\\ \\[\\]binaryentry\\ value\\ in\\ argument\\ to\\ filterbentries",
+      "error_context": {
+        "error_message": "./search.go:53:20: cannot use &uRepoIndex (value of type *[]binaryEntry) as []binaryEntry value in argument to filterBEntries"
+      },
+      "fix": {
+        "strategy": "Fix search.go to pass the slice by value and assign the filtered result back",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i '53s/filterBEntries(&uRepoIndex,/uRepoIndex = filterBEntries(uRepoIndex,/' search.go"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from dbin.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-091"
+    },
+    {
+      "name": "Auto: sbctl - Install libpcsclite-dev and pkg-config required by cgo in…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "sbctl",
+      "error_pattern": "package\\ libpcsclite\\ was\\ not\\ found\\ in\\ the\\ pkg\\-config\\ search\\ path\\.",
+      "error_context": {
+        "error_message": "Package libpcsclite was not found in the pkg-config search path."
+      },
+      "fix": {
+        "strategy": "Install libpcsclite-dev and pkg-config required by cgo in piv-go",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpcsclite-dev pkg-config build-essential"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from sbctl.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-092"
+    },
+    {
+      "name": "Auto: spray - Add the missing go.sum entries with go mod download (go…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "spray",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ missing\\ go\\.sum\\ entry\\ for\\ module\\ providing\\ package\\ github\\.com/wasilibs/go\\-re2\\ \\(imported\\ by\\ github\\.com/chainreactors/fingers/fingers\\);\\ to\\ add:",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/chainreactors/fingers@v1.2.2-0.20260703124922-b8ac7e00cf68/fingers/regexp_re2.go:6:8: missing go.sum entry for module providing package github.com/wasilibs/go-re2 (imported"
+      },
+      "fix": {
+        "strategy": "Add the missing go.sum entries with go mod download (go mod tidy previously failed), then build",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "go mod download github.com/wasilibs/go-re2 && go build -buildvcs=false ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from spray.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-093"
+    },
+    {
+      "name": "Auto: iputils - Install libcap-dev so meson can find the 'cap' library…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "iputils",
+      "error_pattern": "meson\\.build:\\d+(?::\\d+)?:\\ error:\\ c\\ shared\\ or\\ static\\ library\\ 'cap'\\ not\\ found",
+      "error_context": {
+        "error_message": "meson.build:103:14: ERROR: C shared or static library 'cap' not found"
+      },
+      "fix": {
+        "strategy": "Install libcap-dev so meson can find the 'cap' library, then reconfigure from a clean build dir",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libcap-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf builddir"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from iputils.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-094"
+    },
+    {
+      "name": "Auto: iproute2 - Remove stale dcb object files and binary so they are…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "iproute2",
+      "error_pattern": "collect2:\\ error:\\ ld\\ returned\\ \\d+\\ exit\\ status",
+      "error_context": {
+        "error_message": "collect2: error: ld returned 1 exit status"
+      },
+      "fix": {
+        "strategy": "Remove stale dcb object files and binary so they are rebuilt cleanly, then the plan's make rebuilds dcb",
+        "actions": [
+          {
+            "type": "command",
+            "command": "make -C dcb clean"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from iproute2.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-095"
+    },
+    {
+      "name": "Auto: vnstat - Install libsqlite3-dev (required by configure); first…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "vnstat",
+      "error_pattern": "configure:\\ error:\\ could\\ not\\ find\\ required\\ sqlite3\\ library",
+      "error_context": {
+        "error_message": "configure: error: could not find required sqlite3 library"
+      },
+      "fix": {
+        "strategy": "Install libsqlite3-dev (required by configure); first refresh the package index",
         "actions": [
           {
             "type": "command",
@@ -859,25 +2937,26 @@
           }
         ]
       },
-      "reasoning": "Debian ships sqlite3.h in libsqlite3-dev."
+      "reasoning": "Auto-learned fix from vnstat.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-096"
     },
     {
-      "id": "fixer-014",
-      "name": "Missing CMake (Debian)",
+      "name": "Auto: slirp4netns - Install glib, libslirp, libcap and libseccomp dev packages…",
       "tags": [
-        "cmake",
-        "missing-tool"
+        "autotools",
+        "auto-fix"
       ],
-      "build_system": "cmake",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "\\bcmake:? (command )?not found",
+      "build_system": "autotools",
+      "repo_name": "slirp4netns",
+      "error_pattern": "configure:\\ error:\\ package\\ requirements\\ \\(glib\\-\\d+\\.\\d+\\)\\ were\\ not\\ met:",
       "error_context": {
-        "error_message": "bash: line 1: cmake: command not found"
+        "error_message": "configure: error: Package requirements (glib-2.0) were not met:"
       },
       "fix": {
-        "analysis": "CMake is not installed.",
-        "strategy": "Install cmake",
+        "strategy": "Install glib, libslirp, libcap and libseccomp dev packages required by configure.ac",
         "actions": [
           {
             "type": "command",
@@ -885,11 +2964,806 @@
           },
           {
             "type": "command",
-            "command": "apt-get install -y --no-install-recommends cmake"
+            "command": "apt-get install -y --no-install-recommends libglib2.0-dev libslirp-dev libcap-dev libseccomp-dev"
           }
         ]
       },
-      "reasoning": "Debian's cmake package provides the cmake command."
+      "reasoning": "Auto-learned fix from slirp4netns.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-097"
+    },
+    {
+      "name": "Auto: arc - Run go build from the v1 module directory, where go mod…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "arc",
+      "error_pattern": "go:\\ cannot\\ find\\ main\\ module,\\ but\\ found\\ \\.git/config\\ in\\ \\S+",
+      "error_context": {
+        "error_message": "go: cannot find main module, but found .git/config in /workspace/repos/arc"
+      },
+      "fix": {
+        "strategy": "Run go build from the v1 module directory, where go mod tidy was run, and where cmd/arc likely lives",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false ./cmd/arc",
+            "command": "cd v1 && go build -buildvcs=false -o arc ./cmd/arc"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from arc.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-098"
+    },
+    {
+      "name": "Auto: re2 - The repo's re2 source is newer than the distro's older…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "re2",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ error:\\ no\\ matching\\ function\\ for\\ call\\ to\\ 'absl::debian7::mutexlock::mutexlock\\(absl::debian7::mutex\\&\\)'",
+      "error_context": {
+        "error_message": "/workspace/repos/re2/re2/dfa.cc:1018:27: error: no matching function for call to 'absl::debian7::MutexLock::MutexLock(absl::debian7::Mutex&)'"
+      },
+      "fix": {
+        "strategy": "The repo's re2 source is newer than the distro's older Debian abseil: it uses reference-taking MutexLock and lock_shared. Check out an older re2 release tag compatible with the installed abseil, then rebuild.",
+        "actions": [
+          {
+            "type": "command",
+            "command": "git fetch --tags --depth=1 origin tag 2023-11-01"
+          },
+          {
+            "type": "command",
+            "command": "git checkout -f 2023-11-01"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from re2.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-099"
+    },
+    {
+      "name": "Auto: re2 - Fix 1 removed the build dir, so the configure step…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "re2",
+      "error_pattern": "bash:\\ line\\ \\d+:\\ cd:\\ build:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "bash: line 1: cd: build: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Fix 1 removed the build dir, so the configure step (already marked completed) is not re-run. Re-run configure and build in a single plan command.",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "cd build && make -j$(nproc)",
+            "command": "mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from re2.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-100"
+    },
+    {
+      "name": "Auto: busybox - Disable the tc applet, which fails on newer kernel headers…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "busybox",
+      "error_pattern": "networking/tc\\.c:\\d+(?::\\d+)?:\\ error:\\ 'tca_cbq_max'\\ undeclared\\ \\(first\\ use\\ in\\ this\\ function\\);\\ did\\ you\\ mean\\ 'tca_cbs_max'\\?",
+      "error_context": {
+        "error_message": "networking/tc.c:236:27: error: 'TCA_CBQ_MAX' undeclared (first use in this function); did you mean 'TCA_CBS_MAX'?"
+      },
+      "fix": {
+        "strategy": "Disable the tc applet, which fails on newer kernel headers that dropped the CBQ definitions",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config"
+          },
+          {
+            "type": "command",
+            "command": "sed -i 's/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from busybox.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-101"
+    },
+    {
+      "name": "Auto: less - Install the ncurses development package so configure can…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "checking\\ for\\ working\\ terminal\\ libraries\\.\\.\\.\\ cannot\\ find\\ terminal\\ libraries\\ \\-\\ configure\\ failed",
+      "error_context": {
+        "error_message": "checking for working terminal libraries... Cannot find terminal libraries - configure failed"
+      },
+      "fix": {
+        "strategy": "Install the ncurses development package so configure can find a terminal library, then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libncurses-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-102"
+    },
+    {
+      "name": "Auto: less - Generate the missing funcs.h, help.c and related files…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "less",
+      "error_pattern": "make:\\ \\*\\*\\*\\ no\\ rule\\ to\\ make\\ target\\ 'funcs\\.h',\\ needed\\ by\\ 'main\\.o'\\.\\ stop\\.",
+      "error_context": {
+        "error_message": "make: *** No rule to make target 'funcs.h', needed by 'main.o'.  Stop."
+      },
+      "fix": {
+        "strategy": "Generate the missing funcs.h, help.c and related files with Makefile.aut, then re-run the build",
+        "actions": [
+          {
+            "type": "command",
+            "command": "make -f Makefile.aut all"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from less.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-103"
+    },
+    {
+      "name": "Auto: grep - Install the bootstrap prerequisites (gettext, autopoint…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "grep",
+      "error_pattern": "bootstrap:\\ error:\\ 'autopoint'\\ not\\ found",
+      "error_context": {
+        "error_message": "bootstrap: Error: 'autopoint' not found"
+      },
+      "fix": {
+        "strategy": "Install the bootstrap prerequisites (gettext, autopoint, gperf, texinfo, wget, texlive-base for texi2pdf, rsync, git, perl), then run bootstrap before configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends gettext autopoint gperf texinfo texlive-base wget rsync git perl m4 make autoconf automake libtool pkg-config ca-certificates xz-utils"
+          },
+          {
+            "type": "plan_command",
+            "replaces": "./configure",
+            "command": "sh bootstrap && ./configure"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from grep.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-104"
+    },
+    {
+      "name": "Auto: overlayfs-tools - Install attr (provides setfattr) and sudo, then…",
+      "tags": [
+        "meson",
+        "auto-fix"
+      ],
+      "build_system": "meson",
+      "repo_name": "overlayfs-tools",
+      "error_pattern": "meson\\.build:\\d+(?::\\d+)?:\\ error:\\ program\\ 'setfattr'\\ not\\ found\\ or\\ not\\ executable",
+      "error_context": {
+        "error_message": "meson.build:14:21: ERROR: Program 'setfattr' not found or not executable"
+      },
+      "fix": {
+        "strategy": "Install attr (provides setfattr) and sudo, then reconfigure from a clean build dir",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends attr sudo tar"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from overlayfs-tools.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-105"
+    },
+    {
+      "name": "Auto: ttyd - Install missing libwebsockets and json-c dev packages…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "ttyd",
+      "error_pattern": "fatal:\\ no\\ names\\ found,\\ cannot\\ describe\\ anything\\.",
+      "error_context": {
+        "error_message": "fatal: No names found, cannot describe anything."
+      },
+      "fix": {
+        "strategy": "Install missing libwebsockets and json-c dev packages (needed by CMakeLists), after updating the apt index",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libwebsockets-dev libjson-c-dev pkg-config"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from ttyd.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-106"
+    },
+    {
+      "name": "Auto: unionfs-fuse - Install libfuse3 development package and refresh the…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "unionfs-fuse",
+      "error_pattern": "cmake\\ error\\ at\\ \\S+:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at /usr/share/cmake-3.31/Modules/FindPkgConfig.cmake:645 (message):"
+      },
+      "fix": {
+        "strategy": "Install libfuse3 development package and refresh the package index first",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libfuse3-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from unionfs-fuse.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-107"
+    },
+    {
+      "name": "Auto: mabel - Vendor anacrolix/mmsg locally, add riscv64 syscall/type…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "mabel",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ mmsghdr",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/anacrolix/mmsg@v1.0.0/socket/mmsghdr_unix.go:11:17: undefined: mmsghdr"
+      },
+      "fix": {
+        "strategy": "Vendor anacrolix/mmsg locally, add riscv64 syscall/type files copied from arm64 (same asm-generic ABI), and use a go.mod replace",
+        "actions": [
+          {
+            "type": "command",
+            "command": "cp -r /root/go/pkg/mod/github.com/anacrolix/mmsg@v1.0.0 mmsg-riscv64"
+          },
+          {
+            "type": "command",
+            "command": "chmod -R u+w mmsg-riscv64"
+          },
+          {
+            "type": "command",
+            "command": "cp mmsg-riscv64/socket/sys_linux_arm64.go mmsg-riscv64/socket/sys_linux_riscv64.go"
+          },
+          {
+            "type": "command",
+            "command": "cp mmsg-riscv64/socket/zsys_linux_arm64.go mmsg-riscv64/socket/zsys_linux_riscv64.go"
+          },
+          {
+            "type": "command",
+            "command": "sed -i -E '/^\\/\\/go:build/ s/arm64/(arm64 || riscv64)/; /^\\/\\/ \\+build/ s/arm64/arm64 riscv64/' mmsg-riscv64/socket/sys_linux_riscv64.go mmsg-riscv64/socket/zsys_linux_riscv64.go mmsg-riscv64/socket/cmsghdr_linux_64bit.go mmsg-riscv64/socket/iovec_64bit.go mmsg-riscv64/socket/msghdr_linux_64bit.go mmsg-riscv64/socket/mmsghdr_unix.go mmsg-riscv64/socket/sys_linux.go mmsg-riscv64/socket/rawconn_mmsg.go mmsg-riscv64/socket/rawconn_nommsg.go mmsg-riscv64/socket/sys_stub.go mmsg-riscv64/socket/msghdr_stub.go mmsg-riscv64/socket/mmsghdr_stub.go mmsg-riscv64/socket/cmsghdr_stub.go mmsg-riscv64/socket/iovec_stub.go"
+          },
+          {
+            "type": "command",
+            "command": "go mod edit -replace github.com/anacrolix/mmsg=./mmsg-riscv64"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mabel.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-108"
+    },
+    {
+      "name": "Auto: nanopb - Install protobuf-compiler (provides protoc) which the…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "nanopb",
+      "error_pattern": "filenotfounderror:\\ \\[errno\\ \\d+\\]\\ no\\ such\\ file\\ or\\ directory:\\ 'protoc'",
+      "error_context": {
+        "error_message": "FileNotFoundError: [Errno 2] No such file or directory: 'protoc'"
+      },
+      "fix": {
+        "strategy": "Install protobuf-compiler (provides protoc) which the nanopb generator invokes during build",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends protobuf-compiler python3-protobuf"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from nanopb.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-109"
+    },
+    {
+      "name": "Auto: awk - Install bison (needed to generate awkgram.tab.c) before…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "awk",
+      "error_pattern": "make:\\ bison:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "make: bison: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Install bison (needed to generate awkgram.tab.c) before rebuilding",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends bison"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from awk.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-110"
+    },
+    {
+      "name": "Auto: openvpn - Install libnl-genl-3-dev (and libnl-3-dev) so configure…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "openvpn",
+      "error_pattern": "configure:\\ error:\\ libnl\\-genl\\-\\d+\\.\\d+\\ package\\ not\\ found\\ or\\ too\\ old\\.\\ is\\ the\\ development\\ package\\ and\\ pkg\\-config\\ \\(\\S+\\)\\ installed\\?\\ must\\ be\\ version\\ \\d+\\.\\d+\\.\\d+\\ or\\ newer\\ for\\ dco",
+      "error_context": {
+        "error_message": "configure: error: libnl-genl-3.0 package not found or too old. Is the development package and pkg-config (/usr/bin/pkg-config) installed? Must be version 3.4.0 or newer for DCO"
+      },
+      "fix": {
+        "strategy": "Install libnl-genl-3-dev (and libnl-3-dev) so configure finds libnl-genl-3.0 for DCO",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libnl-3-dev libnl-genl-3-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from openvpn.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-111"
+    },
+    {
+      "name": "Auto: openvpn - Install libcap-ng-dev so configure finds libcap-ng via…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "openvpn",
+      "error_pattern": "configure:\\ error:\\ libcap\\-ng\\ package\\ not\\ found\\.\\ is\\ the\\ development\\ package\\ and\\ pkg\\-config\\ \\(\\S+\\)\\ installed\\?",
+      "error_context": {
+        "error_message": "configure: error: libcap-ng package not found. Is the development package and pkg-config (/usr/bin/pkg-config) installed?"
+      },
+      "fix": {
+        "strategy": "Install libcap-ng-dev so configure finds libcap-ng via pkg-config (update index first)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libcap-ng-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from openvpn.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-112"
+    },
+    {
+      "name": "Auto: openvpn - Install libpam0g-dev so configure finds PAM…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "openvpn",
+      "error_pattern": "configure:\\ error:\\ libpam\\ required\\ but\\ missing",
+      "error_context": {
+        "error_message": "configure: error: libpam required but missing"
+      },
+      "fix": {
+        "strategy": "Install libpam0g-dev so configure finds PAM headers/library (update index first)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpam0g-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from openvpn.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-113"
+    },
+    {
+      "name": "Auto: curl - Install libpsl-dev (and the other optional curl deps the…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "curl",
+      "error_pattern": "cmake\\ error\\ at\\ \\S+:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at /usr/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake:233 (message):"
+      },
+      "fix": {
+        "strategy": "Install libpsl-dev (and the other optional curl deps the configure step looked for) so CMake finds Libpsl, then re-run configure",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libpsl-dev libidn2-dev libzstd-dev libbrotli-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from curl.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-114"
+    },
+    {
+      "name": "Auto: libsodium - Run autogen.sh did not produce configure (likely failed…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "libsodium",
+      "error_pattern": "bash:\\ line\\ \\d+:\\ \\./configure:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "bash: line 1: ./configure: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Run autogen.sh did not produce configure (likely failed silently or wasn't run); regenerate configure with autoreconf -fi, then the plan's ./configure runs",
+        "actions": [
+          {
+            "type": "command",
+            "command": "autoreconf -fi"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from libsodium.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-115"
+    },
+    {
+      "name": "Auto: mbedtls - Install python3-jinja2 (needed by…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "mbedtls",
+      "error_pattern": "modulenotfounderror:\\ no\\ module\\ named\\ 'jinja2'",
+      "error_context": {
+        "error_message": "ModuleNotFoundError: No module named 'jinja2'"
+      },
+      "fix": {
+        "strategy": "Install python3-jinja2 (needed by generate_driver_wrappers.py) and also jsonschema, which tf-psa-crypto scripts may need",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends python3-jinja2 python3-jsonschema"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from mbedtls.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-116"
+    },
+    {
+      "name": "Auto: libavif - Install libyuv-dev so CMake finds libyuv via pkg-config…",
+      "tags": [
+        "cmake",
+        "auto-fix"
+      ],
+      "build_system": "cmake",
+      "repo_name": "libavif",
+      "error_pattern": "cmake\\ error\\ at\\ cmakelists\\.txt:\\d+(?::\\d+)?\\ \\(message\\):",
+      "error_context": {
+        "error_message": "CMake Error at CMakeLists.txt:203 (message):"
+      },
+      "fix": {
+        "strategy": "Install libyuv-dev so CMake finds libyuv via pkg-config, then reconfigure from a clean build dir",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libyuv-dev"
+          },
+          {
+            "type": "command",
+            "command": "rm -rf build"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from libavif.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-117"
+    },
+    {
+      "name": "Auto: vim - Install the ncurses development package so vim's configure…",
+      "tags": [
+        "autotools",
+        "auto-fix"
+      ],
+      "build_system": "autotools",
+      "repo_name": "vim",
+      "error_pattern": "configure:\\ error:\\ not\\ found!",
+      "error_context": {
+        "error_message": "configure: error: NOT FOUND!"
+      },
+      "fix": {
+        "strategy": "Install the ncurses development package so vim's configure can find a terminal library",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libncurses-dev"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from vim.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-118"
+    },
+    {
+      "name": "Auto: wiretap - Run go build in the src/ module directory, where go.mod…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "wiretap",
+      "error_pattern": "go:\\ cannot\\ find\\ main\\ module,\\ but\\ found\\ \\.git/config\\ in\\ \\S+",
+      "error_context": {
+        "error_message": "go: cannot find main module, but found .git/config in /workspace/repos/wiretap"
+      },
+      "fix": {
+        "strategy": "Run go build in the src/ module directory, where go.mod lives, and output to bin/wiretap",
+        "actions": [
+          {
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false .",
+            "command": "cd src && go build -buildvcs=false -o ../bin/wiretap ."
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from wiretap.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-119"
+    },
+    {
+      "name": "Auto: goop - go.mod declares go 1.14, which makes the compiler use…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "goop",
+      "error_pattern": "internal/utils/errors\\.go:\\d+(?::\\d+)?:\\ implicit\\ function\\ instantiation\\ requires\\ go1\\.\\d+\\ or\\ later\\ \\(\\-lang\\ was\\ set\\ to\\ go1\\.\\d+;\\ check\\ go\\.mod\\)",
+      "error_context": {
+        "error_message": "internal/utils/errors.go:10:9: implicit function instantiation requires go1.18 or later (-lang was set to go1.14; check go.mod)"
+      },
+      "fix": {
+        "strategy": "go.mod declares go 1.14, which makes the compiler use -lang=go1.14 and rejects generics and the slices package. Bump the go directive to 1.21 so the build uses a modern language version (phuslu/log's goid error is a symptom of the old language/toolchain mismatch and should clear too).",
+        "actions": [
+          {
+            "type": "command",
+            "command": "sed -i 's/^go 1\\.14$/go 1.21/' go.mod"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from goop.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-120"
+    },
+    {
+      "name": "Auto: goop - Upgrade phuslu/log to a release that has a portable goid…",
+      "tags": [
+        "go",
+        "auto-fix"
+      ],
+      "build_system": "go",
+      "repo_name": "goop",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ undefined:\\ goid",
+      "error_context": {
+        "error_message": "/root/go/pkg/mod/github.com/phuslu/log@v1.0.75/logger.go:1565:41: undefined: goid"
+      },
+      "fix": {
+        "strategy": "Upgrade phuslu/log to a release that has a portable goid fallback for riscv64",
+        "actions": [
+          {
+            "type": "command",
+            "command": "go get github.com/phuslu/log@latest"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from goop.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-121"
+    },
+    {
+      "name": "Auto: whois - Install gettext (provides xgettext, msgfmt) needed by the…",
+      "tags": [
+        "make",
+        "auto-fix"
+      ],
+      "build_system": "make",
+      "repo_name": "whois",
+      "error_pattern": "make\\[\\d+\\]:\\ xgettext:\\ no\\ such\\ file\\ or\\ directory",
+      "error_context": {
+        "error_message": "make[1]: xgettext: No such file or directory"
+      },
+      "fix": {
+        "strategy": "Install gettext (provides xgettext, msgfmt) needed by the pos/whois.pot make target",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends gettext"
+          }
+        ]
+      },
+      "reasoning": "Auto-learned fix from whois.",
+      "sandbox": "debian-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-02",
+      "id": "fixer-auto-122"
     }
   ]
 }

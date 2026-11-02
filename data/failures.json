@@ -1,0 +1,326 @@
+{
+  "version": "1.0",
+  "packages": {
+    "gogo": {
+      "alpine-riscv64": {
+        "<path>:<n>: missing go.sum entry for module providing package github.com/wasilibs/go-re2 (imported by github.com/chainreactors/fingers/fingers); to add:": [
+          {
+            "strategy": "Fix the replace pseudo-version timestamp in v2/go.mod, then tidy to add go.sum entries",
+            "commands": [
+              "sed -i 's/v1.11.1-0.20260716082604-8121b6cd261e/v1.11.1-0.20260716152604-8121b6cd261e/' v2/go.mod"
+            ],
+            "error_after": "/root/go/pkg/mod/github.com/chainreactors/fingers@v1.2.2-0.20260714063144-070758342f45/fingers/regexp_re2.go:6:8: missing go.sum entry for module providing package github.com/wasilibs/go-re2…",
+            "date": "2026-11-02"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "<path>:<n>: missing go.sum entry for module providing package github.com/wasilibs/go-re2 (imported by github.com/chainreactors/fingers/fingers); to add:": [
+          {
+            "strategy": "Fix the invalid pseudo-version timestamp in the go-re2 replace directive, then run go mod tidy to add the go.sum entries",
+            "commands": [
+              "sed -i 's/v1.11.1-0.20260716082604-8121b6cd261e/v1.11.1-0.20260716152604-8121b6cd261e/' v2/go.mod"
+            ],
+            "error_after": "/root/go/pkg/mod/github.com/chainreactors/fingers@v1.2.2-0.20260714063144-070758342f45/fingers/regexp_re2.go:6:8: missing go.sum entry for module providing package github.com/wasilibs/go-re2…",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "ncdu": {
+      "alpine-riscv64": {
+        "src/ui.zig:<n>: error: invalid builtin function: '@type'": [
+          {
+            "strategy": "Installed zig is too new for ncdu (needs 0.14/0.15). Install zig0.15 from edge community and put its binary dir first on PATH via the plan command using zig's own path.",
+            "commands": [
+              "ln -sf /usr/lib/zig0.15/bin/zig /usr/local/bin/zig",
+              "zig version"
+            ],
+            "error_after": "src/ui.zig:290:16: error: invalid builtin function: '@Type'",
+            "date": "2026-11-02"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "bash: line <n>: zig: command not found": [
+          {
+            "strategy": "Zig is not installed and the setup phase never installed it. Debian has a zig package in newer releases, so try installing it via apt.",
+            "commands": [
+              "apt-get update"
+            ],
+            "error_after": "bash: line 1: zig: command not found",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "lc": {
+      "alpine-riscv64": {
+        "github.com/google/go-cmp/cmp: github.com/google/go-cmp@v0.<n>.<n>: read \"https:<path>\": stream error: stream id <n>; internal_error; received from peer": [
+          {
+            "strategy": "Transient proxy.golang.org stream error while fetching go-cmp; retry go mod tidy after pre-downloading modules",
+            "commands": [
+              "go mod download"
+            ],
+            "error_after": "github.com/google/go-cmp/cmp: github.com/google/go-cmp@v0.5.8: read \"https://proxy.golang.org/github.com/google/go-cmp/@v/v0.5.8.zip\": stream error: stream ID 1; INTERNAL_ERROR; received from peer",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "libavif": {
+      "alpine-riscv64": {
+        "cmake error at cmakelists.txt:<n> (message):": [
+          {
+            "strategy": "Install libyuv-dev so libavif's cmake finds it via pkg-config, then clear the stale build dir",
+            "commands": [
+              "apk update",
+              "apk add libyuv-dev",
+              "rm -rf build"
+            ],
+            "error_after": "CMake Error at CMakeLists.txt:203 (message):",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "make": {
+      "alpine-riscv64": {
+        "autogen.sh: line <n>: can't open gnulib/gnulib-tool: no such file": [
+          {
+            "strategy": "gnulib is not checked out (git submodule/autopull needed). Run autopull.sh to fetch gnulib, then autogen/configure. Install git and gettext first.",
+            "commands": [
+              "apk add git gettext gettext-dev bison flex texinfo gperf rsync wget",
+              "sh bootstrap --skip-po && ./configure"
+            ],
+            "error_after": "autogen.sh: line 1088: can't open gnulib/gnulib-tool: no such file",
+            "date": "2026-11-02"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "autogen.sh: <n>: cannot open gnulib/gnulib-tool: no such file": [
+          {
+            "strategy": "Install gettext/autopoint/git, clone gnulib locally, then run autogen.sh to bootstrap using it",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends git ca-certificates gettext autopoint texinfo wget m4 autoconf automake libtool pkg-config perl",
+              "rm -rf gnulib",
+              "sh autogen.sh && ./configure"
+            ],
+            "error_after": "autogen.sh: 1088: cannot open gnulib/gnulib-tool: No such file",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "cobalt": {
+      "alpine-riscv64": {
+        ".../node_modules/ffmpeg-static install: ffmpeg-static install failed: no binary found for architecture": [
+          {
+            "strategy": "ffmpeg-static has no riscv64 binary; install ffmpeg via apk and skip ffmpeg-static's download script during pnpm install",
+            "commands": [
+              "apk add ffmpeg python3 make g++ linux-headers",
+              "pnpm install --frozen-lockfile --ignore-scripts=false"
+            ],
+            "error_after": ".../node_modules/ffmpeg-static install: ffmpeg-static install failed: No binary found for architecture",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "dav1d": {
+      "alpine-riscv64": {
+        "ls: cannot access 'build/src/libdav1d.a': no such file or directory": [
+          {
+            "strategy": "Meson defaults to a shared library, so libdav1d.a is never built. Reconfigure with default_library=both so both libdav1d.so and libdav1d.a are produced.",
+            "commands": [
+              "meson setup build --wipe --buildtype=release --default-library=both -Denable_tests=false -Denable_examples=false -Denable_asm=false"
+            ],
+            "error_after": "ls: cannot access 'build/src/libdav1d.a': No such file or directory",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "gfx": {
+      "alpine-riscv64": {
+        "fatal: could not read username for 'https:<path>': terminal prompts disabled": [
+          {
+            "strategy": "Remove 'go mod tidy' from the plan (it tries to resolve test deps of sourcegraph/conc requiring a nonexistent module); build using go.mod/go.sum as-is",
+            "commands": [
+              ""
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-02"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "fatal: could not read username for 'https:<path>': terminal prompts disabled": [
+          {
+            "strategy": "Skip go mod tidy, which tries to resolve a nonexistent sourcegraph/sourcegraph/lib module for test deps; download modules from go.sum and build directly",
+            "commands": [
+              "go mod download"
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-02"
+          },
+          {
+            "strategy": "go mod download fails on test-only deps of conc (nonexistent sourcegraph/sourcegraph/lib). Skip the full download and just build; go build fetches only the modules needed for the packages being…",
+            "commands": [
+              ""
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "gomuks": {
+      "alpine-riscv64": {
+        "web/frontend.go:<n>: pattern all:dist: no matching files found": [
+          {
+            "strategy": "Use the repo's no-web build script path: check build-noweb.sh; simplest is to create web/dist placeholder via real build is heavy, so build with the noweb tag used by the project",
+            "commands": [
+              "go build -tags noweb -buildvcs=false -o gomuks ./cmd/gomuks"
+            ],
+            "error_after": "web/frontend.go:<n>: pattern all:dist: no matching files found",
+            "date": "2026-11-02"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "web/frontend.go:<n>: pattern all:dist: no matching files found": [
+          {
+            "strategy": "The web/dist directory is missing (needs a frontend build). Use the repo's build-noweb.sh approach: change the plan to build with the noembed tag if supported, otherwise create dist via the frontend…",
+            "commands": [
+              "go build -buildvcs=false -tags noweb -o gomuks ./cmd/gomuks"
+            ],
+            "error_after": "web/frontend.go:<n>: pattern all:dist: no matching files found",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "sling-cli": {
+      "alpine-riscv64": {
+        "cmd/sling/sling_assist.go:<n>: missing go.sum entry for module providing package github.com/flarco/g (imported by github.com/slingdata-io/sling-cli/cmd/sling); to add:": [
+          {
+            "strategy": "Remove all local-path replace directives from go.mod (../sling, ../g, etc.), then run go mod tidy to resolve and add go.sum entries from the proxy",
+            "commands": [
+              "sed -i -E '/^replace .*=> *\\.\\.?\\//d' go.mod"
+            ],
+            "error_after": "cmd/sling/sling_assist.go:11:2: missing go.sum entry for module providing package github.com/flarco/g (imported by github.com/slingdata-io/sling-cli/cmd/sling); to add:",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "cherrybomb": {
+      "debian-riscv64": {
+        "error: failed to run custom build command for `ring v0.<n>.<n>`": [
+          {
+            "strategy": "ring 0.16.20 does not support riscv64 and its build.rs panics on the unknown arch. Update ring to 0.17.x, which supports riscv64, via cargo update.",
+            "commands": [
+              "cargo update -p ring@0.16.20 --precise 0.16.20"
+            ],
+            "error_after": "error: failed to run custom build command for `ring v0.16.20`",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "wget": {
+      "debian-riscv64": {
+        "fatal: unable to find current revision in submodule path 'gnulib'": [
+          {
+            "strategy": "Gnulib submodule is not checked out at a valid revision; bootstrap runs git submodule update and fails. Use bootstrap's --skip-po and let it clone gnulib via a fresh shallow clone instead of the…",
+            "commands": [
+              "git clone --depth 1 https://git.savannah.gnu.org/git/gnulib.git /tmp/gnulib",
+              "sh bootstrap --no-git --gnulib-srcdir=/tmp/gnulib --skip-po && ./configure"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "hadolint": {
+      "debian-riscv64": {
+        "error: cabal: could not resolve dependencies:": [
+          {
+            "strategy": "Debian's GHC ships base-4.18 but hadolint 2.15.1 needs base>=4.20.1 (GHC 9.10+). Install ghcup to get a newer GHC. First step: install prerequisites for ghcup.",
+            "commands": [
+              "apt-get install -y --no-install-recommends curl ca-certificates build-essential libgmp-dev libffi-dev libncurses-dev zlib1g-dev xz-utils",
+              "curl --proto =https --tlsv1.2 -sSf https://get-ghcup.haskell.org -o /tmp/ghcup-install.sh",
+              "cd /workspace/repos/hadolint && export PATH=/root/.ghcup/bin:$PATH && cabal update && cabal build exe:hadolint",
+              "cd /workspace/repos/hadolint && export PATH=/root/.ghcup/bin:$PATH && mkdir -p bin && cp \"$(cabal list-bin hadolint)\" bin/hadolint"
+            ],
+            "error_after": "Error: cabal: Could not resolve dependencies:",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "tar": {
+      "debian-riscv64": {
+        "cc1: fatal error: ./parse-datetime.c: no such file or directory": [
+          {
+            "strategy": "Install bison so parse-datetime.c can be generated from parse-datetime.y, then rebuild",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends bison"
+            ],
+            "error_after": "cc1: fatal error: ./parse-datetime.c: No such file or directory",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "aria2-static-build": {
+      "debian-riscv64": {
+        "cmake error at cmakelists.txt:<n> (project):": [
+          {
+            "strategy": "Native build: unset the cross prefix by dropping CROSS_HOST so build.sh uses the native gcc, and install build-essential",
+            "commands": [
+              "apt-get install -y --no-install-recommends build-essential",
+              "./build.sh"
+            ],
+            "error_after": "CMake Error at CMakeLists.txt:37 (project):",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "static-php-cli": {
+      "debian-riscv64": {
+        "php fatal error: uncaught error: undefined constant \"staticphp\\exception\\spc_output_log\" in <path>:<n>": [
+          {
+            "strategy": "The real error is hidden by the handler's undefined-constant crash; php bin/spc --help hits the exception before bootstrap defines constants. Likely the apt php-cli is too old for the project, or a…",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends php-mbstring php-xml php-curl php-zip php-tokenizer php-phar php-iconv"
+            ],
+            "error_after": "PHP Fatal error: Uncaught Error: Undefined constant \"StaticPHP\\Exception\\SPC_OUTPUT_LOG\" in /workspace/repos/static-php-cli/src/StaticPHP/Exception/ExceptionHandler.php:114",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    },
+    "go-sandbox": {
+      "debian-riscv64": {
+        "# github.com/criyle/go-sandbox/ptracer": [
+          {
+            "strategy": "Fix the riscv64 context file: use c.Pid instead of c.pid and avoid constant overflow when negating EPERM",
+            "commands": [
+              "sed -i -e 's/uint64(-int64(syscall.EPERM))/uint64(int64(-int(syscall.EPERM)))/' -e 's/ptraceSetRegSet(c\\.pid,/ptraceSetRegSet(c.Pid,/' ptracer/context_linux_riscv64.go"
+            ],
+            "error_after": "# github.com/criyle/go-sandbox/ptracer",
+            "date": "2026-11-02"
+          }
+        ]
+      }
+    }
+  }
+}
