@@ -498,6 +498,33 @@ class TestBatchMain(_BatchTestCase):
         code, _, _, _ = self._run("--target", "native", "--workers", "2")
         self.assertEqual(2, self.bt.MAX_WORKERS)
 
+    def test_timeout_flag_overrides_the_list_value(self) -> None:
+        """4 workers on a 4-vCPU runner need a longer limit per package."""
+        self.addCleanup(
+            setattr,
+            self.bt,
+            "_AGENT_TIMEOUT_SECONDS",
+            self.bt._AGENT_TIMEOUT_SECONDS,
+        )
+        self.list_path.write_text(
+            json.dumps(
+                {
+                    "$schema_version": 1,
+                    "defaults": {"timeout_seconds": 2400},
+                    "packages": [{"name": "zlib", "url": _URL}],
+                }
+            )
+        )
+        code, _, _, _ = self._run()
+        self.assertEqual(0, code)
+        self.assertEqual(2400, self.bt._AGENT_TIMEOUT_SECONDS)
+        code, _, _, _ = self._run("--timeout-seconds", "4800")
+        self.assertEqual(0, code)
+        self.assertEqual(4800, self.bt._AGENT_TIMEOUT_SECONDS)
+        code, _, err, _ = self._run("--timeout-seconds", "30")
+        self.assertEqual(2, code)
+        self.assertIn("--timeout-seconds must be >= 60", err)
+
     def test_workers_flag_overrides_the_native_default(self) -> None:
         code, _, _, _ = self._run("--target", "native", "--workers", "2")
 

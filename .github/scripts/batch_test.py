@@ -1098,6 +1098,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        metavar="S",
+        help=(
+            "Time limit of one package in seconds; it overrides the "
+            "list's defaults.timeout_seconds. More workers on one machine "
+            "make each package slower (run 41449773699: 4 workers on a "
+            "4-vCPU runner took 1.7 to 1.9 times as long as 2)."
+        ),
+    )
+    parser.add_argument(
         "--target",
         choices=target.TARGETS,
         default=None,
@@ -1303,6 +1315,15 @@ def main() -> int:
     _AGENT_TIMEOUT_SECONDS = int(
         defaults.get("timeout_seconds", _AGENT_TIMEOUT_SECONDS)
     )
+    if args.timeout_seconds is not None:
+        if args.timeout_seconds < 60:
+            print(
+                f"[ERROR] --timeout-seconds must be >= 60 "
+                f"(got {args.timeout_seconds}).",
+                file=sys.stderr,
+            )
+            return 2
+        _AGENT_TIMEOUT_SECONDS = args.timeout_seconds
     _LIST_DESCRIPTION = description
 
     # Validate sharding flags before anything else that depends on the
