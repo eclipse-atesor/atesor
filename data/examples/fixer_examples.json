@@ -65,7 +65,8 @@
         ],
         "corrected_build_command": "make -C CPP/7zip/Bundles/Alone -f ../../cmpl_gcc_riscv64.mak -j$(nproc)"
       },
-      "reasoning": "When a project has arch-specific build files, CREATE the RISC-V equivalent. Disable USE_ASM for RISC-V."
+      "reasoning": "When a project has arch-specific build files, CREATE the RISC-V equivalent. Disable USE_ASM for RISC-V.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-001",
@@ -90,7 +91,8 @@
         ],
         "corrected_command": "go build -buildvcs=false -o {binary} ."
       },
-      "reasoning": "When 'cd X' fails, the problem is the build command. NEVER create directories to fix this."
+      "reasoning": "When 'cd X' fails, the problem is the build command. NEVER create directories to fix this.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-002",
@@ -118,7 +120,8 @@
         ],
         "corrected_command": "Use path from find results, do NOT create files"
       },
-      "reasoning": "Empty file error means wrong directory. Find and use the correct path."
+      "reasoning": "Empty file error means wrong directory. Find and use the correct path.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-003",
@@ -146,7 +149,8 @@
         ],
         "corrected_command": "Build from directory containing actual go.mod and main package"
       },
-      "reasoning": "Empty .go files cause parse errors. Delete them and fix the underlying path issue."
+      "reasoning": "Empty .go files cause parse errors. Delete them and fix the underlying path issue.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-004",
@@ -170,7 +174,8 @@
         ],
         "corrected_command": "go build -buildvcs=false -o {binary} ./cmd/{name}"
       },
-      "reasoning": "NEVER use 'go build ./...' for projects with multiple packages. Build only the main package."
+      "reasoning": "NEVER use 'go build ./...' for projects with multiple packages. Build only the main package.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-005",
@@ -197,7 +202,8 @@
           }
         ]
       },
-      "reasoning": "Alpine packages: go is just 'apk add go'. Always install before building."
+      "reasoning": "Alpine packages: go is just 'apk add go'. Always install before building.",
+      "sandbox": "alpine-riscv64"
     },
     {
       "id": "fixer-006",
@@ -222,7 +228,8 @@
         ],
         "updated_command": "CGO_ENABLED=1 go build -buildvcs=false -o {binary} ."
       },
-      "reasoning": "CGO requires C compiler. Alpine's build-base includes gcc, g++, make."
+      "reasoning": "CGO requires C compiler. Alpine's build-base includes gcc, g++, make.",
+      "sandbox": "alpine-riscv64"
     },
     {
       "id": "fixer-007",
@@ -245,27 +252,8 @@
           }
         ]
       },
-      "reasoning": "Container-mounted repos have different ownership. Use safe.directory or -buildvcs=false."
-    },
-    {
-      "id": "fixer-008",
-      "name": "Build Timeout - Complex Dependencies",
-      "tags": [
-        "go",
-        "timeout",
-        "slow",
-        "many-deps"
-      ],
-      "build_system": "go",
-      "source": "manual",
-      "error_pattern": "timed? out after \\d+ seconds",
-      "fix": {
-        "analysis": "Large projects with many dependencies exceed default timeouts.",
-        "strategy": "Increase timeout for dependency resolution",
-        "actions": [],
-        "recommendation": "Increase timeout to 600s for projects with 50+ dependencies"
-      },
-      "reasoning": "Complex projects need longer timeouts. Consider GOPROXY settings for faster downloads."
+      "reasoning": "Container-mounted repos have different ownership. Use safe.directory or -buildvcs=false.",
+      "sandbox": "any"
     },
     {
       "id": "fixer-009",
@@ -290,26 +278,8 @@
         ],
         "updated_command": "CGO_ENABLED=1 go build -buildvcs=false -o {binary} ."
       },
-      "reasoning": "Alpine: runtime is 'sqlite', headers are 'sqlite-dev'. CGO needs both build-base and -dev packages."
-    },
-    {
-      "id": "fixer-010",
-      "name": "Go Version Mismatch",
-      "tags": [
-        "go",
-        "version",
-        "toolchain"
-      ],
-      "build_system": "go",
-      "source": "manual",
-      "error_pattern": "go\\.mod.*indicates go \\d+\\.\\d+.*maximum supported",
-      "fix": {
-        "analysis": "The go.mod specifies a newer Go version than available.",
-        "strategy": "Override version check with GOTOOLCHAIN=auto",
-        "actions": [],
-        "updated_command": "GOTOOLCHAIN=auto go build -buildvcs=false -o {binary} ."
-      },
-      "reasoning": "GOTOOLCHAIN=auto lets Go use available version. Most projects don't strictly require the specified version."
+      "reasoning": "Alpine: runtime is 'sqlite', headers are 'sqlite-dev'. CGO needs both build-base and -dev packages.",
+      "sandbox": "alpine-riscv64"
     },
     {
       "id": "fixer-011",
@@ -332,7 +302,8 @@
           }
         ]
       },
-      "reasoning": "Alpine cmake package is 'cmake'. build-base provides gcc, g++, make."
+      "reasoning": "Alpine cmake package is 'cmake'. build-base provides gcc, g++, make.",
+      "sandbox": "alpine-riscv64"
     },
     {
       "name": "Auto: fping - Generate the missing configure script wi",
@@ -342,7 +313,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "fping",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 127\\)\\ \\-\\ bash:\\ line\\ 1:\\ \\./configure:\\ No\\ suc",
+      "error_pattern": "\\./configure: No such file or directory",
       "fix": {
         "strategy": "Generate the missing configure script with autotools",
         "actions": [
@@ -368,7 +339,10 @@
       "id": "fixer-auto-001",
       "source": "auto",
       "timestamp": "2026-07-02",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "bash: line 1: ./configure: No such file or directory"
+      }
     },
     {
       "name": "Auto: fping - Generate missing configure script with a",
@@ -378,7 +352,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "fping",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 127\\)\\ \\-\\ bash:\\ line\\ 1:\\ \\./configure:\\ No\\ suc",
+      "error_pattern": "\\./configure: No such file or directory",
       "fix": {
         "strategy": "Generate missing configure script with autotools",
         "actions": [
@@ -400,74 +374,10 @@
       "id": "fixer-auto-002",
       "source": "auto",
       "timestamp": "2026-07-02",
-      "sandbox": "alpine-riscv64"
-    },
-    {
-      "name": "Auto: bearer - Add a minimal Go source file so that `go",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "bearer",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\.\\ \\(exit\\ 1\\)\\ \\-\\ no\\ Go\\ files\\ in\\ /work",
-      "fix": {
-        "strategy": "Add a minimal Go source file so that `go build -buildvcs=false .` finds a package to compile.",
-        "actions": []
-      },
-      "reasoning": "Auto-learned fix from bearer.",
-      "id": "fixer-auto-003",
-      "source": "auto",
-      "timestamp": "2026-07-03",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: doggo - Install a newer Go toolchain (1.26.4) th",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "doggo",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ go\\.mod\\ requires\\ go\\ >=\\ 1\\.26\\.4\\ \\(r",
-      "fix": {
-        "strategy": "Install a newer Go toolchain (1.26.4) that satisfies go.mod requirement",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apt-get update"
-          },
-          {
-            "type": "command",
-            "command": "apt-get install -y --no-install-recommends wget ca-certificates"
-          },
-          {
-            "type": "command",
-            "command": "wget -q https://go.dev/dl/go1.26.4.linux-riscv64.tar.gz"
-          },
-          {
-            "type": "command",
-            "command": "tar -C /usr/local -xzf go1.26.4.linux-riscv64.tar.gz"
-          },
-          {
-            "type": "command",
-            "command": "rm go1.26.4.linux-riscv64.tar.gz"
-          },
-          {
-            "type": "command",
-            "command": "go version"
-          },
-          {
-            "type": "command",
-            "command": "go mod tidy"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from doggo.",
-      "id": "fixer-auto-004",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
+      "sandbox": "alpine-riscv64",
+      "error_context": {
+        "error_message": "bash: line 1: ./configure: No such file or directory"
+      }
     },
     {
       "name": "Auto: ksubdomain - Install libpcap development headers requ",
@@ -477,7 +387,7 @@
       ],
       "build_system": "go",
       "repo_name": "ksubdomain",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/ksubdomain\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ git",
+      "error_pattern": "fatal error: pcap(/pcap)?\\.h: No such file or directory",
       "fix": {
         "strategy": "Install libpcap development headers required by gopacket",
         "actions": [
@@ -495,64 +405,10 @@
       "id": "fixer-auto-005",
       "source": "auto",
       "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: arc - Add a top‑level go.mod and a minimal cmd",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "arc",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/arc\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ cannot\\ f",
-      "fix": {
-        "strategy": "Add a top‑level go.mod and a minimal cmd/arc package so that the existing build command finds a module and a main package to compile.",
-        "actions": []
-      },
-      "reasoning": "Auto-learned fix from arc.",
-      "id": "fixer-auto-006",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: daytona - Add a minimal Go module and source file ",
-      "tags": [
-        "other",
-        "auto-fix"
-      ],
-      "build_system": "other",
-      "repo_name": "daytona",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\./\\.\\.\\.\\ \\(exit\\ 1\\)\\ \\-\\ pattern\\ \\./\\.\\.\\.:\\ directory\\ prefix\\ ",
-      "fix": {
-        "strategy": "Add a minimal Go module and source file so that `go build ./...` succeeds.",
-        "actions": []
-      },
-      "reasoning": "Auto-learned fix from daytona.",
-      "id": "fixer-auto-007",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: ecoji - Add a minimal Go module and a trivial ma",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "ecoji",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\.\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ cannot\\ find\\ main",
-      "fix": {
-        "strategy": "Add a minimal Go module and a trivial main package so that `go build -buildvcs=false .` succeeds.",
-        "actions": []
-      },
-      "reasoning": "Auto-learned fix from ecoji.",
-      "id": "fixer-auto-008",
-      "source": "auto",
-      "timestamp": "2026-07-06",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "fatal error: pcap.h: No such file or directory"
+      }
     },
     {
       "name": "Auto: vim - Install the ncurses development package ",
@@ -562,7 +418,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "vim",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)\\ \\-\\ configure:\\ error:\\ NOT\\ FOUND!\\\n\\ \\ \\ \\ \\ \\ ",
+      "error_pattern": "configure: error: NOT FOUND!",
       "fix": {
         "strategy": "Install the ncurses development package required by Vim's configure script.",
         "actions": [
@@ -584,35 +440,10 @@
       "id": "fixer-auto-009",
       "source": "auto",
       "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: netmaker - Install missing VCS tool (git) required ",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "netmaker",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)\\ \\-\\ go:\\ downloading\\ google\\.golang\\.org/p",
-      "fix": {
-        "strategy": "Install missing VCS tool (git) required by go mod tidy",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apt-get update"
-          },
-          {
-            "type": "command",
-            "command": "apt-get install -y --no-install-recommends git"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from netmaker.",
-      "id": "fixer-auto-010",
-      "source": "auto",
-      "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "configure: error: NOT FOUND!"
+      }
     },
     {
       "name": "Auto: iproute2 - Install missing parser generator tools (",
@@ -622,7 +453,7 @@
       ],
       "build_system": "make",
       "repo_name": "iproute2",
-      "error_pattern": "Build\\ command\\ failed:\\ make\\ \\-j\\$\\(nproc\\)\\ \\(exit\\ 2\\)\\ \\-\\ /bin/sh:\\ 1:\\ bison:\\ not\\ found\\\nma",
+      "error_pattern": "\\bbison: (command )?not found",
       "fix": {
         "strategy": "Install missing parser generator tools (bison and flex) required by iproute2 build.",
         "actions": [
@@ -640,7 +471,10 @@
       "id": "fixer-auto-011",
       "source": "auto",
       "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "/bin/sh: 1: bison: not found"
+      }
     },
     {
       "name": "Auto: massdns - Install libpcap development headers",
@@ -650,7 +484,7 @@
       ],
       "build_system": "cmake",
       "repo_name": "massdns",
-      "error_pattern": "Build\\ command\\ failed:\\ cd\\ build\\ \\&\\&\\ make\\ \\-j\\$\\(nproc\\)\\ \\(exit\\ 2\\)\\ \\-\\ In\\ file\\ included\\ fr",
+      "error_pattern": "fatal error: pcap(/pcap)?\\.h: No such file or directory",
       "fix": {
         "strategy": "Install libpcap development headers",
         "actions": [
@@ -668,7 +502,10 @@
       "id": "fixer-auto-012",
       "source": "auto",
       "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "fatal error: pcap.h: No such file or directory"
+      }
     },
     {
       "name": "Auto: libavif - Install the libyuv development headers",
@@ -678,7 +515,7 @@
       ],
       "build_system": "cmake",
       "repo_name": "libavif",
-      "error_pattern": "Build\\ command\\ failed:\\ mkdir\\ \\-p\\ build\\ \\&\\&\\ cd\\ build\\ \\&\\&\\ cmake\\ \\.\\.\\ \\-DCMAKE_BUILD_TYPE=",
+      "error_pattern": "Could NOT find libyuv|\\blibyuv\\b.*\\bnot found",
       "fix": {
         "strategy": "Install the libyuv development headers",
         "actions": [
@@ -696,7 +533,10 @@
       "id": "fixer-auto-013",
       "source": "auto",
       "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
+      "sandbox": "debian-riscv64",
+      "error_context": {
+        "error_message": "Could NOT find libyuv (missing: LIBYUV_LIBRARY LIBYUV_INCLUDE_DIR)"
+      }
     },
     {
       "name": "Auto: whois - Install missing gettext tools (xgettext)",
@@ -706,7 +546,7 @@
       ],
       "build_system": "make",
       "repo_name": "whois",
-      "error_pattern": "Build\\ command\\ failed:\\ make\\ \\-j\\$\\(nproc\\)\\ \\(exit\\ 2\\)\\ \\-\\ make\\[1\\]:\\ xgettext:\\ No\\ such\\ file",
+      "error_pattern": "\\bxgettext: (No such file or directory|(command )?not found)",
       "fix": {
         "strategy": "Install missing gettext tools (xgettext) required for building whois",
         "actions": [
@@ -724,35 +564,10 @@
       "id": "fixer-auto-014",
       "source": "auto",
       "timestamp": "2026-07-07",
-      "sandbox": "debian-riscv64"
-    },
-    {
-      "name": "Auto: grep - Install autotools, gettext, git and rela",
-      "tags": [
-        "autotools",
-        "auto-fix"
-      ],
-      "build_system": "autotools",
-      "repo_name": "grep",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 128\\)\\ \\-\\ fatal:\\ Unable\\ to\\ find\\ current\\ rev",
-      "fix": {
-        "strategy": "Install autotools, gettext, git and related tools, then run ./bootstrap so it can fetch gnulib and generate configure, then run ./configure",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apt-get update"
-          },
-          {
-            "type": "command",
-            "command": "apt-get install -y --no-install-recommends git autoconf automake libtool gettext autopoint pkg-config make gcc libc6-dev perl texinfo rsync wget xz-utils bison gperf m4"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from grep.",
       "sandbox": "debian-riscv64",
-      "id": "fixer-auto-015",
-      "source": "auto",
-      "timestamp": "2026-10-13"
+      "error_context": {
+        "error_message": "make[1]: xgettext: No such file or directory"
+      }
     },
     {
       "name": "Auto: less - Install the ncurses development package ",
@@ -762,7 +577,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "less",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)\\ \\-\\ checking\\ for\\ gcc\\.\\.\\.\\ gcc\\\nchecking\\ wh",
+      "error_pattern": "Cannot find terminal librar",
       "fix": {
         "strategy": "Install the ncurses development package so configure can find a terminal library, then re-run configure",
         "actions": [
@@ -784,7 +599,10 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-016",
       "source": "auto",
-      "timestamp": "2026-10-13"
+      "timestamp": "2026-10-13",
+      "error_context": {
+        "error_message": "Cannot find terminal libraries - configure failed"
+      }
     },
     {
       "name": "Auto: make - Install autotools/gettext, clone gnulib,",
@@ -794,7 +612,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "make",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 2\\)\\ \\-\\ autogen\\.sh:\\ 1088:\\ cannot\\ open\\ gnuli",
+      "error_pattern": "autogen\\.sh: \\d+: cannot open gnulib",
       "fix": {
         "strategy": "Install autotools/gettext, clone gnulib, run bootstrap using local gnulib, then configure",
         "actions": [
@@ -820,7 +638,10 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-017",
       "source": "auto",
-      "timestamp": "2026-10-13"
+      "timestamp": "2026-10-13",
+      "error_context": {
+        "error_message": "autogen.sh: 1088: cannot open gnulib"
+      }
     },
     {
       "name": "Auto: overlayfs-tools - Install sudo and attr so meson find_prog",
@@ -830,7 +651,7 @@
       ],
       "build_system": "meson",
       "repo_name": "overlayfs-tools",
-      "error_pattern": "Build\\ command\\ failed:\\ cd\\ /workspace/repos/overlayfs\\-tools\\ \\&\\&\\ meson\\ setup\\ build\\ \\(",
+      "error_pattern": "ERROR: Program '(sudo|setfattr|getfattr|attr)' not found",
       "fix": {
         "strategy": "Install sudo and attr so meson find_program succeeds, then reconfigure",
         "actions": [
@@ -856,134 +677,10 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-018",
       "source": "auto",
-      "timestamp": "2026-10-13"
-    },
-    {
-      "name": "Auto: go-sandbox - Add riscv64 ptracer Context implementati",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "go-sandbox",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/runprog\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github",
-      "fix": {
-        "strategy": "Add riscv64 ptracer Context implementation (registers a0-a5, a7) with getIovec and skipSyscall",
-        "actions": []
-      },
-      "reasoning": "Auto-learned fix from go-sandbox.",
-      "sandbox": "debian-riscv64",
-      "id": "fixer-auto-019",
-      "source": "auto",
-      "timestamp": "2026-10-13"
-    },
-    {
-      "name": "Auto: mbedtls - Install git, fetch all submodules recurs",
-      "tags": [
-        "cmake",
-        "auto-fix"
-      ],
-      "build_system": "cmake",
-      "repo_name": "mbedtls",
-      "error_pattern": "Build\\ command\\ failed:\\ cmake\\ \\-S\\ \\.\\ \\-B\\ build\\ \\-DCMAKE_BUILD_TYPE=Release\\ \\-DENABLE_TE",
-      "fix": {
-        "strategy": "Install git, fetch all submodules recursively, then rerun cmake configure",
-        "actions": [
-          {
-            "type": "command",
-            "command": "apk update"
-          },
-          {
-            "type": "command",
-            "command": "apk add git"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from mbedtls.",
-      "sandbox": "alpine-riscv64",
-      "id": "fixer-auto-020",
-      "source": "auto",
-      "timestamp": "2026-10-13"
-    },
-    {
-      "name": "Auto: libjpeg-turbo - Rebuild with low parallelism (-j2) to av",
-      "tags": [
-        "cmake",
-        "auto-fix"
-      ],
-      "build_system": "cmake",
-      "repo_name": "libjpeg-turbo",
-      "error_pattern": "Build\\ command\\ failed:\\ cmake\\ \\-\\-build\\ build\\ \\-j\\$\\(nproc\\)\\ \\(exit\\ 137\\)\\ \\-\\ \\[\\ \\ 0%\\]\\ Buildin",
-      "fix": {
-        "strategy": "Rebuild with low parallelism (-j2) to avoid OOM kill (exit 137)",
-        "actions": [
-          {
-            "type": "command",
-            "command": "cmake --build build -j2"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from libjpeg-turbo.",
-      "sandbox": "alpine-riscv64",
-      "id": "fixer-auto-021",
-      "source": "auto",
-      "timestamp": "2026-10-13"
-    },
-    {
-      "name": "Auto: dav1d - Reconfigure meson to build both shared a",
-      "tags": [
-        "meson",
-        "auto-fix"
-      ],
-      "build_system": "meson",
-      "repo_name": "dav1d",
-      "error_pattern": "Build\\ command\\ failed:\\ ls\\ \\-la\\ build/src/libdav1d\\.so\\ build/src/libdav1d\\.a\\ build/to",
-      "fix": {
-        "strategy": "Reconfigure meson to build both shared and static libraries, then recompile",
-        "actions": [
-          {
-            "type": "command",
-            "command": "meson setup build --reconfigure --default-library=both"
-          },
-          {
-            "type": "command",
-            "command": "meson compile -C build"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from dav1d.",
-      "sandbox": "alpine-riscv64",
-      "id": "fixer-auto-022",
-      "source": "auto",
-      "timestamp": "2026-10-13"
-    },
-    {
-      "name": "Auto: msgpack-c - Fetch c_master with an explicit refspec ",
-      "tags": [
-        "cmake",
-        "auto-fix"
-      ],
-      "build_system": "cmake",
-      "repo_name": "msgpack-c",
-      "error_pattern": "Build\\ command\\ failed:\\ git\\ fetch\\ origin\\ c_master\\ \\&\\&\\ git\\ checkout\\ \\-B\\ c_master\\ orig",
-      "fix": {
-        "strategy": "Fetch c_master with an explicit refspec so origin/c_master exists, then check it out",
-        "actions": [
-          {
-            "type": "command",
-            "command": "git fetch origin +refs/heads/c_master:refs/remotes/origin/c_master"
-          },
-          {
-            "type": "command",
-            "command": "git checkout -B c_master origin/c_master"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from msgpack-c.",
-      "sandbox": "alpine-riscv64",
-      "id": "fixer-auto-023",
-      "source": "auto",
-      "timestamp": "2026-10-13"
+      "timestamp": "2026-10-13",
+      "error_context": {
+        "error_message": "meson.build: ERROR: Program 'sudo' not found or not executable"
+      }
     },
     {
       "name": "Auto: pv - Install gettext (autopoint and the gette",
@@ -993,7 +690,7 @@
       ],
       "build_system": "autotools",
       "repo_name": "pv",
-      "error_pattern": "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)\\ \\-\\ aclocal:\\ warning:\\ couldn't\\ open\\ dir",
+      "error_pattern": "exec \"autopoint\": No such file|autopoint failed with exit status|\\bautopoint: (command )?not found|possibly undefined macro: AM_GNU_GETTEXT",
       "fix": {
         "strategy": "Install gettext (autopoint and the gettext m4 macros) and autotools, then regenerate configure with autoreconf -fi, which runs autopoint to copy the gettext macros into m4/",
         "actions": [
@@ -1023,7 +720,10 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-024",
       "source": "auto",
-      "timestamp": "2026-10-14"
+      "timestamp": "2026-10-14",
+      "error_context": {
+        "error_message": "Can't exec \"autopoint\": No such file or directory"
+      }
     },
     {
       "name": "Auto: mabel - Upgrade anacrolix/mmsg to latest, which ",
@@ -1033,7 +733,7 @@
       ],
       "build_system": "go",
       "repo_name": "mabel",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\.\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.com/anacrol",
+      "error_pattern": "anacrolix/mmsg@\\S+: undefined: unix\\.Mmsghdr",
       "fix": {
         "strategy": "Upgrade anacrolix/mmsg to latest, which has riscv64 type definitions, then rebuild",
         "actions": [
@@ -1055,71 +755,10 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-025",
       "source": "auto",
-      "timestamp": "2026-10-14"
-    },
-    {
-      "name": "Auto: tget - Upgrade anacrolix/mmsg to a release that",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "tget",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/tget\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.co",
-      "fix": {
-        "strategy": "Upgrade anacrolix/mmsg to a release that supports linux/riscv64 (uses x/sys/unix types), then rebuild",
-        "actions": [
-          {
-            "type": "command",
-            "command": "go get github.com/anacrolix/mmsg@latest"
-          },
-          {
-            "type": "command",
-            "command": "go mod tidy"
-          },
-          {
-            "type": "command",
-            "command": "go build -buildvcs=false -o tget ./cmd/tget"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from tget.",
-      "sandbox": "debian-riscv64",
-      "id": "fixer-auto-026",
-      "source": "auto",
-      "timestamp": "2026-10-14"
-    },
-    {
-      "name": "Auto: toru - Upgrade anacrolix/mmsg to latest version",
-      "tags": [
-        "go",
-        "auto-fix"
-      ],
-      "build_system": "go",
-      "repo_name": "toru",
-      "error_pattern": "Build\\ command\\ failed:\\ go\\ build\\ \\-buildvcs=false\\ \\./cmd/toru\\ \\(exit\\ 1\\)\\ \\-\\ \\#\\ github\\.co",
-      "fix": {
-        "strategy": "Upgrade anacrolix/mmsg to latest version which supports riscv64 (uses x/sys/unix types), then tidy",
-        "actions": [
-          {
-            "type": "command",
-            "command": "go get github.com/anacrolix/mmsg@latest"
-          },
-          {
-            "type": "command",
-            "command": "go mod tidy"
-          },
-          {
-            "type": "command",
-            "command": "go build -buildvcs=false -o toru ./cmd/toru"
-          }
-        ]
-      },
-      "reasoning": "Auto-learned fix from toru.",
-      "sandbox": "debian-riscv64",
-      "id": "fixer-auto-027",
-      "source": "auto",
-      "timestamp": "2026-10-14"
+      "timestamp": "2026-10-14",
+      "error_context": {
+        "error_message": "github.com/anacrolix/mmsg@v1.0.0/socket/socket.go:14:2: undefined: unix.Mmsghdr"
+      }
     },
     {
       "name": "Auto: iputils - Install libcap development files so meso",
@@ -1129,7 +768,7 @@
       ],
       "build_system": "meson",
       "repo_name": "iputils",
-      "error_pattern": "Build\\ command\\ failed:\\ meson\\ setup\\ builddir\\ \\-DSKIP_TESTS=true\\ \\-DBUILD_MANS=false\\ ",
+      "error_pattern": "C header 'sys/capability\\.h' not found|C shared or static library 'cap' not found|sys/capability\\.h: No such file",
       "fix": {
         "strategy": "Install libcap development files so meson can find the 'cap' library, then reconfigure from a clean build dir",
         "actions": [
@@ -1155,7 +794,102 @@
       "sandbox": "debian-riscv64",
       "id": "fixer-auto-028",
       "source": "auto",
-      "timestamp": "2026-10-14"
+      "timestamp": "2026-10-14",
+      "error_context": {
+        "error_message": "meson.build:120:2: ERROR: C header 'sys/capability.h' not found"
+      }
+    },
+    {
+      "id": "fixer-012",
+      "name": "CGO Compilation - Missing GCC (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "gcc"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "C compiler \"gcc\" not found|\\bgcc: (command )?not found",
+      "error_context": {
+        "error_message": "cgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH"
+      },
+      "fix": {
+        "analysis": "The package uses cgo and no C compiler is installed.",
+        "strategy": "Install build-essential (gcc, g++, make)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends build-essential"
+          }
+        ]
+      },
+      "reasoning": "cgo needs a C compiler; build-essential provides gcc on Debian."
+    },
+    {
+      "id": "fixer-013",
+      "name": "SQLite CGO Dependency Missing (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "sqlite"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "sqlite3\\.h: No such file or directory",
+      "error_context": {
+        "error_message": "fatal error: sqlite3.h: No such file or directory"
+      },
+      "fix": {
+        "analysis": "go-sqlite3 compiles SQLite through cgo and needs its headers.",
+        "strategy": "Install the SQLite development package",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libsqlite3-dev"
+          }
+        ]
+      },
+      "reasoning": "Debian ships sqlite3.h in libsqlite3-dev."
+    },
+    {
+      "id": "fixer-014",
+      "name": "Missing CMake (Debian)",
+      "tags": [
+        "cmake",
+        "missing-tool"
+      ],
+      "build_system": "cmake",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "\\bcmake:? (command )?not found",
+      "error_context": {
+        "error_message": "bash: line 1: cmake: command not found"
+      },
+      "fix": {
+        "analysis": "CMake is not installed.",
+        "strategy": "Install cmake",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends cmake"
+          }
+        ]
+      },
+      "reasoning": "Debian's cmake package provides the cmake command."
     }
   ]
 }

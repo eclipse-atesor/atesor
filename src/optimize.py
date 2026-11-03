@@ -81,7 +81,11 @@ from .machine import (
     tune_for,
 )
 from .target import is_native
-from .tools import execute_command
+from .tools import (
+    ensure_build_container,
+    execute_command,
+    infrastructure_fault,
+)
 from .workload import rewrite_for_tree
 
 logger = logging.getLogger(__name__)
@@ -1301,6 +1305,22 @@ def build_variant(
         result = execute_command(
             rewritten, cwd=dest, timeout=timeout, extra_env=env
         )
+        # A stopped container or a dropped ssh session is no build
+        # result (snappy: a tune's cmake ended with exit 255). A build
+        # command runs again safely, once.
+        fault = infrastructure_fault(result) if not result.success else ""
+        if fault:
+            logger.warning(
+                f"Variant build hit an infrastructure fault ({fault}); the "
+                f"build container is {ensure_build_container()}; running "
+                "the command once more"
+            )
+            result = execute_command(
+                rewritten, cwd=dest, timeout=timeout, extra_env=env
+            )
+            fault = infrastructure_fault(result) if not result.success else ""
+            if fault:
+                return f"`{rewritten[:160]}`: infrastructure fault: {fault}"
         if not result.success:
             tail = (result.stderr or result.stdout or "").strip()[-400:]
             return f"`{rewritten[:160]}` exited {result.exit_code}: {tail}"
@@ -3182,6 +3202,15 @@ def run_optimization(
                 "run again with a larger ATESOR_OPTIMIZE_BUDGET (this run "
                 f"had {budget_seconds:.0f} s)"
             )
+    # The verified build itself crashed on the machine: its recipe
+    # must not be replayed as verified (optimize_node marks it).
+    crashes = [
+        failure
+        for failure in context.get("baseline_failures") or []
+        if "crashed with" in str(failure)
+    ]
+    if crashes:
+        result["baseline_crash"] = crashes[0]
     result["headline"] = headline(result)
     report.line("Result", result["headline"])
     if not accepted:

@@ -19,10 +19,13 @@ from src.memory import (
     format_few_shot_examples,
     get_agent_memory,
     get_cached_recipe,
+    load_failure_records,
     load_recipe_cache,
     materialize_cached_recipe,
+    recall_sandboxes,
     reload_agent_memory,
     render_recipe_markdown,
+    save_failure_record,
 )
 from src.memory import save_learned_example as save_agent_learned_example
 from src.memory import (
@@ -1713,4 +1716,501 @@ class TestFewShotSelection(unittest.TestCase):
                 {"build_system": "cmake", "sandbox": "debian-riscv64"}
             ),
             [],
+        )
+
+
+class TestLearningStore(unittest.TestCase):
+    """The store refreshes, keeps every fix, and ranks by layout."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.examples_dir = Path(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _scout(commands, trigger=None):
+        return {
+            "name": "Auto: tool (go)",
+            "tags": ["go"],
+            "build_system": "go",
+            "repo_name": "tool",
+            "sandbox": "debian-riscv64",
+            "trigger": trigger or {"build_system": "go", "has_main": True},
+            "plan": {"phases": [{"name": "build", "commands": commands}]},
+        }
+
+    def test_newer_run_refreshes_the_scout_example(self) -> None:
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+        self.assertTrue(
+            memory.save_learned_example(self._scout(["go build ."]))
+        )
+        first_id = memory.examples[0].id
+        self.assertFalse(
+            memory.save_learned_example(self._scout(["go build ."]))
+        )
+        newer = self._scout(
+            ["go build ./cmd/tool"],
+            {
+                "build_system": "go",
+                "has_main": True,
+                "main_path": "./cmd/tool",
+            },
+        )
+        self.assertTrue(memory.save_learned_example(newer))
+        self.assertEqual(len(memory.examples), 1)
+        self.assertEqual(memory.examples[0].id, first_id)
+        self.assertEqual(memory.examples[0].trigger["main_path"], "./cmd/tool")
+
+    def test_manual_example_is_never_replaced(self) -> None:
+        manual = {**self._scout(["make"]), "id": "scout-001"}
+        _write_examples_file(self.examples_dir, "scout", [manual])
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+        self.assertFalse(
+            memory.save_learned_example(self._scout(["go build ./cmd/tool"]))
+        )
+        self.assertEqual(memory.examples[0].id, "scout-001")
+
+    def test_one_run_can_teach_fixes_for_two_errors(self) -> None:
+        memory = AgentMemory("fixer", examples_dir=self.examples_dir)
+        base = {
+            "tags": ["go"],
+            "build_system": "go",
+            "repo_name": "tool",
+            "sandbox": "debian-riscv64",
+            "fix": {
+                "strategy": "install",
+                "actions": [{"type": "command", "command": "apt-get x"}],
+            },
+        }
+        for name, pattern, saved in (
+            ("a", "a\\.h: No such file", True),
+            ("b", "b\\.h: No such file", True),
+            ("c", "a\\.h: No such file", False),
+        ):
+            example = {**base, "name": name, "error_pattern": pattern}
+            self.assertEqual(memory.save_learned_example(example), saved)
+        self.assertEqual(len(memory.examples), 2)
+
+    def test_any_sandbox_example_serves_every_distro(self) -> None:
+        _write_examples_file(
+            self.examples_dir,
+            "fixer",
+            [
+                {
+                    "id": "fixer-any",
+                    "name": "Wrong build path",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "sandbox": "any",
+                    "error_pattern": "no Go files in",
+                    "fix": {
+                        "actions": [
+                            {"type": "command", "command": "find . -name x"}
+                        ]
+                    },
+                }
+            ],
+        )
+        memory = AgentMemory("fixer", examples_dir=self.examples_dir)
+        for sandbox in ("debian-riscv64", "alpine-riscv64"):
+            hits = memory.get_relevant_examples(
+                {
+                    "build_system": "go",
+                    "sandbox": sandbox,
+                    "error_message": "no Go files in /workspace/repos/x",
+                }
+            )
+            self.assertEqual([e.id for e in hits], ["fixer-any"], sandbox)
+
+    def test_layout_and_package_rank_the_scout_examples(self) -> None:
+        def example(repo, stamp, main_path, module_dir):
+            return {
+                "id": f"scout-{repo}",
+                "name": repo,
+                "tags": ["go"],
+                "build_system": "go",
+                "repo_name": repo,
+                "sandbox": "debian-riscv64",
+                "timestamp": stamp,
+                "trigger": {
+                    "has_main": True,
+                    "main_path": main_path,
+                    "module_dir": module_dir,
+                },
+                "plan": {"phases": []},
+            }
+
+        _write_examples_file(
+            self.examples_dir,
+            "scout",
+            [
+                example("a", "2026-10-01", "./cmd/a", "v1"),
+                example("b", "2026-10-02", ".", ""),
+                example("c", "2026-09-01", "./cmd/x", ""),
+            ],
+        )
+        memory = AgentMemory("scout", examples_dir=self.examples_dir)
+        ctx = {
+            "build_system": "go",
+            "sandbox": "debian-riscv64",
+            "has_main": True,
+        }
+
+        def first(extra, count=1):
+            hits = memory.get_relevant_examples({**ctx, **extra}, count)
+            return [e.id for e in hits]
+
+        self.assertEqual(
+            first({"main_path": "cmd/a", "module_dir": "v1"}), ["scout-a"]
+        )
+        self.assertEqual(
+            first({"main_path": ".", "module_dir": ""}), ["scout-b"]
+        )
+        self.assertEqual(
+            first({"repo_name": "c", "main_path": ".", "module_dir": ""}),
+            ["scout-c"],
+        )
+        # Equal scores: the newest example first, not the file order.
+        self.assertEqual(first({}, 3)[0], "scout-b")
+
+    def test_failure_memory_keeps_the_last_records_per_error(self) -> None:
+        import src.memory as memory_module
+
+        with mock.patch.object(
+            memory_module, "FAILURES_PATH", self.examples_dir / "f.json"
+        ):
+            for index in range(7):
+                self.assertTrue(
+                    save_failure_record(
+                        "tool",
+                        "err",
+                        {"strategy": f"s{index}"},
+                        sandbox="debian-riscv64",
+                    )
+                )
+            save_failure_record(
+                "tool",
+                "err",
+                {"strategy": "s6", "commands": ["x"]},
+                sandbox="debian-riscv64",
+            )
+            records = load_failure_records("tool", sandbox="debian-riscv64")
+        self.assertEqual(
+            [r["strategy"] for r in records["err"]],
+            ["s2", "s3", "s4", "s5", "s6"],
+        )
+        self.assertEqual(records["err"][-1]["commands"], ["x"])
+        self.assertEqual(load_failure_records("tool", sandbox="other"), {})
+
+    def test_recall_sandboxes_cover_both_targets(self) -> None:
+        import src.memory as memory_module
+
+        for active, expected in (
+            ("debian-riscv64", ["debian-riscv64", "debian-riscv64-native"]),
+            (
+                "debian-riscv64-native",
+                ["debian-riscv64-native", "debian-riscv64"],
+            ),
+        ):
+            with mock.patch.object(
+                memory_module, "_default_sandbox", return_value=active
+            ):
+                self.assertEqual(recall_sandboxes(), expected)
+
+    def test_few_shot_text_names_its_examples(self) -> None:
+        _write_examples_file(
+            self.examples_dir,
+            "scout",
+            [
+                {
+                    "id": "scout-a",
+                    "name": "a",
+                    "tags": ["go"],
+                    "build_system": "go",
+                    "sandbox": "alpine-riscv64",
+                    "plan": {
+                        "phases": [{"name": "b", "commands": ["go build"]}]
+                    },
+                }
+            ],
+        )
+        MEMORY_INSTANCES["scout"] = AgentMemory(
+            "scout", examples_dir=self.examples_dir
+        )
+        text = format_few_shot_examples("scout", {"build_system": "go"})
+        self.assertIsInstance(text, str)
+        self.assertIn("# Few-Shot Examples (scout)", text)
+        self.assertEqual(text.ids, ("scout-a",))
+
+
+class TestFixerMatchPrecision(unittest.TestCase):
+    """A fixer example comes only for its own error."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.examples_dir = Path(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _example(ex_id, pattern, line="", bs="meson", commands=None, **extra):
+        example = {
+            "id": ex_id,
+            "name": ex_id,
+            "tags": [bs],
+            "build_system": bs,
+            "sandbox": "debian-riscv64",
+            "source": "auto",
+            "error_pattern": pattern,
+            "fix": {
+                "actions": [
+                    {"type": "command", "command": c}
+                    for c in commands or ["apt-get install -y x"]
+                ]
+            },
+            **extra,
+        }
+        if line:
+            example["error_context"] = {"error_message": line}
+        return example
+
+    def _hits(self, examples, error, bs="meson"):
+        _write_examples_file(self.examples_dir, "fixer", examples)
+        store = AgentMemory("fixer", examples_dir=self.examples_dir)
+        hits = store.get_relevant_examples(
+            {
+                "build_system": bs,
+                "sandbox": "debian-riscv64",
+                "error_message": error,
+            }
+        )
+        return [e.id for e in hits]
+
+    def test_the_regex_decides_without_a_word_match(self) -> None:
+        """Most words of the stored line are in another meson error."""
+        libcap = self._example(
+            "libcap",
+            r"C header 'sys/capability\.h' not found",
+            "meson.build:120:2: ERROR: C header 'sys/capability.h' not found",
+        )
+        error = (
+            "Build command failed: meson setup build (exit 1) - "
+            "meson.build:45:2: ERROR: C header 'zlib.h' not found"
+        )
+        self.assertEqual(self._hits([libcap], error), [])
+        self.assertEqual(
+            self._hits([libcap], error.replace("zlib.h", "sys/capability.h")),
+            ["libcap"],
+        )
+
+    def test_old_example_keyed_on_a_download_line_matches_nothing(
+        self,
+    ) -> None:
+        old = self._example(
+            "netmaker",
+            "Build\\ command\\ failed:\\ go\\ mod\\ tidy\\ \\(exit\\ 1\\)"
+            "\\ \\-\\ go:\\ downloading\\ google\\.golang\\.org/protobuf",
+            bs="go",
+        )
+        error = (
+            "Build command failed: go build . (exit 1) - "
+            "go: downloading google.golang.org/protobuf v1.36.6\n"
+            "main.go:3:2: undefined: pool.New"
+        )
+        self.assertEqual(self._hits([old], error, bs="go"), [])
+
+    def test_old_example_words_need_an_error_word(self) -> None:
+        """A stored line without an error word is no key."""
+        old = self._example(
+            "progress",
+            "Build\\ command\\ failed:\\ make\\ \\(exit\\ 2\\)\\ \\-\\ x",
+            "checking for gcc... gcc checking whether the compiler works",
+            bs="autotools",
+        )
+        error = (
+            "Build command failed: ./configure (exit 1) - checking for "
+            "gcc... gcc\nchecking whether the compiler works... no\n"
+            "configure: error: C compiler cannot create executables"
+        )
+        self.assertEqual(self._hits([old], error, bs="autotools"), [])
+
+    def test_regex_runs_on_the_error_without_download_lines(self) -> None:
+        """A module name in a download line is no error text."""
+        example = self._example("errors-mod", r"example\.com/errors", bs="go")
+        error = (
+            "Build command failed: go build . (exit 1) - "
+            "go: downloading example.com/errors v1.0.0\n"
+            "main.go:1:2: undefined: x"
+        )
+        self.assertEqual(self._hits([example], error, bs="go"), [])
+
+    def test_old_example_text_needs_an_error_word(self) -> None:
+        """A long progress line in the old pattern is no key."""
+        old = self._example(
+            "progress-core",
+            "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)"
+            "\\ \\-\\ checking\\ whether\\ the\\ C\\ compiler\\ works",
+            bs="autotools",
+        )
+        error = (
+            "Build command failed: ./configure (exit 1) - checking "
+            "whether the C compiler works... no\n"
+            "configure: error: C compiler cannot create executables"
+        )
+        self.assertEqual(self._hits([old], error, bs="autotools"), [])
+
+    def test_old_example_with_its_error_text_still_matches(self) -> None:
+        old = self._example(
+            "vim",
+            "Build\\ command\\ failed:\\ \\./configure\\ \\(exit\\ 1\\)"
+            "\\ \\-\\ configure:\\ error:\\ NOT\\ FOUND!",
+            bs="autotools",
+        )
+        error = (
+            "Build command failed: ./configure --with-x (exit 1) - "
+            "checking for tgetent()... configure: error: NOT FOUND!"
+        )
+        self.assertEqual(self._hits([old], error, bs="autotools"), ["vim"])
+
+    def test_go_only_fix_needs_a_go_error(self) -> None:
+        """Looking for go.mod does not fix a CMake build."""
+        go_path = self._example(
+            "go-path",
+            r"cd:.*No such file or directory",
+            bs="go",
+            commands=["find /workspace/repos/x -name 'go.mod' -type f"],
+        )
+        cd_error = (
+            "Build command failed: cd build && make -j4 (exit 1) - "
+            "bash: line 1: cd: build: No such file or directory"
+        )
+        self.assertEqual(self._hits([go_path], cd_error, bs="cmake"), [])
+        self.assertEqual(self._hits([go_path], cd_error, bs="go"), ["go-path"])
+        go_error = cd_error.replace("cd build && make -j4", "make tool") + (
+            "\npkg/a.go:1:2: cd: cmd/tool: No such file or directory"
+        )
+        self.assertEqual(
+            self._hits([go_path], go_error, bs="make"), ["go-path"]
+        )
+
+    def test_any_sandbox_gets_neither_bonus_nor_penalty(self) -> None:
+        store = AgentMemory("fixer", examples_dir=self.examples_dir)
+        context = {
+            "build_system": "meson",
+            "sandbox": "debian-riscv64",
+            "error_message": "ERROR: Program 'x' not found",
+        }
+        same = AgentExample(
+            id="a",
+            name="a",
+            tags=[],
+            build_system="cmake",
+            sandbox="debian-riscv64",
+        )
+        anywhere = AgentExample(
+            id="b", name="b", tags=[], build_system="cmake", sandbox="any"
+        )
+        self.assertAlmostEqual(store._raw_relevance(anywhere, context), 0.0)
+        self.assertAlmostEqual(store._raw_relevance(same, context), 0.25)
+
+    def test_main_package_of_the_same_shape_ranks_first(self) -> None:
+        """A cmd/ main gets cmd/ examples before a root main."""
+
+        def scout(repo, stamp, main_path):
+            return {
+                "id": f"scout-{repo}",
+                "name": repo,
+                "tags": ["go"],
+                "build_system": "go",
+                "repo_name": repo,
+                "sandbox": "debian-riscv64",
+                "timestamp": stamp,
+                "trigger": {"has_main": True, "main_path": main_path},
+                "plan": {"phases": []},
+            }
+
+        _write_examples_file(
+            self.examples_dir,
+            "scout",
+            [
+                scout("cmd", "2026-09-01", "./cmd/a"),
+                scout("root", "2026-10-01", "."),
+            ],
+        )
+        store = AgentMemory("scout", examples_dir=self.examples_dir)
+        hits = store.get_relevant_examples(
+            {
+                "build_system": "go",
+                "sandbox": "debian-riscv64",
+                "has_main": True,
+                "main_path": "./cmd/tool",
+            },
+            2,
+        )
+        self.assertEqual([e.id for e in hits], ["scout-cmd", "scout-root"])
+
+
+class TestCommittedFixerData(unittest.TestCase):
+    """The committed data fixes the errors of the run logs (Debian)."""
+
+    def test_pv_configure_error_gets_the_gettext_fix(self) -> None:
+        """The pv configure stops on the gettext macros (2026-10-14 log)."""
+        store = AgentMemory("fixer")
+        error = (
+            "Build command failed: ./configure (exit 1) - aclocal: warning: "
+            "couldn't open directory 'm4': No such file or directory\n"
+            "configure.ac:19: error: possibly undefined macro: "
+            "AM_GNU_GETTEXT_VERSION"
+        )
+        hits = store.get_relevant_examples(
+            {
+                "build_system": "autotools",
+                "sandbox": "debian-riscv64",
+                "error_message": error,
+            }
+        )
+        self.assertIn("fixer-auto-024", [e.id for e in hits])
+
+
+class TestMarkRecipeVerification(unittest.TestCase):
+    """A crashing build is no longer a verified recipe."""
+
+    def test_the_verdict_changes_and_the_plan_stays(self) -> None:
+        import src.memory as memory_module
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cache = tmp / "recipe_cache.json"
+        with mock.patch.object(memory_module, "RECIPE_CACHE_PATH", cache):
+            save_to_recipe_cache(
+                repo_name="libwebp",
+                repo_url="https://github.com/webmproject/libwebp",
+                build_system="cmake",
+                build_plan={"phases": [{"name": "b", "commands": ["make"]}]},
+                dependencies=[],
+                patches=[],
+                artifacts=[],
+                build_duration_seconds=1.0,
+                sandbox="debian-riscv64-native",
+                verification={"status": "verified"},
+            )
+            self.assertTrue(
+                memory_module.mark_recipe_verification(
+                    "libwebp", "crashes", "SIGILL", "debian-riscv64-native"
+                )
+            )
+            self.assertFalse(
+                memory_module.mark_recipe_verification(
+                    "zlib", "crashes", "x", "debian-riscv64-native"
+                )
+            )
+            entry = load_recipe_cache()["packages"]["libwebp"][
+                "debian-riscv64-native"
+            ]
+        self.assertEqual(entry["verification"]["status"], "crashes")
+        self.assertEqual(
+            entry["build_plan"]["phases"][0]["commands"], ["make"]
         )

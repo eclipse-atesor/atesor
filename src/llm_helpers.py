@@ -31,6 +31,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -443,6 +444,9 @@ def llm_call_with_validation(
     # Pool indices that already spent their one Retry-After wait, so an
     # upstream that keeps 429ing can't trap us in a sleep loop.
     waited_pool_indices: set = set()
+    # Pool indices that already spent their one retry after a provider
+    # fault (an empty reply or a guard verdict).
+    fault_retried_pool_indices: set = set()
 
     while attempts < max_total_attempts:
         attempts += 1
@@ -478,6 +482,7 @@ def llm_call_with_validation(
             # account, and each further attempt is a wasted request.
             # Bail straight to the deterministic fallback.
             if _is_daily_cap_error(exc):
+                _record_daily_cap(exc)
                 last_reason = (
                     "OpenRouter daily free-model quota exhausted "
                     "(free-models-per-day). Rotation cannot help; "
@@ -625,14 +630,33 @@ def llm_call_with_validation(
 
         # Empty / whitespace-only content signals a provider-side issue
         # (soft rate-limit that returned 200 with no body, safety filter,
-        # or a mis-routed openrouter/auto pick). Same-model critique
-        # won't recover — rotate to the next pool entry instead.
-        if not raw or not raw.strip():
-            last_reason = "provider returned empty response"
+        # or a mis-routed openrouter/auto pick), and so does a guard
+        # verdict sent in place of the answer. After a guard verdict or
+        # an empty reply at the output cap, the same request goes to the
+        # same model once more at no critique cost; a second fault, or
+        # any other empty reply, rotates to the next model.
+        sentinel = (raw or "").strip().lower() in _PROVIDER_SENTINELS
+        if not raw or not raw.strip() or sentinel:
+            last_reason = (
+                f"provider returned {raw.strip()!r} instead of an answer"
+                if sentinel
+                else "provider returned empty response"
+            )
             logger.warning(
                 f"[{role}] attempt {attempts} "
                 f"(model={_model_id(active_llm)}): {last_reason}"
             )
+            at_cap = _hit_output_cap(response, active_llm, tokens_out)
+            if (
+                sentinel or at_cap
+            ) and pool_idx not in fault_retried_pool_indices:
+                fault_retried_pool_indices.add(pool_idx)
+                max_total_attempts += 1
+                logger.warning(
+                    f"[{role}] provider fault; asking "
+                    f"{_model_id(active_llm)} once more"
+                )
+                continue
             if pool_idx + 1 < len(llm_pool):
                 pool_idx += 1
                 active_llm = llm_pool[pool_idx]
@@ -809,6 +833,20 @@ _RETRY_AFTER_RE = re.compile(
 # rotation cannot recover from it.
 _DAILY_CAP_NEEDLE = "free-models-per-day"
 
+# Replies that a provider sends in place of the model's answer: a leaked
+# guard verdict. The free-model logs hold 35 of them, from 5 models.
+_PROVIDER_SENTINELS = frozenset({"user safety: safe"})
+
+# The reset time of the daily cap in the 429 body, in ms since the
+# epoch: 'X-RateLimit-Reset': '1790985600000'.
+_RATELIMIT_RESET_RE = re.compile(
+    r"x-ratelimit-reset'?\"?\s*[:=]\s*'?\"?(\d{10,13})", re.IGNORECASE
+)
+
+# Epoch seconds when the daily cap resets; set by the first call of
+# this process that hit the cap, else None.
+_daily_cap_reset: Optional[float] = None
+
 # Longest advisory wait worth sleeping through. Daily-cap errors carry
 # Retry-After values in the tens of thousands of seconds — treat those
 # as unavailable rather than sleeping.
@@ -844,6 +882,48 @@ def _extract_retry_after(exc: Exception) -> Optional[int]:
 def _is_daily_cap_error(exc: Exception) -> bool:
     """Return True when ``exc`` is the account-wide daily free cap."""
     return _DAILY_CAP_NEEDLE in str(exc).lower()
+
+
+def _hit_output_cap(response: Any, llm: Any, tokens_out: int) -> bool:
+    """Return True when the reply stopped at the output-token cap.
+
+    The stop reason says so (``length``, ``max_tokens``), or the output
+    tokens reach the ``max_tokens`` of ``llm``: the free-model logs
+    hold 81 empty replies with 8192 output tokens, the default cap.
+    """
+    if response_stop_reason(response) in ("length", "max_tokens"):
+        return True
+    cap = getattr(llm, "max_tokens", None)
+    return isinstance(cap, int) and cap > 0 and tokens_out >= cap
+
+
+def _record_daily_cap(exc: Exception) -> None:
+    """Record when the daily cap of ``exc`` resets.
+
+    Reads ``X-RateLimit-Reset`` from the error; without it, the cap
+    resets at the next 00:00 UTC.
+    """
+    global _daily_cap_reset
+    match = _RATELIMIT_RESET_RE.search(str(exc))
+    if match:
+        value = int(match.group(1))
+        reset = value / 1000.0 if value > 10**11 else float(value)
+    else:
+        tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+        reset = tomorrow.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).timestamp()
+    _daily_cap_reset = reset
+
+
+def daily_cap_reset_at() -> Optional[float]:
+    """Return when the daily free-model cap resets, if this process hit it.
+
+    Epoch seconds, or None when no call of this process hit the cap.
+    ``main.py`` reports a failed run that hit it as ``QUOTA``, and the
+    batch waits for this time before it starts the next port.
+    """
+    return _daily_cap_reset
 
 
 def _extract_affordable_tokens(exc: Exception) -> Optional[int]:

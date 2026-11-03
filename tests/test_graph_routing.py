@@ -454,6 +454,18 @@ class TestFixLoopStopRules(unittest.TestCase):
         )
         self.assertEqual(route_build_result(s), "fix_node")
 
+    def test_three_reasks_since_the_last_build_stop(self) -> None:
+        """Answers that change nothing never reach a build."""
+        s = _base_state(
+            build_status=BuildStatus.FIXING,
+            attempt_count=3,
+            fixes_attempted=[_fix(), _fix()],
+        )
+        s.context_cache["reasks_since_build"] = 2
+        self.assertEqual(_fix_loop_stop_reason(s), "")
+        s.context_cache["reasks_since_build"] = 3
+        self.assertIn("changed nothing", _fix_loop_stop_reason(s))
+
     def test_one_fix_with_unchanged_error_gets_another_round(self) -> None:
         msg = "Build command failed: make (exit 2) - a.c:3: error: x"
         s = _base_state(
@@ -606,3 +618,34 @@ class TestRouteFinish(unittest.TestCase):
         self.assertEqual(route_finish_to_next(_base_state()), "__end__")
         s = _base_state(optimize_requested=True)
         self.assertEqual(route_finish_to_next(s), "optimize_node")
+
+
+class TestStopRuleComparesErrorLines(unittest.TestCase):
+    """Progress is an error line that is gone, not a new first line."""
+
+    def _state(self, before: str, after: str):
+        return _base_state(
+            build_status=BuildStatus.FAILED,
+            attempt_count=3,
+            package_analysis=_analysis(),
+            fixes_attempted=[_fix(), _fix()],
+            error_history=[_error("other"), _error(before), _error(after)],
+        )
+
+    def test_a_removed_line_is_progress(self) -> None:
+        """gomuks: the olm line had gone; one compared line missed it."""
+        before = (
+            "Build command failed: go build (exit 1) - "
+            "olm.h: No such file or directory\n"
+            "libde265.h: No such file or directory"
+        )
+        after = (
+            "Build command failed: go build (exit 1) - "
+            "libde265.h: No such file or directory"
+        )
+        self.assertEqual(_fix_loop_stop_reason(self._state(before, after)), "")
+
+    def test_make_summary_lines_are_no_progress(self) -> None:
+        line = "Build command failed: make -j4 (exit 2) - a.c:1: error: x\n"
+        before = line + "make[1]: *** Waiting for unfinished jobs....\n"
+        self.assertTrue(_fix_loop_stop_reason(self._state(before, line)))

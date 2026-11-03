@@ -54,6 +54,30 @@ def _guard_tracked_data_files() -> Iterator[None]:
     )
 
 
+@pytest.fixture(scope="session")
+def _failure_memory_dir(tmp_path_factory: pytest.TempPathFactory):
+    """Return a session directory for the failure memory of tests."""
+    return tmp_path_factory.mktemp("failure-memory")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_failure_memory(
+    _failure_memory_dir, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Keep the failure memory that fixer and escalation write out of data/.
+
+    The fixer and escalate nodes record failed fixes in
+    ``memory.FAILURES_PATH``; a test writes to a scratch file instead,
+    which is removed after the test.
+    """
+    from src import memory
+
+    path = _failure_memory_dir / "failures.json"
+    monkeypatch.setattr(memory, "FAILURES_PATH", path)
+    yield
+    path.unlink(missing_ok=True)
+
+
 @pytest.fixture(autouse=True)
 def _no_package_test_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep finish_node's package test phase off in unit tests.
@@ -96,6 +120,22 @@ def _restore_active_profile() -> Iterator[None]:
         yield
     finally:
         platforms._cached_profile = saved
+
+
+@pytest.fixture(autouse=True)
+def _reset_daily_cap() -> Iterator[None]:
+    """Forget a daily free-model cap that a test's LLM call recorded.
+
+    ``llm_helpers`` keeps the reset time for the whole process; without
+    the reset, ``main.py`` would label a later test's failed run QUOTA.
+    """
+    from src import llm_helpers
+
+    llm_helpers._daily_cap_reset = None
+    try:
+        yield
+    finally:
+        llm_helpers._daily_cap_reset = None
 
 
 @pytest.fixture(autouse=True)

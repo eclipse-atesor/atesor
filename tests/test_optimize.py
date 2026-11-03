@@ -3162,3 +3162,28 @@ class TestSandboxPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVariantBuildInfrastructureFault(unittest.TestCase):
+    """A dead container during a tune build runs the command once more."""
+
+    def _build(self, results):
+        from src.state import CommandResult
+
+        queue = [CommandResult("cmake", *r) for r in results]
+        with (
+            mock.patch.object(optimize, "execute_command", side_effect=queue),
+            mock.patch.object(
+                optimize, "ensure_build_container", return_value="started"
+            ),
+        ):
+            return optimize.build_variant(
+                ["cmake --build build"], "/workspace/repos/x", "/t", {}, 600
+            )
+
+    def test_rerun_after_a_fault(self) -> None:
+        self.assertIsNone(self._build([(137, "", "", 1.0), (0, "", "", 5.0)]))
+
+    def test_a_fault_that_stays_is_named(self) -> None:
+        error = self._build([(137, "", "", 1.0), (137, "", "", 1.0)])
+        self.assertIn("infrastructure fault", error)

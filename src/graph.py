@@ -29,6 +29,7 @@ import re
 import shlex
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -36,7 +37,13 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
-from .artifact_scanner import UNVERIFIED, WRONG_ARCH, ArtifactScanner
+from .artifact_scanner import (
+    UNVERIFIED,
+    VERIFIED,
+    WRONG_ARCH,
+    ArtifactScanner,
+)
+from .bench import crash_signal
 from .evidence import (
     collect_build_evidence,
     cut_text,
@@ -45,6 +52,7 @@ from .evidence import (
     first_error_line,
     has_error_line,
     strip_failure_prefix,
+    strip_go_download_noise,
     top_level_listing,
 )
 from .knowledge import get_system_knowledge_summary
@@ -57,16 +65,30 @@ from .llm_helpers import (
     response_stop_reason,
     response_usage,
 )
-from .llm_logger import log_llm_call
+from .llm_logger import log_data_effect, log_llm_call
+from .machine import (
+    MachineProfile,
+    forbidden_classes,
+    parse_isa_string,
+    probe_machine,
+)
 from .memory import (
     format_few_shot_examples,
+    get_agent_memory,
+    get_cached_recipe,
+    load_failure_records,
+    load_recipe_cache,
+    mark_recipe_verification,
+    recall_sandboxes,
     record_optimization,
+    save_failure_record,
     save_learned_example,
     save_to_recipe_cache,
 )
 from .models import LLM_REQUEST_TIMEOUT, create_llm
 from .scripted_ops import ScriptedOperations, quick_analysis
 from .state import (
+    TIME_LIMIT_MARK,
     AgentRole,
     AgentState,
     BuildPhase,
@@ -79,18 +101,20 @@ from .state import (
     PackageAnalysis,
     TaskPhase,
     TaskPlan,
-    _error_signature,
     _first_meaningful_error_line,
     _normalize_error_line,
     classify_error,
     create_error_record,
     should_escalate,
 )
+from .target import is_native
 from .tools import (
     BUILD_STEP_RE,
     CommandValidator,
     apply_patch,
+    ensure_build_container,
     execute_command,
+    infrastructure_fault,
     masks_failure,
 )
 
@@ -497,6 +521,9 @@ def _replan_signature(error_message: str) -> str:
         "missing_package": "unable to locate package",
         "go_inconsistent_vendoring": "inconsistent vendoring",
         "missing_configure_script": "./configure: no such file or directory",
+        # go.mod sits in a subdirectory: the plan builds in the wrong
+        # place, which a new plan fixes (arc: v1/).
+        "go_no_main_module": "cannot find main module",
     }
     for key, needle in signatures.items():
         if needle in msg:
@@ -741,6 +768,22 @@ def init_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.warning(f"Quick analysis failed: {e}")
 
+    # What earlier runs of the package left: a recipe, failed fixes.
+    recall = _recall(state)
+    if recall.get("recipe"):
+        verdict = (recall["recipe"].get("verification") or {}).get(
+            "status"
+        ) or "not recorded"
+        logger.info(
+            f"Recall: a recipe of {state.repo_name} from "
+            f"{recall['sandbox']} ({verdict})"
+        )
+    if recall.get("failures"):
+        logger.info(
+            f"Recall: failed fixes for {len(recall['failures'])} error(s) "
+            "of earlier runs"
+        )
+
     state.build_status = BuildStatus.PENDING
     state.current_phase = "initialized"
 
@@ -962,6 +1005,121 @@ def _format_analysis_for_prompt(
     )
 
 
+# Outputs that are no riscv64 ELF: scripts, sources, data, bytecode.
+# ``.node`` (a Node addon) and ``.whl`` or ``.gem`` (can hold a
+# compiled extension) are not in the list.
+_NON_NATIVE_SUFFIXES = (
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".json",
+    ".map",
+    ".css",
+    ".html",
+    ".py",
+    ".pyc",
+    ".jar",
+    ".class",
+    ".war",
+    ".php",
+    ".phar",
+    ".rb",
+    ".md",
+    ".txt",
+    ".yml",
+    ".yaml",
+    ".xml",
+    ".sh",
+    ".pl",
+    ".lua",
+    ".wasm",
+)
+# A file that builds native code; one of them keeps the pipeline going.
+_NATIVE_BUILD_FILES = frozenset(
+    {
+        "binding.gyp",
+        "CMakeLists.txt",
+        "meson.build",
+        "configure.ac",
+        "configure.in",
+        "Makefile.am",
+        "Cargo.toml",
+        "go.mod",
+        "build.zig",
+        "setup.py",
+    }
+)
+_NATIVE_SOURCE_SUFFIXES = (
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".c++",
+    ".rs",
+    ".go",
+    ".zig",
+    ".s",
+    ".asm",
+    ".f90",
+)
+# The source scan stops here and then assumes native code.
+_NATIVE_SCAN_LIMIT = 20000
+
+
+def _native_build_input(host_repo: str) -> str:
+    """Return the first native build file or source in the repo, or "".
+
+    Skips ``.git`` and ``node_modules``. Returns ``"(scan limit)"``
+    when the tree has more than ``_NATIVE_SCAN_LIMIT`` files, and
+    ``"(no tree)"`` when the repo cannot be read: both count as native.
+    """
+    if not os.path.isdir(host_repo):
+        return "(no tree)"
+    seen = 0
+    for root, dirs, files in os.walk(host_repo):
+        dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+        for name in files:
+            seen += 1
+            if seen > _NATIVE_SCAN_LIMIT:
+                return "(scan limit)"
+            if name in _NATIVE_BUILD_FILES or name.lower().endswith(
+                _NATIVE_SOURCE_SUFFIXES
+            ):
+                return os.path.relpath(os.path.join(root, name), host_repo)
+    return ""
+
+
+def _unsupported_reason(state: AgentState) -> str:
+    """Return why the package cannot give a riscv64 binary, or "".
+
+    The analyst named only scripts or data as outputs, and the repo has
+    no native build file or source. nginx-binaries (a TypeScript
+    library; outputs ``lib/index.js`` and ``lib/index.d.ts``) ran the
+    whole pipeline to "no ELF executable"; it is the only one of 162
+    logged analyst answers that this rule matches. The rule does not
+    use an empty output list: none of the 162 answers had one.
+    """
+    analysis = state.package_analysis
+    if analysis is None or not analysis.llm_grounded:
+        return ""
+    outputs = [str(a) for a in analysis.expected_artifacts if str(a).strip()]
+    if not outputs or not all(
+        a.lower().endswith(_NON_NATIVE_SUFFIXES) for a in outputs
+    ):
+        return ""
+    if _native_build_input(_to_host_path(state.repo_path)):
+        return ""
+    language = f" ({analysis.language})" if analysis.language else ""
+    return (
+        f"the package builds no riscv64 binary: the analyst expects only "
+        f"{', '.join(outputs[:5])}{language}, and the repo has no native "
+        f"source or build file"
+    )
+
+
 @agent_node(AgentRole.PLANNER)
 def analyst_node(state: AgentState) -> AgentState:
     """Read the repo evidence and produce the consumed PackageAnalysis.
@@ -1117,6 +1275,10 @@ def analyst_node(state: AgentState) -> AgentState:
     # it, and no routing decision reads it.
     state.task_plan = create_default_plan()
     state.current_phase = "analyzed"
+    unsupported = _unsupported_reason(state)
+    if unsupported:
+        logger.warning(f"Unsupported package: {unsupported}")
+        state.context_cache["unsupported"] = unsupported
     return state
 
 
@@ -1254,10 +1416,12 @@ SCOUT_PROMPT = (
     "6. For Go: if `go.mod` is missing, first phase must `go mod init <m"
     "odule_path>` then `go mod tidy`. Always pass `-buildvcs=false` to `"
     "go build`. **If `Project context` in the user message gives a "
-    "`build_command`, us"
-    "e exactly that command — do not substitute `go build ./...` (which "
+    "`plan_command`, use exactly that command (it already runs in the "
+    "module directory) — do not substitute `go build ./...` (which "
     "compiles every helper and fails on the first one with missing deps)"
-    ".** Never emit `go build ./cmd` or `go build ./<top-level-dir>` "
+    ".** Run `go mod tidy` only when `go.sum` is missing "
+    "(`has_go_sum` is false); `go build` fetches what it needs. "
+    "Never emit `go build ./cmd` or `go build ./<top-level-dir>` "
     "without an explicit output path; if building a subpackage, use "
     "`go build -o ./bin/<name> <package>`.\n"
     "7. Disable optional features that pull in heavy or x86-specific dep"
@@ -1320,6 +1484,8 @@ SCOUT_TASK_PROMPT = (
     "\n"
     "### Documentation excerpts\n"
     "{documentation}\n"
+    "\n"
+    "{recall_section}\n"
     "\n"
     "{few_shot_examples}\n"
     "\n"
@@ -1723,12 +1889,24 @@ def scout_node(state: AgentState) -> AgentState:
     few_shot_context = {
         "build_system": build_sys.type if build_sys else "unknown",
         "has_main": go_main_info.get("has_main", False),
-        "main_path": go_main_info.get("main_path", ""),
-        "module_dir": module_dir,
+        "module_dir": go_main_info.get("module_dir", module_dir),
+        # An example of this package outranks every other one.
+        "repo_name": state.repo_name,
     }
-    few_shot_examples = format_few_shot_examples(
-        "scout", few_shot_context, max_examples=2, max_chars=2000
+    if build_type_lower == "go":
+        if go_main_info.get("main_path"):
+            few_shot_context["main_path"] = go_main_info["main_path"]
+        few_shot_context["has_cgo"] = _analysis_mentions_cgo(state)
+    elif module_dir:
+        few_shot_context["nested_root"] = module_dir
+    few_shot_examples = (
+        ""
+        if state.replan
+        else format_few_shot_examples(
+            "scout", few_shot_context, max_examples=2, max_chars=2000
+        )
     )
+    _note_examples(state, "scout", few_shot_examples)
 
     # When the supervisor re-scouts after a failure, the new plan must
     # actually address the failure — otherwise the scout regenerates
@@ -1803,6 +1981,7 @@ def scout_node(state: AgentState) -> AgentState:
         repo_path=state.repo_path,
         system_info=system_info,
         previous_failure=previous_failure,
+        recall_section=_recall_prompt_section(state),
         few_shot_examples=few_shot_examples,
     )
 
@@ -1838,6 +2017,18 @@ def scout_node(state: AgentState) -> AgentState:
                         f"package tools only, or drop the step (version "
                         f"checks are not needed)"
                     )
+        # A -march the machine lacks gives a program that dies with
+        # SIGILL (libwebp: rv64gcv on a board without V).
+        misfit = _plan_isa_problems(
+            state, [c for p in phases for c in p.get("commands") or []]
+        )
+        if misfit:
+            profile = _machine(state)
+            return ValidationResult.bad(
+                f"{'; '.join(misfit)}: this machine runs "
+                f"{profile.label if profile else 'another ISA'}; drop the "
+                "flag or name only extensions that the machine has"
+            )
         # Dry-build a BuildPlan to reuse the existing semantic validator
         try:
             trial_phases = [
@@ -1892,6 +2083,9 @@ def scout_node(state: AgentState) -> AgentState:
                 if state.build_system_info
                 else "unknown"
             ),
+            # The examples the prompt carried, to measure their effect.
+            "examples": list(getattr(few_shot_examples, "ids", ())),
+            "recall": _recall_label(state),
         },
         max_retries=2,
     )
@@ -1952,6 +2146,7 @@ def scout_node(state: AgentState) -> AgentState:
             notes=plan_data.get("notes", []),
         )
         state.last_successful_phase = 0
+        state.context_cache["plan_source"] = "scout"
         logger.info(f"Build plan created and validated: {len(phases)} phases")
 
     except Exception as e:
@@ -1976,11 +2171,13 @@ def scout_node(state: AgentState) -> AgentState:
             state.build_status = BuildStatus.FAILED
             return state
         logger.info("Using fallback build plan due to scout failure")
+        # The fallback plan builds, and that build counts the attempt.
         state.add_error(
             create_error_record(
                 message=f"Scout failed: {e}",
                 category=ErrorCategory.UNKNOWN,
-            )
+            ),
+            count_attempt=False,
         )
         state.build_plan = create_fallback_build_plan(state)
 
@@ -2013,26 +2210,13 @@ def create_fallback_build_plan(state: AgentState) -> BuildPlan:
 
     if build_type == "go":
         go_main_info = state.context_cache.get("go_main_info", {})
-        needs_init = go_main_info.get("needs_go_init", False)
-        build_cmd = go_main_info.get(
-            "build_command", "go build -buildvcs=false ./..."
-        )
         module_name = (
             state.repo_url.replace("https://", "").rstrip("/")
             if state.repo_url
             else f"github.com/unknown/{state.repo_name}"
         )
 
-        build_cmds = []
-        if needs_init:
-            build_cmds += [f"go mod init {module_name}", "go mod tidy"]
-        else:
-            build_cmds.append("go mod tidy")
-        build_cmds.append(
-            build_cmd
-            if build_cmd != "go build ."
-            else "go build -buildvcs=false ./..."
-        )
+        build_cmds = _go_prepare_commands(go_main_info, module_name)
 
         return BuildPlan(
             build_system="go",
@@ -2401,6 +2585,32 @@ def _extract_cd_prefix(command: str) -> str:
     return match.group(1) if match else ""
 
 
+def _go_prepare_commands(go_main_info: dict, module_name: str) -> List[str]:
+    """Return the Go plan commands for a detected module.
+
+    ``go mod tidy`` runs only for a new module or a missing ``go.sum``:
+    it resolves the dependencies of every package and platform, which
+    took 5-25 minutes under QEMU (run 80). ``go build`` downloads only
+    what it needs, and the builder runs ``go mod tidy`` itself when the
+    build reports a missing ``go.sum`` entry.
+    """
+    module_dir = go_main_info.get("module_dir") or ""
+    prefix = f"cd {module_dir} && " if module_dir else ""
+    cmds = []
+    if go_main_info.get("needs_go_init"):
+        cmds += [f"go mod init {module_name}", "go mod tidy"]
+    elif not go_main_info.get("has_go_sum"):
+        cmds.append(f"{prefix}go mod tidy")
+    command = go_main_info.get("plan_command") or go_main_info.get(
+        "build_command"
+    )
+    if go_main_info.get("has_main") and command:
+        cmds.append(command)
+    else:
+        cmds.append(f"{prefix}go build -buildvcs=false ./...")
+    return cmds
+
+
 def _inject_go_flag(command: str, flag: str) -> str:
     """Inject a Go build/install flag once, keeping the command shape."""
     if flag in command:
@@ -2462,6 +2672,15 @@ _HEADER_CANONICAL_HINTS = {
     "curl": "curl",
     "heif": "libheif",
     "openjpeg": "openjpeg",
+    "pcap": "libpcap",
+    "capability": "libcap",
+    "rdkafka": "librdkafka",
+    "olm": "libolm",
+    "de265": "libde265",
+    "yuv": "libyuv",
+    "ncurses": "ncurses",
+    "curses": "ncurses",
+    "sqlite3": "sqlite",
 }
 
 
@@ -2525,6 +2744,10 @@ def _is_suspected_oom(result, command: str) -> bool:
         ``True`` if the failure looks like an OOM kill worth retrying
         serially, otherwise ``False``.
     """
+    # A stop at the command time limit also exits 137 but is no
+    # memory kill (run 80: 121 of 139 exit-137 kills came at the limit).
+    if getattr(result, "timed_out", False):
+        return False
     # Universal signal — always trust exit 137 as OOM, for every
     # command: in run 28020958388, cargo fetch / pip install /
     # dependency downloads also OOM'd for 58 packages.
@@ -2606,6 +2829,81 @@ def _serialize_build_command(command: str) -> str:
     return command
 
 
+# Memory that one rustc job can take on a large crate, in GiB. A worker
+# runs no more cargo jobs than its share of the memory holds.
+_RUST_GIB_PER_JOB = 3
+
+# A cargo command that compiles, at the start of a command or a chain
+# segment, after optional variable assignments. ``cargo fetch`` and
+# ``cargo update`` compile nothing.
+_CARGO_COMPILE_RE = re.compile(
+    r"(^|&&|\|\||;|\(|\|)(\s*)((?:env\s+)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s\"'])*\s+)*"
+    r"cargo(?:\s+\+\S+)?\s+"
+    r"(?:build|install|test|bench|check|run|doc|rustc)\b)"
+)
+_CARGO_JOBS_SET_RE = re.compile(
+    r"CARGO_BUILD_JOBS|\bcargo\b[^;&|]*\s(?:-j\s*\d|--jobs\b)"
+)
+
+
+def _batch_workers() -> int:
+    """Return the worker count of the batch (``ATESOR_BATCH_WORKERS``).
+
+    1 for a single run, or when the value is not a number.
+    """
+    raw = os.environ.get("ATESOR_BATCH_WORKERS", "").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _cargo_jobs(profile: Optional[MachineProfile]) -> Optional[int]:
+    """Return the cargo job count for this worker's share of the machine.
+
+    The share is the cores and the memory divided by the batch workers;
+    one job needs ``_RUST_GIB_PER_JOB``. None without a probe that
+    found the cores and the memory.
+    """
+    if profile is None or not profile.cores or not profile.mem_kib:
+        return None
+    workers = _batch_workers()
+    cores = max(1, profile.cores // workers)
+    mem_gib = profile.mem_kib / (1024 * 1024) / workers
+    return max(1, min(cores, int(mem_gib // _RUST_GIB_PER_JOB)))
+
+
+def _with_cargo_jobs(command: str, state: AgentState) -> str:
+    """Return ``command`` with ``CARGO_BUILD_JOBS`` for this worker.
+
+    Applies on the native machine only (the probe gives the cores and
+    the memory), to each cargo command that compiles and sets no job
+    count. A count equal to the cores is cargo's own default, so the
+    command does not change.
+    """
+    if not _CARGO_COMPILE_RE.search(command):
+        return command
+    if _CARGO_JOBS_SET_RE.search(command):
+        return command
+    profile = _machine(state)
+    jobs = _cargo_jobs(profile)
+    if jobs is None or jobs >= (profile.cores or 0):
+        return command
+    return _CARGO_COMPILE_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}env CARGO_BUILD_JOBS={jobs} "
+        f"{m.group(3)}",
+        command,
+    )
+
+
+# The time limit for a build command that runs again after it stopped at
+# the normal 1800 s limit. Cargo cannot continue inside one crate, so one
+# crate that compiles longer than the normal limit (jj_cli with
+# codegen-units = 1 on a 4-core riscv64 board) needs a longer second run.
+_RESUME_TIMEOUT_SECONDS = 3600
+
+
 def _builder_retry_allowed(state: AgentState, key: str) -> bool:
     """Allow a deterministic builder retry at most once per signature key."""
     tried = state.context_cache.setdefault("builder_retry_keys", [])
@@ -2613,6 +2911,10 @@ def _builder_retry_allowed(state: AgentState, key: str) -> bool:
         return False
     tried.append(key)
     return True
+
+
+# Prefix of the error the builder records when its guard escalates.
+_INFRA_FAULT = "Infrastructure fault"
 
 
 # Common import-name -> pip-distribution-name mismatches. Anything not listed
@@ -2698,6 +3000,118 @@ def _download_go_toolchain_cmd(version: str) -> str:
     )
 
 
+# A Go command at the start of a command or a chain segment, after
+# optional variable assignments. Each of these fails at once when the
+# ``go`` line of go.mod names a newer Go than the sandbox runs.
+_GO_COMMAND_RE = re.compile(
+    r"(?:^|&&|\|\||;|\()\s*(?:env\s+)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*go\s+"
+    r"(?:build|install|test|run|generate|vet|mod|get|list|work)\b"
+)
+_GO_LINE_RE = re.compile(
+    r"^go\s+(\d+\.\d+(?:\.\d+)?(?:(?:rc|beta)\d+)?)\s*(?://.*)?$",
+    re.MULTILINE,
+)
+_GO_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?(?:(rc|beta)(\d+))?")
+
+
+def _go_version_key(version: str) -> Optional[tuple]:
+    """Return a sort key for a Go version (``1.27``, ``1.27.1``, ``1.27rc1``).
+
+    A pre-release sorts before the release; ``1.27`` is ``1.27.0``.
+    None for a text that is no Go version.
+    """
+    match = _GO_VERSION_RE.fullmatch(version or "")
+    if not match:
+        return None
+    major, minor, patch, pre, pre_num = match.groups()
+    return (
+        int(major),
+        int(minor),
+        int(patch or 0),
+        -1 if pre else 0,
+        int(pre_num or 0),
+    )
+
+
+def _go_mod_requirement(state: AgentState, command: str) -> Optional[str]:
+    """Return the ``go`` line of the go.mod that ``command`` builds.
+
+    Reads the go.mod of the ``cd`` target of the command, else the one
+    at the repo root. None when neither has a ``go`` line.
+    """
+    host_repo = _to_host_path(state.repo_path)
+    dirs = []
+    match = re.match(r"^\s*cd\s+([^&;|]+?)\s*&&", command)
+    if match:
+        target = match.group(1).strip().strip("'\"")
+        if target.startswith("/"):
+            dirs.append(_to_host_path(target))
+        else:
+            dirs.append(os.path.join(host_repo, target))
+    dirs.append(host_repo)
+    for directory in dirs:
+        try:
+            with open(
+                os.path.join(directory, "go.mod"), encoding="utf-8"
+            ) as fh:
+                text = fh.read(65536)
+        except OSError:
+            continue
+        found = _GO_LINE_RE.search(text)
+        if found:
+            return found.group(1)
+    return None
+
+
+def _ensure_go_toolchain(state: AgentState, command: str) -> None:
+    """Install the Go of go.mod before the first Go command of the run.
+
+    gobusybox, libaws, xray-knife and mult each ran a first build that
+    failed on ``go.mod requires go >= 1.27`` (the image has 1.26.5),
+    and the builder then downloaded the toolchain. The check runs once
+    per run, at the first Go command whose go.mod has a ``go`` line;
+    the download is the builder's recovery command. When the check or
+    the download fails, the build runs as before and the recovery
+    after the failure still applies.
+    """
+    if state.context_cache.get("go_toolchain_checked"):
+        return
+    if not _GO_COMMAND_RE.search(command) or "GOTOOLCHAIN" in command:
+        return
+    needed = _go_mod_requirement(state, command)
+    needed_key = _go_version_key(needed or "")
+    if needed_key is None:
+        return
+    state.context_cache["go_toolchain_checked"] = True
+    # Both commands are fixed text built here, not an LLM answer, so
+    # the command whitelist does not apply (as in the recovery).
+    probe = execute_command(
+        "go env GOVERSION", cwd=state.repo_path, validate=False
+    )
+    found = re.search(r"go(\S+)", (probe.stdout or "").strip())
+    running_key = _go_version_key(found.group(1)) if found else None
+    if not probe.success or running_key is None or running_key >= needed_key:
+        return
+    # go.dev names the first release 1.27.0, not 1.27.
+    version = f"{needed}.0" if re.fullmatch(r"\d+\.\d+", needed) else needed
+    logger.info(
+        f"go.mod needs Go {needed}, the sandbox runs {found.group(1)}; "
+        f"downloading Go {version} before the first build"
+    )
+    result = execute_command(
+        _download_go_toolchain_cmd(version),
+        cwd=state.repo_path,
+        validate=False,
+    )
+    state.log_scripted_op("install_go_version")
+    if not result.success:
+        logger.warning(
+            f"Go {version} download failed (exit {result.exit_code}); "
+            "the build runs with the installed Go"
+        )
+
+
 def _repo_has_gitmodules(repo_path: str) -> bool:
     """Return True when ``repo_path`` contains a ``.gitmodules`` file."""
     try:
@@ -2750,6 +3164,9 @@ def builder_node(state: AgentState) -> AgentState:
 
     state.build_status = BuildStatus.BUILDING
     state.current_phase = "building"
+    state.build_count += 1
+    # The fixer's answers without a change count from this build on.
+    state.context_cache["reasks_since_build"] = 0
 
     if not state.build_plan:
         logger.error("No build plan available")
@@ -2822,7 +3239,7 @@ def builder_node(state: AgentState) -> AgentState:
                     os.path.join(
                         _to_host_path(state.repo_path), "m4", "gettext.m4"
                     )
-                ):
+                ) and _gettext_m4_was_fixed(state):
                     optimized_cmd = (
                         "cp /usr/share/gettext/m4/*.m4 m4/ 2>/dev/null || true"
                         " && aclocal -I m4 -I /usr/share/aclocal"
@@ -2924,6 +3341,17 @@ def builder_node(state: AgentState) -> AgentState:
                         )
                         continue
 
+            _ensure_go_toolchain(state, optimized_cmd)
+
+            # Cargo runs one rustc per core. On the board, the batch
+            # workers share the cores and the memory (nushell: 4 jobs
+            # next to another worker, OOM-killed after 29.6 minutes).
+            jobs_cmd = _with_cargo_jobs(optimized_cmd, state)
+            if jobs_cmd != optimized_cmd:
+                state.log_scripted_op("cargo_build_jobs")
+                logger.info(f"Limited cargo jobs: {jobs_cmd[:120]}")
+                optimized_cmd = jobs_cmd
+
             result = execute_command(optimized_cmd, cwd=state.repo_path)
             state.cache_command_result(command, result)
             state.log_scripted_op("execute_build_command")
@@ -2931,6 +3359,49 @@ def builder_node(state: AgentState) -> AgentState:
             if not result.success:
                 logger.error(f"Command failed: {command}")
                 logger.error(f"Error: {result.stderr[:500]}")
+
+                # A stopped container, a dropped ssh session or a host
+                # that slept is no build error, so the fixer must not
+                # see it: start the container when it stopped, run the
+                # command once more, and escalate when the fault stays.
+                # Only a plan command runs again, never a fix command.
+                fault = infrastructure_fault(result)
+                if fault and _builder_retry_allowed(state, f"infra:{command}"):
+                    container = ensure_build_container()
+                    logger.warning(
+                        f"Infrastructure fault ({fault}); the build "
+                        f"container is {container}; running the command "
+                        "once more"
+                    )
+                    state.log_scripted_op("infrastructure_rerun")
+                    result = execute_command(
+                        optimized_cmd, cwd=state.repo_path
+                    )
+                    state.cache_command_result(command, result)
+                    if result.success:
+                        continue
+                    fault = infrastructure_fault(result)
+                if fault:
+                    output = result.stderr or result.stdout
+                    message = (
+                        f"{_INFRA_FAULT}: {fault}. Command: `{command[:200]}` "
+                        f"(exit {result.exit_code}) - "
+                        f"{_one_line_tail(output, 400)}"
+                    )
+                    state.add_error(
+                        create_error_record(
+                            message=message,
+                            category=ErrorCategory.INFRASTRUCTURE,
+                            severity=FailureSeverity.HIGH,
+                            command=command,
+                            attempt_number=state.attempt_count,
+                        )
+                    )
+                    state.build_status = BuildStatus.ESCALATED
+                    state.log_agent_decision(
+                        AgentRole.BUILDER, "ESCALATE", message[:300]
+                    )
+                    return state
 
                 is_go_build = _is_go_build_command(optimized_cmd)
                 is_vcs_error = any(
@@ -3031,10 +3502,13 @@ def builder_node(state: AgentState) -> AgentState:
                         continue
                     result = retry_result
 
-                if (
-                    is_go_build
-                    and "no required module provides"
-                    in (result.stderr or "").lower()
+                if is_go_build and any(
+                    marker in (result.stderr or "").lower()
+                    for marker in (
+                        "no required module provides",
+                        "missing go.sum entry",
+                        "updates to go.mod needed",
+                    )
                 ):
                     prefix = _extract_cd_prefix(optimized_cmd)
                     tidy_cmd = f"{prefix}go mod tidy"
@@ -3310,12 +3784,45 @@ def builder_node(state: AgentState) -> AgentState:
                                 continue
                             result = retry_result
 
+                # Stopped at the command time limit: the build output so
+                # far is kept, so the same command continues the build.
+                # A -j1 retry (the memory-kill path) would only be slower.
+                if getattr(result, "timed_out", False) and (
+                    _builder_retry_allowed(state, f"timelimit:{command}")
+                ):
+                    resume_cmd = result.command or optimized_cmd
+                    logger.warning(
+                        "Command reached its time limit; running it again "
+                        f"to continue the build: {resume_cmd[:120]}"
+                    )
+                    retry_result = execute_command(
+                        resume_cmd,
+                        cwd=state.repo_path,
+                        timeout=_RESUME_TIMEOUT_SECONDS,
+                    )
+                    state.cache_command_result(resume_cmd, retry_result)
+                    state.log_scripted_op("retry_build_command")
+                    if retry_result.success:
+                        logger.info(
+                            "Build finished after continuing past the "
+                            "time limit"
+                        )
+                        if resume_cmd != command:
+                            phase.commands[phase.commands.index(command)] = (
+                                resume_cmd
+                            )
+                        continue
+                    result = retry_result
+
                 # Suspected QEMU OOM-kill (exit 137 / empty output) on a
                 # parallel build -> retry single-threaded. Generic fallback,
                 # checked after the recoveries above so their specific
-                # signatures win first.
-                if _is_suspected_oom(result, optimized_cmd):
-                    serial_cmd = _serialize_build_command(optimized_cmd)
+                # signatures win first. It serializes the command that
+                # ran last (a recovery above may have changed it).
+                if _is_suspected_oom(result, result.command or optimized_cmd):
+                    serial_cmd = _serialize_build_command(
+                        result.command or optimized_cmd
+                    )
                     if serial_cmd != optimized_cmd and _builder_retry_allowed(
                         state, f"oom:{command}"
                     ):
@@ -3641,6 +4148,16 @@ def validate_fix_command(command: str) -> tuple[bool, str]:
         hint = ""
         if "Unknown command pattern" in single_reason:
             hint = f". Allowed tools include: {_ALLOWED_TOOLS_HINT}"
+        elif "Redirection" in single_reason:
+            hint = (
+                ". To write a file, use a create_file action with a path "
+                "inside the repo; to change a line, use `sed -i`"
+            )
+        elif "Chained" in single_reason:
+            hint = (
+                ". Put each command in its own action; to change a build "
+                "plan command, use a plan_command action"
+            )
         return False, f"{single_reason}: `{command[:160]}`{hint}"
 
     return True, "Command is safe"
@@ -3655,16 +4172,127 @@ _ALLOWED_TOOLS_HINT = (
 )
 
 
-def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
+def _split_and_chain(command: str) -> Optional[List[str]]:
+    """Return the parts of a plain ``a && b`` chain, or None.
+
+    Only a top-level ``&&`` splits: quoted text, backquotes, ``$(...)``
+    and ``( ... )`` stay whole. A chain that also holds ``||``, ``;``,
+    ``|``, ``&`` or a line break is no plain chain: its meaning changes
+    when the parts run alone.
+    """
+    parts: List[str] = []
+    buf: List[str] = []
+    quote = ""
+    depth = 0
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == "\\" and i + 1 < n:
+            buf.append(command[i : i + 2])
+            i += 2
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif depth == 0 and command.startswith("&&", i):
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 2
+            continue
+        elif depth == 0 and ch in ";|&\n":
+            return None
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf).strip())
+    if quote or depth or len(parts) < 2 or not all(parts):
+        return None
+    return parts
+
+
+def _split_chained_actions(actions: List[Any]) -> List[Any]:
+    """Split each plain ``&&`` chain of the fixer into single commands.
+
+    A ``cd <dir>`` part becomes the ``cd <dir> && `` prefix of the parts
+    after it (``mkdir -p build && cd build && cmake ..`` gives
+    ``mkdir -p build`` and ``cd build && cmake ..``). A chain is split
+    only when every new command passes ``validate_fix_command``; else
+    it stays whole, and the validator rejects it with its reason. The
+    parts of one chain share a ``chain`` number: when one fails, the
+    fixer skips the rest, as ``&&`` would. In October 2026 the rule
+    against chains cost grep 17 of its 25 fixer answers.
+    """
+    out: List[Any] = []
+    group = 0
+    for action in actions:
+        command = (
+            str(action.get("command") or "").strip()
+            if isinstance(action, dict) and action.get("type") == "command"
+            else ""
+        )
+        parts = _split_and_chain(command) if command else None
+        commands: List[str] = []
+        cwd = ""
+        for part in parts or []:
+            if part == "cd" or part.startswith("cd "):
+                try:
+                    words = shlex.split(part)
+                except ValueError:
+                    words = []
+                if len(words) != 2:
+                    commands = []
+                    break
+                target = words[1]
+                cwd = (
+                    os.path.normpath(os.path.join(cwd, target))
+                    if cwd and not target.startswith("/")
+                    else target
+                )
+                continue
+            prefix = f"cd {shlex.quote(cwd)} && " if cwd else ""
+            commands.append(prefix + part)
+        if (
+            not commands
+            or commands == [command]
+            or not all(validate_fix_command(c)[0] for c in commands)
+        ):
+            out.append(action)
+            continue
+        group += 1
+        out.extend(
+            {"type": "command", "command": c, "chain": group} for c in commands
+        )
+    return out
+
+
+def validate_fixer_response(
+    fix_data: Dict, plan_commands: Optional[List[str]] = None
+) -> tuple[bool, str]:
     """Check a fixer JSON response for structure, safety and containment.
 
     The recommended strategy must exist and carry at least one action;
     ``create_file``/``patch`` paths must stay inside the repo tree;
-    ``command`` actions must pass ``validate_fix_command``. A thin
-    ``reflection`` block only logs a warning — it never rejects a fix.
+    ``command`` actions must pass ``validate_fix_command``; a
+    ``plan_command`` must replace an exact command of the current plan
+    with one that the plan validator accepts. A thin ``reflection``
+    block only logs a warning — it never rejects a fix.
 
     Args:
         fix_data: The parsed JSON object from the fixer model.
+        plan_commands: The commands of the current build plan; a
+            ``plan_command`` action is rejected without them.
 
     Returns:
         A ``(is_valid, error_message)`` tuple.
@@ -3747,6 +4375,27 @@ def validate_fixer_response(fix_data: Dict) -> tuple[bool, str]:
                         f"Patch path escapes the repository: {patch_file}",
                     )
 
+            elif action_type == "plan_command":
+                old = (action.get("replaces") or "").strip()
+                new = (action.get("command") or "").strip()
+                if not plan_commands:
+                    return False, "plan_command: there is no build plan"
+                if old not in plan_commands:
+                    listed = "; ".join(f"`{c[:120]}`" for c in plan_commands)
+                    return (
+                        False,
+                        "plan_command `replaces` must be one plan command "
+                        f"exactly as written. The plan commands are: {listed}",
+                    )
+                if new:
+                    allowed, why = _plan_command_validator.is_safe(new)
+                    if not allowed:
+                        return (
+                            False,
+                            f"plan_command `{new[:160]}` is not allowed: "
+                            f"{why}",
+                        )
+
             elif action_type == "command":
                 cmd = action.get("command", "").strip()
 
@@ -3824,14 +4473,17 @@ FIXER_PROMPT = (
     "two separate actions.\n"
     "- Do NOT propose unrelated cleanups. Fix only what's broken.\n"
     "- After your fix, the builder re-runs the build plan commands from "
-    "the user message unchanged. A fix must change the source tree or "
-    "the environment so that those commands pass; a build command that "
-    "you run yourself does not change the plan.\n"
+    "the failed phase on. A build command that you run yourself does "
+    "not change the plan. When a plan command is wrong (wrong directory, "
+    "wrong target, a missing flag), change it with a `plan_command` "
+    "action: `replaces` is the exact current plan command, `command` is "
+    "the new one (it may use `&&`; empty removes the command).\n"
     "- Never add a stub or placeholder source file only to make a plan "
     "command pass: the build must produce the package's real programs. "
     "If the plan builds the wrong target (for example `go build .` when "
-    "the main package is in `cmd/<name>`), set `escalate` and name the "
-    "right target and command.\n"
+    "the main package is in `cmd/<name>`, or `cmake ..` when the "
+    "CMakeLists.txt is in a subdirectory), fix the plan with a "
+    "`plan_command` action.\n"
     "- For Go: `-buildvcs=false` is required; never install Go via the p"
     "ackage manager (it is preinstalled in the sandbox). Avoid `go build "
     "./cmd` / `go build ./<dir>` unless you also set `-o` to a file path"
@@ -3859,7 +4511,7 @@ FIXER_PROMPT = (
     '    {{"id": 1, "description": "<one line>",\n'
     '      "actions": [\n'
     '        {{"type": "command", "command": "<one shell command>", '
-    '"path": "", "content": ""}}\n'
+    '"path": "", "content": "", "replaces": ""}}\n'
     "      ]}}\n"
     "  ],\n"
     '  "recommended_strategy_id": 1,\n'
@@ -3869,7 +4521,9 @@ FIXER_PROMPT = (
     "\n"
     "Action types: `command` fills `command`; `create_file` fills "
     "`path` (repo-relative) and `content`; `patch` fills `path` and a "
-    'unified diff in `content`. Leave the unused fields as "".\n'
+    "unified diff in `content`; `plan_command` fills `replaces` (an "
+    "exact command from the build plan) and `command` (its "
+    'replacement). Leave the unused fields as "".\n'
     'To give up: set `escalate` to {{"reason": "<why no fix in the '
     'sandbox can work>"}} and `strategies` to [].\n'
     "Rules: ≥1 strategy with ≥1 action unless you investigate or "
@@ -3901,11 +4555,13 @@ FIXER_SCHEMA = _object(
                                         "command",
                                         "create_file",
                                         "patch",
+                                        "plan_command",
                                     ],
                                 },
                                 "command": _STRING,
                                 "path": _STRING,
                                 "content": _STRING,
+                                "replaces": _STRING,
                             }
                         ),
                     },
@@ -3926,7 +4582,7 @@ FIXER_TASK_PROMPT = (
     "\n"
     "## Failure\n"
     "- Failed phase: {failed_phase}\n"
-    "- Failed command: `{failed_command}`\n"
+    "- Failed command: `{failed_command}`{ran_as}\n"
     "- Exit code: {exit_code}\n"
     "\n"
     "{key_lines_section}"
@@ -3942,12 +4598,15 @@ FIXER_TASK_PROMPT = (
     "### What this package is (analyst)\n"
     "{package_context}\n"
     "\n"
-    "### Build plan (the builder re-runs these commands unchanged)\n"
+    "### Build plan (the builder re-runs these from the failed phase; "
+    "change one with a `plan_command` action)\n"
     "{build_plan}\n"
     "\n"
     "### Previous fix attempts (most recent last — DO NOT repeat any of "
     "these)\n"
     "{previous_fixes}\n"
+    "\n"
+    "{recall_section}\n"
     "\n"
     "### Top-level files\n"
     "{top_level_files}\n"
@@ -4074,8 +4733,37 @@ def _exit_code_text(message: str) -> str:
     if not match:
         return "not reported"
     code = int(match.group(1))
+    if code == 137 and TIME_LIMIT_MARK in (message or "").lower():
+        return "137 (stopped at the command time limit, not a memory kill)"
     note = _EXIT_NOTES.get(code)
     return f"{code} ({note})" if note else str(code)
+
+
+def _failed_phase_commands(state: AgentState) -> List[str]:
+    """Return the commands of the plan phase that holds the failed one."""
+    plan = state.build_plan
+    failed = state.error_history[-1].command if state.error_history else None
+    if plan and failed:
+        for phase in plan.phases:
+            if failed in phase.commands:
+                return list(phase.commands)
+    return []
+
+
+def _gettext_m4_was_fixed(state: AgentState) -> bool:
+    """Return True when a fix of this run changed ``m4/gettext.m4``.
+
+    Only then must autoreconf not run: its autopoint step puts the old
+    file back. For any other tree the rewrite hid the real error (pv,
+    wget: the copy source does not exist on Debian trixie).
+    """
+    return any(
+        record.get("ok")
+        and "gettext.m4"
+        in str(record.get("path") or "") + str(record.get("command") or "")
+        for fix in state.fixes_attempted
+        for record in fix.actions or []
+    )
 
 
 def _failed_phase_text(state: AgentState, command: Optional[str]) -> str:
@@ -4115,10 +4803,17 @@ def _fix_status(fix: FixAttempt) -> str:
 
 
 def _previous_fixes_text(state: AgentState) -> str:
-    """Render the last five fixes: actions, their results, what followed."""
+    """Render the last five fixes: actions, their results, what followed.
+
+    Answers that the validator refused come last, with the reason.
+    """
+    rejected = [
+        f"- Refused answer (do not send it again): {reason}"
+        for reason in state.context_cache.get("rejected_fixes") or []
+    ]
     fixes = state.fixes_attempted[-5:]
     if not fixes:
-        return "None"
+        return "\n".join(rejected) or "None"
     first = len(state.fixes_attempted) - len(fixes) + 1
     lines = []
     for number, fix in enumerate(fixes, start=first):
@@ -4144,7 +4839,7 @@ def _previous_fixes_text(state: AgentState) -> str:
                 strip_failure_prefix(after.message)
             )
             lines.append(f"  then: next error: {line[:240]}")
-    return "\n".join(lines)
+    return "\n".join(lines + rejected)
 
 
 def _error_key(message: str) -> str:
@@ -4154,21 +4849,135 @@ def _error_key(message: str) -> str:
     )
 
 
-def _fix_changed_the_error(state: AgentState, fix: FixAttempt) -> bool:
-    """Return True when the build error after ``fix`` differs from before."""
-    after = next(
+# make's and ninja's summary lines repeat an earlier error. A parallel
+# build prints a different number of them for the same error.
+_SUMMARY_LINE_RE = re.compile(
+    r"^(?:g?make(?:\[\d+\])?: \*\*\* (?:\[[^\]]*\] Error \d+|"
+    r"Waiting for unfinished jobs)|ninja: build stopped:)"
+)
+
+
+def _error_lines(message: str) -> frozenset:
+    """Return the normalized error lines of a failure message.
+
+    The lines that match an error pattern, after the command prefix and
+    Go's download lines are dropped; with none, the first meaningful
+    line. make's "*** [target] Error N" and "Waiting for unfinished
+    jobs" lines and ninja's "build stopped" line are left out: they
+    repeat an earlier line, and their number changes between two runs
+    of the same parallel build.
+    """
+    text = strip_go_download_noise(strip_failure_prefix(message or ""))
+    lines = {
+        _normalize_error_line(line)
+        for line in (raw.strip() for raw in text.splitlines())
+        if line and has_error_line(line) and not _SUMMARY_LINE_RE.match(line)
+    }
+    return frozenset(lines or {_error_key(message or "")})
+
+
+def _error_after(state: AgentState, fix: FixAttempt) -> Optional[Any]:
+    """Return the first error recorded after ``fix``, or None."""
+    return next(
         (e for e in state.error_history if e.timestamp > fix.timestamp),
         None,
     )
-    return after is not None and _error_key(after.message) != _error_key(
-        fix.error_message
+
+
+def _fix_removed_an_error(fix: FixAttempt, after_message: str) -> bool:
+    """Return True when an error line of ``fix`` is gone afterwards."""
+    return bool(_error_lines(fix.error_message) - _error_lines(after_message))
+
+
+def _fix_changed_the_error(state: AgentState, fix: FixAttempt) -> bool:
+    """Return True when the build error after ``fix`` lost a line.
+
+    The error lines are compared as sets, and progress is a line that
+    is gone: a fix that removed one of two errors changed the error. A
+    fix after which a new line came but every old line stayed made no
+    progress.
+    """
+    after = _error_after(state, fix)
+    return after is not None and _fix_removed_an_error(fix, after.message)
+
+
+def _fix_key_line(state: AgentState, fix: FixAttempt) -> str:
+    """Return the error line that a fix that worked is learned on.
+
+    When the build passed after the fix, the decisive line of its error.
+    When the build failed again on a changed error, a line the fix
+    removed: a fix that removed the second of two errors is not the
+    fix of the first one, which is still there.
+
+    Returns:
+        The line, or "" when the fix removed no error line.
+    """
+    after = _error_after(state, fix)
+    if after is None:
+        return first_error_line(fix.error_message)
+    remaining = _error_lines(after.message)
+    return first_error_line(
+        fix.error_message,
+        skip=lambda line: _normalize_error_line(line) in remaining,
+    )
+
+
+def _remember_failed_fixes(state: AgentState) -> None:
+    """Record each fix after which the error stayed the same.
+
+    The failure memory (``memory.save_failure_record``) shows such a fix
+    to the fixer of a later run of the package as tried before. A fix
+    is recorded once, when the error after it is known; a fix that
+    changed nothing in the tree is left out.
+    """
+    done = state.context_cache.setdefault("failure_memory_fixes", [])
+    for index, fix in enumerate(state.fixes_attempted):
+        if index in done or fix.build_result == _NO_CHANGE:
+            continue
+        after = _error_after(state, fix)
+        if after is None:
+            continue
+        done.append(index)
+        if _fix_removed_an_error(fix, after.message):
+            continue
+        commands = [
+            str(action.get("command") or action.get("path") or "")
+            for action in fix.actions
+            if action.get("ok")
+        ] or [c for c in fix.changes_made if not c.startswith("REJECTED")]
+        save_failure_record(
+            state.repo_name,
+            _failure_key(fix.error_message),
+            {
+                "strategy": _shorten(fix.strategy, 200),
+                "commands": [_shorten(c, 200) for c in commands[:8]],
+                "error_after": _shorten(
+                    first_error_line(after.message)
+                    or _error_key(after.message),
+                    200,
+                ),
+                "date": datetime.now().strftime("%Y-%m-%d"),
+            },
+        )
+
+
+def _failure_key(message: str) -> str:
+    """Return the failure-memory key of an error: its decisive line."""
+    return _normalize_error_line(
+        first_error_line(message)
+        or _first_meaningful_error_line(strip_failure_prefix(message))
     )
 
 
 def _error_regex(line: str) -> str:
-    """Return a regex for an error line, tolerant of paths and numbers."""
+    """Return a regex for an error line, tolerant of paths and numbers.
+
+    The normalized line writes a ``:line:column`` reference as ``:<n>``,
+    so that token accepts a line number with an optional column.
+    """
     pattern = re.escape(_normalize_error_line(line))
     for token, regex in (
+        (":<n>", r":\d+(?::\d+)?"),
         ("<path>", r"\S+"),
         ("<hex>", r"[0-9a-fx]+"),
         ("<n>", r"\d+"),
@@ -4177,10 +4986,82 @@ def _error_regex(line: str) -> str:
     return pattern
 
 
+def _plan_commands(state: AgentState) -> List[str]:
+    """Return every command of the current build plan, in order."""
+    if not state.build_plan:
+        return []
+    return [c for phase in state.build_plan.phases for c in phase.commands]
+
+
+def _replace_plan_command(state: AgentState, old: str, new: str) -> bool:
+    """Replace (or, with an empty ``new``, remove) a plan command.
+
+    A change in a phase that already completed makes the builder run
+    that phase again.
+
+    Returns:
+        True when ``old`` was found.
+    """
+    if not state.build_plan:
+        return False
+    for phase in state.build_plan.phases:
+        if old in phase.commands:
+            i = phase.commands.index(old)
+            if new:
+                phase.commands[i] = new
+            else:
+                del phase.commands[i]
+            state.forget_command_result(old)
+            if phase.id <= state.last_successful_phase:
+                state.last_successful_phase = phase.id - 1
+            return True
+    return False
+
+
 def _one_line_tail(text: str, limit: int = 200) -> str:
     """Return the end of command output as one short line."""
     flat = " ".join((text or "").split())
     return flat if len(flat) <= limit else "..." + flat[-limit:]
+
+
+def _failure_summary(text: str, limit: int = 200) -> str:
+    """Return the end of a failed command's output, with its error line.
+
+    The end alone can miss the decisive line: in wget run 1 it hid
+    ``possibly undefined macro: AX_CODE_COVERAGE``.
+    """
+    tail = _one_line_tail(text, limit)
+    line = " ".join(first_error_line(text or "").split())
+    if line and line not in tail:
+        return f"{_shorten(line, 160)} | {tail}"
+    return tail
+
+
+def _read_only_strategy(data: Dict[str, Any]) -> List[str]:
+    """Return the commands of a recommended strategy that only reads.
+
+    Returns:
+        The commands, or an empty list when the strategy holds another
+        action type or a command that changes something.
+    """
+    strategies = [
+        s for s in data.get("strategies") or [] if isinstance(s, dict)
+    ]
+    if not strategies:
+        return []
+    recommended = data.get("recommended_strategy_id", 1)
+    strategy = next(
+        (s for s in strategies if s.get("id") == recommended), strategies[0]
+    )
+    commands: List[str] = []
+    for action in strategy.get("actions") or []:
+        if not isinstance(action, dict) or action.get("type") != "command":
+            return []
+        command = str(action.get("command") or "").strip()
+        if not command or not _is_read_only_command(command):
+            return []
+        commands.append(command)
+    return commands
 
 
 @agent_node(AgentRole.FIXER)
@@ -4213,6 +5094,8 @@ def fixer_node(state: AgentState) -> AgentState:
         return state
 
     previous_fixes = _previous_fixes_text(state)
+    # A fix after which the error stayed goes to the failure memory.
+    _remember_failed_fixes(state)
 
     arch_issues = "None"
     if state.arch_specific_code:
@@ -4231,23 +5114,41 @@ def fixer_node(state: AgentState) -> AgentState:
             )
 
     failed_command = "Unknown"
+    ran_as = ""
     if state.error_history:
         last = state.error_history[-1]
         failed_command = last.command or "Unknown"
+        # The builder can run a plan command in another form (an
+        # autotools bootstrap before ./configure, a make directory).
+        ran = (
+            state.get_cached_command_result(last.command)
+            if last.command
+            else None
+        )
+        if ran and ran.command and ran.command != last.command:
+            ran_as = f" (run as `{ran.command[:300]}`)"
 
     few_shot_context = {
         "build_system": (
             state.build_plan.build_system if state.build_plan else "unknown"
         ),
         "error_message": state.last_error,
+        "repo_name": state.repo_name,
     }
-    few_shot_examples = format_few_shot_examples(
-        "fixer", few_shot_context, max_examples=2, max_chars=2000
+    few_shot_examples = (
+        ""
+        if state.replan
+        else format_few_shot_examples(
+            "fixer", few_shot_context, max_examples=2, max_chars=2000
+        )
     )
+    _note_examples(state, "fixer", few_shot_examples)
 
     build_plan_str = _build_plan_text(
         state, failed_command if failed_command != "Unknown" else None
     )
+    # The verified plan and the failed fixes of earlier runs.
+    recall_section = _recall_prompt_section(state)
     key_lines, output_tail = failure_digest(state.last_error or "")
     stdout_tail = (
         state.error_history[-1].stdout_tail if state.error_history else ""
@@ -4304,10 +5205,12 @@ def fixer_node(state: AgentState) -> AgentState:
             error_file_excerpts=error_file_excerpts,
             package_context=package_context,
             failed_command=failed_command,
+            ran_as=ran_as,
             previous_fixes=previous_fixes,
             top_level_files=top_level_files,
             known_arch_issues=arch_issues,
             build_plan=build_plan_str,
+            recall_section=recall_section,
             few_shot_examples=few_shot_examples,
             investigation=investigation,
         )
@@ -4352,7 +5255,15 @@ def fixer_node(state: AgentState) -> AgentState:
                         "'commands' array"
                     )
                 return ValidationResult.good()
-            ok, reason = validate_fixer_response(data)
+            # A plain `a && b` chain becomes single actions first.
+            for option in data.get("strategies") or []:
+                if isinstance(option, dict) and isinstance(
+                    option.get("actions"), list
+                ):
+                    option["actions"] = _split_chained_actions(
+                        option["actions"]
+                    )
+            ok, reason = validate_fixer_response(data, _plan_commands(state))
             if not ok:
                 return ValidationResult.bad(reason)
             return ValidationResult.good()
@@ -4379,6 +5290,8 @@ def fixer_node(state: AgentState) -> AgentState:
                 ),
                 "build_attempt": state.attempt_count,
                 "fixer_round": round_idx,
+                "examples": list(getattr(few_shot_examples, "ids", ())),
+                "recall": _recall_label(state),
             },
             max_retries=2,
         )
@@ -4410,6 +5323,29 @@ def fixer_node(state: AgentState) -> AgentState:
                 "'investigate' is no longer allowed."
             )
             continue
+        # A strategy that only reads changes nothing, so the rebuild
+        # would fail the same way: run it as the investigation round.
+        reading = (
+            _read_only_strategy(outcome.data)
+            if outcome.data is not None and allow_investigation
+            else []
+        )
+        if reading:
+            logger.info(
+                f"Fixer strategy only reads ({len(reading)} command(s)); "
+                "running it as the investigation round"
+            )
+            results = _run_fixer_investigation(state, reading)
+            history = outcome.messages
+            round_prompt = (
+                "### Results of your strategy (its commands only read)\n"
+                f"{results}\n\n"
+                "These commands change nothing, so the build would fail "
+                "the same way. You MUST now respond with a strategy that "
+                "changes the source tree, the build plan or the "
+                "environment."
+            )
+            continue
         break
 
     if outcome.refused:
@@ -4425,12 +5361,20 @@ def fixer_node(state: AgentState) -> AgentState:
                 f"{outcome.attempts} attempts: "
                 f"{outcome.last_error}"
             )
+            # A provider fault (timeout, HTTP error) is no build attempt.
             state.add_error(
                 create_error_record(
                     message=f"{_FIXER_INVALID}: {outcome.last_error}",
                     category=ErrorCategory.CONFIGURATION,
-                )
+                ),
+                count_attempt="LLM invocation raised"
+                not in str(outcome.last_error or ""),
             )
+            # The next fixer round sees why the answer was refused, so
+            # it does not send the same one (libwebp run 4).
+            rejected = state.context_cache.setdefault("rejected_fixes", [])
+            rejected.append(_shorten(str(outcome.last_error or ""), 240))
+            del rejected[:-5]
             state.build_status = BuildStatus.FAILED
             return state
 
@@ -4466,6 +5410,11 @@ def fixer_node(state: AgentState) -> AgentState:
 
         changes_made = []
         action_results: List[str] = []
+        # What ran and whether it worked; the learner replays these.
+        action_records: List[Dict[str, Any]] = []
+        # Chains (see _split_chained_actions) with a failed step.
+        failed_chains: set = set()
+        failed_phase = _failed_phase_commands(state)
         for action in strategy.get("actions", []):
             if action["type"] == "create_file":
                 file_path = action.get("path")
@@ -4500,6 +5449,14 @@ def fixer_node(state: AgentState) -> AgentState:
                     validate=False,
                 )
 
+                action_records.append(
+                    _action_record(
+                        "create_file",
+                        file_path,
+                        file_content,
+                        write_result.success,
+                    )
+                )
                 if write_result.success:
                     changes_made.append(f"Created file: {file_path}")
                     action_results.append(f"created `{file_path}`")
@@ -4547,12 +5504,18 @@ def fixer_node(state: AgentState) -> AgentState:
                     )
                     continue
 
-                if apply_patch(
+                patched = apply_patch(
                     patch_content,
                     filepath=full_file_path,
                     cwd=state.repo_path,
                     use_docker=True,
-                ):
+                )
+                action_records.append(
+                    _action_record(
+                        "patch", file_path or "", patch_content, patched
+                    )
+                )
+                if patched:
                     changes_made.append(
                         f"Patched {file_path if file_path else 'repository'}"
                     )
@@ -4567,8 +5530,53 @@ def fixer_node(state: AgentState) -> AgentState:
                         f"apply"
                     )
 
+            elif action["type"] == "plan_command":
+                old = (action.get("replaces") or "").strip()
+                new = (action.get("command") or "").strip()
+                replaced = _replace_plan_command(state, old, new)
+                action_records.append(
+                    {
+                        "type": "plan_command",
+                        "replaces": old,
+                        "command": new,
+                        "ok": replaced,
+                    }
+                )
+                if replaced and new and new.split() == old.split():
+                    # The same text is no fix by itself: nushell's
+                    # "rerun unchanged" gave a third build of the crate
+                    # that the time limit had stopped twice. The phase
+                    # still runs again with the next build, for an
+                    # answer that also has a real change.
+                    changes_made.append(f"{_SAME_PLAN_COMMAND}: `{old[:120]}`")
+                    action_results.append(
+                        f"plan command `{old[:120]}` unchanged (the same "
+                        "text); a rebuild would repeat the failure"
+                    )
+                    logger.info(f"Plan command unchanged: {old[:120]}")
+                elif replaced:
+                    label = (
+                        f"`{old[:120]}` -> `{new[:120]}`"
+                        if new
+                        else (f"`{old[:120]}` removed")
+                    )
+                    changes_made.append(f"Plan command changed: {label}")
+                    action_results.append(f"plan: {label}")
+                    logger.info(f"Plan command changed: {label}")
+                else:
+                    action_results.append(
+                        f"plan command `{old[:120]}` not found"
+                    )
+
             elif action["type"] == "command":
                 command = action["command"]
+                chain = action.get("chain")
+                if chain and chain in failed_chains:
+                    action_results.append(
+                        f"`{command[:160]}` skipped: an earlier step of "
+                        "its `&&` chain failed"
+                    )
+                    continue
 
                 is_safe, reason = validate_fix_command(command)
                 if not is_safe:
@@ -4578,6 +5586,8 @@ def fixer_node(state: AgentState) -> AgentState:
                     action_results.append(
                         f"`{command[:160]}` blocked: {reason[:160]}"
                     )
+                    if chain:
+                        failed_chains.add(chain)
                     continue
 
                 # Rewrite autoreconf to copy-first sequence when the
@@ -4591,7 +5601,7 @@ def fixer_node(state: AgentState) -> AgentState:
                         os.path.join(
                             _to_host_path(state.repo_path), "m4", "gettext.m4"
                         )
-                    ):
+                    ) and _gettext_m4_was_fixed(state):
                         rewritten = (
                             "cp /usr/share/gettext/m4/*.m4 m4/"
                             " && aclocal -I m4 -I /usr/share/aclocal"
@@ -4607,18 +5617,44 @@ def fixer_node(state: AgentState) -> AgentState:
                 commands_to_run = [command]
                 for cmd in commands_to_run:
                     result = execute_command(cmd, cwd=state.repo_path)
+                    action_records.append(
+                        {
+                            "type": "command",
+                            "command": cmd,
+                            "ok": result.success,
+                        }
+                    )
                     if result.success:
                         changes_made.append(f"Executed: {cmd}")
                         action_results.append(f"`{cmd[:160]}` ok")
+                        # A command of the failed phase that the fix ran
+                        # with success is done; the builder does not run
+                        # it again (grep, axel, wget, re2 ran configure
+                        # twice).
+                        if cmd in failed_phase:
+                            state.cache_command_result(cmd, result)
                     else:
                         logger.error(f"Fix command failed: {result.stderr}")
                         output = result.stderr or result.stdout or ""
                         action_results.append(
                             f"`{cmd[:160]}` failed (exit "
-                            f"{result.exit_code}): {_one_line_tail(output)}"
+                            f"{result.exit_code}): {_failure_summary(output)}"
                         )
+                        if chain:
+                            failed_chains.add(chain)
 
-        effective = [c for c in changes_made if not c.startswith("REJECTED")]
+        # A command that only reads changes nothing a rebuild could use,
+        # and neither does a plan command replaced by the same text.
+        effective = [
+            c
+            for c in changes_made
+            if not c.startswith("REJECTED")
+            and not c.startswith(_SAME_PLAN_COMMAND)
+            and not (
+                c.startswith("Executed: ")
+                and _is_read_only_command(c[len("Executed: ") :])
+            )
+        ]
         fix_attempt = FixAttempt(
             error_category=state.last_error_category,
             strategy=strategy["description"],
@@ -4629,6 +5665,7 @@ def fixer_node(state: AgentState) -> AgentState:
             build_result=None if effective else _NO_CHANGE,
             error_message=state.last_error or "",
             action_results=action_results,
+            actions=action_records,
             root_cause=_shorten(
                 (fix_data.get("reflection") or {}).get("root_cause", ""), 300
             ),
@@ -4647,6 +5684,9 @@ def fixer_node(state: AgentState) -> AgentState:
                 "rebuild"
             )
             state.attempt_count += 1
+            state.context_cache["reasks_since_build"] = (
+                state.context_cache.get("reasks_since_build", 0) + 1
+            )
             return state
 
         _rewind_after_verify_failure(state)
@@ -4678,6 +5718,7 @@ def escalate_node(state: AgentState) -> AgentState:
 
     state.build_status = BuildStatus.ESCALATED
     state.current_phase = "escalated"
+    _remember_failed_fixes(state)
 
     err_cat = state.last_error_category
     err_cat_val = err_cat.value if err_cat else "Unknown"
@@ -4727,7 +5768,7 @@ Message: {err_msg}
     report += f"""
 
 ## Recommendation
-{should_escalate(state)[1] or _escalation_reason(state)}
+{_escalation_reason(state) or should_escalate(state)[1]}
 """
 
     if state.error_history:
@@ -4744,6 +5785,7 @@ Message: {err_msg}
 
     logger.info(report)
     state.context_cache["escalation_report"] = report
+    _log_data_effect(state)
 
     return state
 
@@ -4796,6 +5838,505 @@ def _curate_artifacts(state: AgentState) -> None:
         state.curated_artifacts = []
 
 
+# The most characters of a created file or a patch that a FixAttempt
+# action record keeps; a longer one is not stored, so not learned.
+_FIX_CONTENT_LIMIT = 4000
+
+
+def _action_record(
+    kind: str, path: str, content: str, ok: bool
+) -> Dict[str, Any]:
+    """Return the FixAttempt record of a create_file or patch action."""
+    record: Dict[str, Any] = {
+        "type": kind,
+        "path": path,
+        "ok": bool(ok),
+        "content_chars": len(content or ""),
+    }
+    if content and len(content) <= _FIX_CONTENT_LIMIT:
+        record["content"] = content
+    return record
+
+
+# Tools whose fixer commands only read; such a fix changed nothing that
+# a later run could repeat.
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "cat",
+        "ls",
+        "grep",
+        "egrep",
+        "fgrep",
+        "head",
+        "tail",
+        "stat",
+        "file",
+        "wc",
+        "which",
+        "readelf",
+        "nm",
+        "ldd",
+        "pkg-config",
+        "tree",
+        "du",
+        "pwd",
+        "true",
+    }
+)
+
+
+def _is_read_only_command(command: str) -> bool:
+    """Return True when a fixer command only inspects the tree."""
+    text = re.sub(r"^\s*cd\s+\S+\s*(?:&&|;)\s*", "", command or "")
+    parts = text.split()
+    if not parts:
+        return True
+    tool = os.path.basename(parts[0])
+    if tool in _READ_ONLY_TOOLS:
+        return True
+    if tool == "find":
+        writes = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint")
+        return not any(part in writes for part in parts)
+    if tool == "go" and len(parts) > 1:
+        if parts[1] in ("version", "list", "doc"):
+            return True
+        return parts[1] == "env" and not ({"-w", "-u"} & set(parts))
+    return False
+
+
+# Files in which "#" starts code (a preprocessor line), not a comment.
+_C_FAMILY_SUFFIXES = (
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".inc",
+    ".m",
+    ".S",
+    ".go",
+)
+
+
+def _is_stub_content(content: str, path: str = "") -> bool:
+    """Return True when a created file holds no real code.
+
+    An empty file, or one whose only line (comments and blank lines
+    aside) is a Go package clause, makes a build command find a package
+    but builds no program (probe-cli and netbird, October 2026). In a C
+    or Go source ``#`` starts a preprocessor line, not a comment, so a
+    header of ``#include`` and ``#define`` lines is real code.
+    """
+    comments: Tuple[str, ...] = ("//", "/*", "*")
+    if not str(path or "").endswith(_C_FAMILY_SUFFIXES):
+        comments += ("#",)
+    lines = []
+    for raw in (content or "").splitlines():
+        line = raw.strip()
+        if line and not line.startswith(comments):
+            lines.append(line)
+    if not lines:
+        return True
+    return len(lines) == 1 and bool(re.match(r"package\s+\w+\s*;?$", lines[0]))
+
+
+def _learnable_actions(fix: FixAttempt) -> List[Dict[str, Any]]:
+    """Return the actions of a fix that a later run can repeat.
+
+    Read from ``fix.actions``; a FixAttempt without action records (an
+    older state) falls back to the "Executed: <cmd>" lines of
+    ``changes_made``. Failed actions, read-only commands, stub files
+    and contents too long to store are left out.
+    """
+    records = fix.actions or [
+        {"type": "command", "command": change[len("Executed: ") :], "ok": True}
+        for change in (fix.changes_made or [])
+        if change.startswith("Executed: ")
+    ]
+    actions: List[Dict[str, Any]] = []
+    for record in records:
+        if not record.get("ok"):
+            continue
+        kind = record.get("type")
+        if kind == "command":
+            command = str(record.get("command") or "").strip()
+            if command and not _is_read_only_command(command):
+                actions.append({"type": "command", "command": command})
+        elif kind == "plan_command":
+            actions.append(
+                {
+                    "type": "plan_command",
+                    "replaces": record.get("replaces", ""),
+                    "command": record.get("command", ""),
+                }
+            )
+        elif kind == "patch" and record.get("content"):
+            actions.append(
+                {
+                    "type": "patch",
+                    "file": record.get("path", ""),
+                    "content": record["content"],
+                }
+            )
+        elif kind == "create_file" and record.get("content"):
+            if not _is_stub_content(record["content"], record.get("path", "")):
+                actions.append(
+                    {
+                        "type": "create_file",
+                        "path": record.get("path", ""),
+                        "content": record["content"],
+                    }
+                )
+    return actions
+
+
+_PACKAGE_INSTALL_RE = re.compile(
+    r"(?:^|&&|;)\s*(?:\S+=\S+\s+)*(?:sudo\s+)?(?:apt-get|apt)\s+install\b"
+    r"([^&;|]*)|(?:^|&&|;)\s*(?:sudo\s+)?apk\s+add\b([^&;|]*)"
+)
+
+
+def _installed_packages(command: str) -> List[str]:
+    """Return the packages an apt-get or apk install command adds."""
+    packages: List[str] = []
+    for match in _PACKAGE_INSTALL_RE.finditer(command or ""):
+        args = (match.group(1) or match.group(2) or "").split()
+        packages.extend(arg for arg in args if not arg.startswith("-"))
+    return packages
+
+
+def _is_package_command(command: str) -> bool:
+    """Return True when a plan command updates or installs packages."""
+    return bool(
+        re.match(
+            r"\s*(?:\S+=\S+\s+)*(?:sudo\s+)?(?:apt-get|apt|apk)\b",
+            command or "",
+        )
+    )
+
+
+def _pre_build_index(phases: List[Dict[str, Any]]) -> int:
+    """Return where a recipe's pre_build phase goes: after the setup."""
+    for index, phase in enumerate(phases):
+        if any(not _is_package_command(c) for c in phase.get("commands", [])):
+            return index
+    return len(phases)
+
+
+# A fixer's own run of the package build (with or without NAME=value
+# settings in front); the plan builds again after it.
+_FIXER_PACKAGE_BUILD_RE = re.compile(
+    r"(?:^|&&|;)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:go|cargo)\s+build\b"
+)
+
+
+def _fix_anchor(state: AgentState, fix: FixAttempt) -> Optional[str]:
+    """Return where the commands of ``fix`` go in a recipe replay.
+
+    Returns:
+        The plan command that failed before the fix, as the final plan
+        holds it (a later plan_command fix can change it): the commands
+        run just before its phase. "" when the failure was no command
+        (the artifact check): the commands run after the plan. None when
+        the place is unknown (no error record, or the command is no
+        longer in the plan).
+    """
+    before = [e for e in state.error_history if e.timestamp <= fix.timestamp]
+    if not before:
+        return None
+    command = before[-1].command or ""
+    if not command:
+        return ""
+    for other in state.fixes_attempted or []:
+        for action in other.actions or []:
+            if (
+                action.get("type") == "plan_command"
+                and action.get("ok")
+                and action.get("replaces") == command
+            ):
+                command = action.get("command") or ""
+    return command if command and command in _plan_commands(state) else None
+
+
+def _recipe_fix_steps(
+    state: AgentState,
+) -> Tuple[List[Tuple[Optional[str], str]], List[str]]:
+    """Return the commands of the fixes that worked, and their packages.
+
+    Each command comes with its place (see ``_fix_anchor``). In the
+    order they ran, without read-only commands and without commands the
+    plan holds. A fixer's own run of the package build (go build, cargo
+    build) before a plan phase is left out, because that phase builds
+    again; after the plan it stays. A plan_command or patch fix is in
+    the plan or the patches already.
+    """
+    plan = set(_plan_commands(state))
+    steps: List[Tuple[Optional[str], str]] = []
+    seen: set = set()
+    packages: List[str] = []
+    for fix in state.fixes_attempted or []:
+        if not fix.success:
+            continue
+        anchor = _fix_anchor(state, fix)
+        for action in _learnable_actions(fix):
+            command = (
+                action.get("command") if action["type"] == "command" else ""
+            )
+            if not command or command in plan or command in seen:
+                continue
+            if anchor != "" and _FIXER_PACKAGE_BUILD_RE.search(command):
+                continue
+            seen.add(command)
+            steps.append((anchor, command))
+            packages.extend(_installed_packages(command))
+    return steps, packages
+
+
+def _recipe_phases(
+    state: AgentState,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Return the recipe phases and the packages the fixes installed.
+
+    The plan, with the commands of the fixes that worked where the
+    fixes ran: in a ``pre_<phase>`` phase just before the phase whose
+    command failed, or in a ``post_build`` phase after the plan when
+    the artifact check failed. When the place is unknown, they run
+    after the package setup, before the first other phase.
+    """
+    phases = [
+        {"name": p.name, "commands": list(p.commands)}
+        for p in state.build_plan.phases
+    ]
+    steps, packages = _recipe_fix_steps(state)
+    before: Dict[int, List[str]] = {}
+    after: List[str] = []
+    for anchor, command in steps:
+        if anchor == "":
+            after.append(command)
+            continue
+        index = next(
+            (
+                i
+                for i, phase in enumerate(phases)
+                if anchor and anchor in phase["commands"]
+            ),
+            None,
+        )
+        if index is None:
+            index = _pre_build_index(phases)
+        before.setdefault(index, []).append(command)
+    for index in sorted(before, reverse=True):
+        name = phases[index]["name"] if index < len(phases) else "build"
+        phases.insert(
+            index, {"name": f"pre_{name}", "commands": before[index]}
+        )
+    if after:
+        phases.append({"name": "post_build", "commands": after})
+    return phases, packages
+
+
+def _plan_machine(state: AgentState) -> Dict[str, str]:
+    """Return the -march or -mcpu value the plan compiles for, if any."""
+    for command in _plan_commands(state):
+        match = re.search(r"-m(arch|cpu)=([\w.+-]+)", command)
+        if match:
+            return {f"m{match.group(1)}": match.group(2)}
+    return {}
+
+
+# go build flags that take the next argument as their value.
+_GO_FLAGS_WITH_VALUE = frozenset(
+    {
+        "-o",
+        "-tags",
+        "-ldflags",
+        "-gcflags",
+        "-asmflags",
+        "-mod",
+        "-p",
+        "-modfile",
+        "-overlay",
+        "-pkgdir",
+        "-pgo",
+        "-buildmode",
+        "-compiler",
+        "-installsuffix",
+        "-toolexec",
+        "-C",
+    }
+)
+_ENV_SETTING_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_words(segment: str) -> List[str]:
+    """Split one shell command into words; quotes are kept together."""
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def _repo_relative_dir(path: str, repo_path: str) -> Optional[str]:
+    """Return a ``cd`` target as a repo-relative directory ("" = root).
+
+    None when the directory is outside the repository.
+    """
+    if not path.startswith("/"):
+        rel = os.path.normpath(path)
+    elif repo_path:
+        rel = os.path.relpath(path, repo_path)
+    else:
+        return None
+    if rel == ".":
+        return ""
+    return None if rel.startswith("..") else rel
+
+
+def _go_build_layout(
+    commands: List[str], repo_path: str
+) -> Tuple[str, Optional[str]]:
+    """Return the main package target and module dir of a Go plan.
+
+    The last ``go build`` decides: its last argument that is neither a
+    flag nor a flag value is the target ("." when it has none), and a
+    ``cd <dir>`` before it in the same command names the module
+    directory. Without one, a ``cd <dir> && go ...`` command elsewhere
+    in the plan names it; with none at all, the directory is None.
+    """
+    target, module_dir, other_dir = "", None, None
+    for command in commands:
+        cwd: Optional[str] = None
+        for segment in re.split(r"\s*(?:&&|;)\s*", command):
+            words = _command_words(segment)
+            if words[:1] == ["cd"] and len(words) > 1:
+                cwd = _repo_relative_dir(words[1], repo_path)
+                continue
+            while words and (
+                words[0] == "env" or _ENV_SETTING_RE.match(words[0])
+            ):
+                words = words[1:]
+            if words[:1] != ["go"]:
+                continue
+            if cwd is not None:
+                other_dir = cwd
+            if words[1:2] != ["build"]:
+                continue
+            args: List[str] = []
+            skip_value = False
+            for word in words[2:]:
+                if skip_value:
+                    skip_value = False
+                elif word.startswith("-"):
+                    skip_value = (
+                        "=" not in word and word in _GO_FLAGS_WITH_VALUE
+                    )
+                else:
+                    args.append(word)
+            target = args[-1] if args else "."
+            module_dir = cwd
+    return target, module_dir if module_dir is not None else other_dir
+
+
+def _plan_uses_cgo(commands: List[str]) -> bool:
+    """Return True when a Go plan builds with cgo on purpose."""
+    text = " ".join(commands)
+    if "CGO_ENABLED=0" in text:
+        return False
+    if any(
+        flag in text for flag in ("CGO_ENABLED=1", "CGO_CFLAGS", "CGO_LDFLAGS")
+    ):
+        return True
+    return any(
+        re.match(r"lib\S+-dev$", package)
+        for command in commands
+        for package in _installed_packages(command)
+    )
+
+
+def _build_env(commands: List[str]) -> Dict[str, str]:
+    """Return the NAME=value settings in front of the plan's last build."""
+    env: Dict[str, str] = {}
+    for command in commands:
+        words = _command_words(re.split(r"\s*(?:&&|;)\s*", command)[-1])
+        if words[:1] == ["env"]:
+            words = words[1:]
+        settings: Dict[str, str] = {}
+        while words and _ENV_SETTING_RE.match(words[0]):
+            name, _, value = words.pop(0).partition("=")
+            settings[name] = value
+        if (
+            settings
+            and words[:1]
+            and words[0]
+            in (
+                "go",
+                "cargo",
+                "make",
+                "cmake",
+                "meson",
+                "ninja",
+            )
+        ):
+            env = settings
+    return env
+
+
+def _analysis_mentions_cgo(state: AgentState) -> bool:
+    """Return True when the analyst names cgo for this package."""
+    analysis = state.package_analysis
+    if analysis is None:
+        return False
+    text = " ".join(
+        [
+            *[str(risk) for risk in analysis.riscv_risks],
+            str(analysis.build_strategy or ""),
+            *[str(dep.get("reason", "")) for dep in analysis.dependencies],
+        ]
+    )
+    return "cgo" in text.lower()
+
+
+def _learned_layout(state: AgentState) -> Dict[str, Any]:
+    """Return the layout facts of a verified port (scout trigger, recipe).
+
+    ``has_main`` as detected at init; for Go the main package, the
+    module directory and cgo, from the final plan first (a fix may have
+    moved the build) and from the init-time detection second; for other
+    build systems the nested build root; and the environment settings
+    in front of the build command.
+    """
+    go_info = state.context_cache.get("go_main_info", {}) or {}
+    layout: Dict[str, Any] = {"has_main": bool(go_info.get("has_main", False))}
+    commands = _plan_commands(state)
+    build_system = (
+        state.build_plan.build_system if state.build_plan else ""
+    ).lower()
+    if build_system == "go":
+        target, module_dir = _go_build_layout(commands, state.repo_path)
+        main_path = target or go_info.get("main_path") or ""
+        if main_path:
+            layout["main_path"] = main_path
+        layout["module_dir"] = (
+            module_dir
+            if module_dir is not None
+            else (go_info.get("module_dir") or "")
+        )
+        layout["has_cgo"] = _plan_uses_cgo(commands)
+    elif state.build_system_info and (
+        state.build_system_info.type.lower() == build_system
+    ):
+        root = (state.build_system_info.module_dir or "").strip("/")
+        if root:
+            layout["nested_root"] = root
+    env = _build_env(commands)
+    if env:
+        layout["build_env"] = env
+    return layout
+
+
 def _save_learning_data(state: AgentState):
     """Learn from a verified success; teach nothing from the rest.
 
@@ -4804,6 +6345,12 @@ def _save_learning_data(state: AgentState):
     recorded. An unverified or wrong-arch "success" is never learned:
     it would be replayed by later runs as if it had worked. Never
     raises — a learning failure must not sink a finished port.
+
+    The scout trigger and the recipe keep the layout facts (main
+    package, module or build root, cgo, build environment). Each fix
+    that worked becomes a fixer example keyed on its decisive error
+    line, and its shell commands go to a ``pre_build`` phase of the
+    recipe, so a replay on a clean sandbox repeats them.
     """
     try:
         repo = state.repo_name or "unknown"
@@ -4822,6 +6369,8 @@ def _save_learning_data(state: AgentState):
             )
             return
 
+        layout = _learned_layout(state)
+
         # Scout learning
         if state.build_plan and state.build_plan.phases:
             scout_data = {
@@ -4829,14 +6378,9 @@ def _save_learning_data(state: AgentState):
                 "tags": [bs, repo],
                 "build_system": bs,
                 "repo_name": repo,
-                "trigger": {
-                    "build_system": bs,
-                    "has_main": bool(
-                        state.context_cache.get("go_main_info", {}).get(
-                            "has_main", False
-                        )
-                    ),
-                },
+                # The layout facts tell two packages of one build system
+                # apart (main package, module or build root, cgo).
+                "trigger": {"build_system": bs, **layout},
                 "plan": {
                     "build_system": bs,
                     "phases": [
@@ -4848,28 +6392,22 @@ def _save_learning_data(state: AgentState):
             }
             save_learned_example("scout", scout_data)
 
-        # Fixer learning
+        # Fixer learning: one example per fix that worked.
         for fix in state.fixes_attempted or []:
             if fix.success and fix.strategy:
-                # ``changes_made`` records "Executed: <cmd>" /
-                # "Created file: <p>" strings; recover the raw commands
-                # for the few-shot example. A fix of file edits only
-                # gives no reusable action, so it is not saved (the
-                # selection skips examples without actions).
-                actions = [
-                    {"type": "command", "command": change[len("Executed: ") :]}
-                    for change in (fix.changes_made or [])
-                    if change.startswith("Executed: ")
-                ]
+                # The actions a later run can repeat: no read-only
+                # command, no stub file (see _learnable_actions). A fix
+                # with none of them is not saved.
+                actions = _learnable_actions(fix)
                 if not actions:
                     continue
-                # The decisive error line, not the failed command that
-                # heads the message ("Build command failed: <cmd> ...").
-                key_line = first_error_line(
-                    fix.error_message
-                ) or _first_meaningful_error_line(
-                    strip_failure_prefix(fix.error_message)
-                )
+                # The decisive error line that the fix removed, not the
+                # failed command that heads the message and not Go's
+                # download lines. With no such line the fix has no key
+                # a later run can match.
+                key_line = _fix_key_line(state, fix)
+                if not key_line:
+                    continue
                 fixer_data = {
                     "name": f"Auto: {repo} - {_shorten(fix.strategy, 60)}",
                     "tags": [bs, "auto-fix"],
@@ -4909,20 +6447,21 @@ def _save_learning_data(state: AgentState):
                 if hasattr(state, "get_execution_duration")
                 else 0.0
             )
+            # The commands of the fixes that worked run again where they
+            # ran, so a replay on a clean sandbox repeats them.
+            phases, fix_packages = _recipe_phases(state)
             save_to_recipe_cache(
                 repo_name=repo,
                 repo_url=state.repo_url or "",
                 build_system=bs,
-                build_plan={
-                    "phases": [
-                        {"name": p.name, "commands": p.commands}
-                        for p in state.build_plan.phases
-                    ]
-                },
-                dependencies=(
-                    sorted(set(state.dependencies.system_packages))
-                    if state.dependencies
-                    else []
+                build_plan={"phases": phases},
+                dependencies=sorted(
+                    set(
+                        state.dependencies.system_packages
+                        if state.dependencies
+                        else []
+                    )
+                    | set(fix_packages)
                 ),
                 # The diffs that were applied, not strategy descriptions.
                 patches=list(state.patches_generated),
@@ -4932,6 +6471,8 @@ def _save_learning_data(state: AgentState):
                 build_duration_seconds=duration,
                 recipe_markdown=state.porting_recipe or None,
                 verification=state.artifact_verification,
+                layout=layout or None,
+                machine=_plan_machine(state) or None,
             )
 
         logger.info(f"Auto-learning complete for {repo}")
@@ -5014,6 +6555,173 @@ def _detect_test_command(state: AgentState) -> Optional[tuple]:
     return None
 
 
+# A batch port whose build ran longer than this skips its package
+# tests: their run time grows with the build (decision D6).
+_BATCH_TEST_BUILD_LIMIT = 600
+
+
+def _batch_test_skip(state: AgentState) -> str:
+    """Return why a batch port skips its package tests, or "".
+
+    Batch runs only (``ATESOR_RUN_DEADLINE`` is set): the tests of an
+    unverified build prove nothing, and a build over 10 minutes has
+    tests that hit the limit while they still download modules.
+    """
+    if not os.environ.get("ATESOR_RUN_DEADLINE", "").strip():
+        return ""
+    if not state.is_verified_success:
+        return "the build is not verified"
+    build_seconds = sum(
+        result.duration_seconds
+        for result in state.command_results_cache.values()
+        if result.success
+    )
+    if build_seconds > _BATCH_TEST_BUILD_LIMIT:
+        return (
+            f"the build ran {build_seconds / 60:.0f} minutes; a batch run "
+            "tests builds of 10 minutes or less"
+        )
+    return ""
+
+
+def _match_tests_to_build(
+    state: AgentState, detected: tuple
+) -> Tuple[tuple, Optional[Dict[str, str]]]:
+    """Return the test command and environment that match the build.
+
+    The tests run with the ``NAME=value`` settings in front of the
+    plan's last build command, and ``go test`` gets the ``-tags`` of the
+    last ``go build``: without them, jr's tests failed at link time.
+
+    Returns:
+        ``(detected, env)``; ``env`` is None when the build set nothing.
+    """
+    commands = _plan_commands(state)
+    env = _build_env(commands)
+    framework, command = detected
+    if framework == "go test" and "-tags" not in command:
+        tags = _go_build_tags(commands)
+        if tags:
+            command = command.replace(
+                "go test", f"go test -tags {shlex.quote(tags)}", 1
+            )
+    return (framework, command), (env or None)
+
+
+def _go_build_tags(commands: List[str]) -> str:
+    """Return the ``-tags`` value of the plan's last ``go build``."""
+    tags = ""
+    for command in commands:
+        for segment in re.split(r"\s*(?:&&|;)\s*", command):
+            words = _command_words(segment)
+            while words and _ENV_SETTING_RE.match(words[0]):
+                words = words[1:]
+            if words[:2] != ["go", "build"]:
+                continue
+            for index, word in enumerate(words):
+                if word == "-tags" and index + 1 < len(words):
+                    tags = words[index + 1]
+                elif word.startswith("-tags="):
+                    tags = word[len("-tags=") :]
+    return tags
+
+
+# Keep the verified build of the port's tree across its package tests.
+# lz4: `make check` rebuilt programs/lz4 with the test flags after the
+# verification and pointed the link at that build. The copies go outside
+# the tree, which the package zips. The first output line is the folder.
+_TEST_KEEP_SCRIPT = (
+    'k=$(mktemp -d "${TMPDIR:-/tmp}/atesor-test-keep.XXXXXX") || exit 1; '
+    'echo "$k"; '
+    "find . -path ./.git -prune -o -type l -print | "
+    'while IFS= read -r p; do printf "%s\\t%s\\n" "$p" "$(readlink "$p")"; '
+    'done > "$k/links" || exit 1; '
+    ': > "$k/files"; i=0; '
+    'for f in "$@"; do [ -f "$f" ] || continue; i=$((i + 1)); '
+    'cp -pL "$f" "$k/$i" && printf "%s\\t%s\\n" "$i" "$f" >> "$k/files" '
+    "|| exit 1; done"
+)
+# Prints each file and link that it puts back, then removes the copies.
+_TEST_RESTORE_SCRIPT = (
+    'k="$1"; tab=$(printf "\\t"); '
+    'while IFS="$tab" read -r i f; do cmp -s "$k/$i" "$f" && continue; '
+    'rm -f "$f" && mkdir -p "$(dirname "$f")" && cp -p "$k/$i" "$f" '
+    '&& echo "$f" || exit 1; done < "$k/files"; '
+    'while IFS="$tab" read -r p t; do '
+    '[ "$(readlink "$p" 2>/dev/null)" = "$t" ] && continue; '
+    'rm -f "$p" && ln -s "$t" "$p" && echo "$p" || exit 1; '
+    'done < "$k/links"; '
+    'rm -f "$k"/* && rmdir "$k"'
+)
+
+
+def _verified_artifact_rels(state: AgentState) -> List[str]:
+    """Return the tree-relative paths of the port's verified artifacts."""
+    repo = (state.repo_path or "").rstrip("/") + "/"
+    rels: List[str] = []
+    for item in state.curated_artifacts or state.build_artifacts or []:
+        path = item.get("filepath") or item.get("path") or ""
+        if path.startswith(repo):
+            rel = os.path.normpath(path[len(repo) :])
+            if rel and not rel.startswith("..") and rel not in rels:
+                rels.append(rel)
+    return rels
+
+
+def _keep_verified_build(state: AgentState) -> str:
+    """Copy the verified artifacts and the tree's links aside.
+
+    Returns:
+        The folder of the copies, or "" when the copy failed (the tests
+        then run without it).
+    """
+    done = execute_command(
+        ["sh", "-c", _TEST_KEEP_SCRIPT, "sh"] + _verified_artifact_rels(state),
+        cwd=state.repo_path,
+        timeout=600,
+        validate=False,
+    )
+    folder = ((done.stdout or "").splitlines() or [""])[0].strip()
+    # The first line must be the folder that mktemp made.
+    if not done.success or "/atesor-test-keep." not in folder:
+        logger.info(
+            "Could not keep the verified build before the package tests: "
+            f"{_one_line_tail(done.stderr or done.stdout or '')}"
+        )
+        return ""
+    return folder
+
+
+def _restore_verified_build(state: AgentState, folder: str) -> Dict[str, Any]:
+    """Put back each artifact and link that the package tests changed.
+
+    Returns:
+        ``{"restored": [...]}`` when something changed, with
+        ``"restore_error"`` when a step failed; else ``{}``.
+    """
+    done = execute_command(
+        ["sh", "-c", _TEST_RESTORE_SCRIPT, "sh", folder],
+        cwd=state.repo_path,
+        timeout=600,
+        validate=False,
+    )
+    restored = [line for line in (done.stdout or "").splitlines() if line]
+    out: Dict[str, Any] = {"restored": restored} if restored else {}
+    if restored:
+        logger.info(
+            f"The package tests changed {', '.join(restored)[:200]}; "
+            "Atesor put back the verified build"
+        )
+    if not done.success:
+        out["restore_error"] = _one_line_tail(done.stderr or "", 300) or (
+            f"exit {done.exit_code}"
+        )
+        logger.warning(
+            f"Could not put back the verified build: {out['restore_error']}"
+        )
+    return out
+
+
 def _run_package_tests(
     state: AgentState,
     repo_path: Optional[str] = None,
@@ -5045,6 +6753,9 @@ def _run_package_tests(
                 "status": "skipped",
                 "reason": "disabled, or no time left in the run budget",
             }
+        skip = _batch_test_skip(state)
+        if skip:
+            return {"status": "skipped", "reason": skip}
         detected = detected or _detect_test_command(state)
         if not detected:
             return {
@@ -5054,8 +6765,18 @@ def _run_package_tests(
                     "cargo test, make check or make test)"
                 ),
             }
+        if extra_env is None:
+            detected, extra_env = _match_tests_to_build(state, detected)
         framework, command = detected
+        # Go ends its own test binaries at this limit; the sandbox's kill
+        # stops only the go command (k9s, bearer: tests ran on).
+        if framework == "go test" and "-timeout" not in command:
+            command = command.replace(
+                "go test", f"go test -timeout {max(timeout - 30, 30)}s", 1
+            )
         logger.info(f"Running package tests: {command} (<= {timeout}s)")
+        # The optimizer keeps the builds of its own trees.
+        kept = _keep_verified_build(state) if repo_path is None else ""
         started = time.time()
         result = execute_command(
             command,
@@ -5064,26 +6785,36 @@ def _run_package_tests(
             extra_env=extra_env,
         )
         duration = round(time.time() - started, 1)
+        restore = _restore_verified_build(state, kept) if kept else {}
         output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
         # 137: the in-sandbox timeout --signal=KILL; -1: the host limit.
         # Exit 137 is also an OOM kill, so the elapsed time decides.
         timed_out = result.exit_code in (137, -1) and (
             duration >= timeout - 35
         )
+        # A stopped container, a dropped ssh session or a host that
+        # slept says nothing about the tests (sslsearch: exit 255 after
+        # a night with the laptop lid closed).
+        fault = infrastructure_fault(result) if result.exit_code else ""
+        reason = {"reason": f"infrastructure fault: {fault}"} if fault else {}
         if result.exit_code == 0:
             status = "passed"
+        elif fault:
+            status = "error"
         elif timed_out:
             status = "timeout"
         else:
             status = "failed"
         return {
             "status": status,
+            **reason,
             "framework": framework,
             "command": command,
             "exit_code": result.exit_code,
             "duration_seconds": duration,
             "timeout_seconds": timeout,
             "output_tail": output[-_TEST_OUTPUT_TAIL:],
+            **restore,
         }
     except Exception as exc:
         logger.warning(f"Package tests could not run: {exc}")
@@ -5252,6 +6983,7 @@ def finish_node(state: AgentState) -> AgentState:
         )
 
     _save_learning_data(state)
+    _log_data_effect(state)
 
     return state
 
@@ -5269,17 +7001,27 @@ def _cached_purpose(recipe: Dict[str, Any], repo_name: str) -> str:
     return sentence[:300] or repo_name
 
 
-@agent_node(AgentRole.PLANNER)
-def cached_recipe_node(state: AgentState) -> AgentState:
-    """Use a verified cached recipe as the build plan, without planning.
+def _recipe_commands(recipe: Dict[str, Any]) -> List[str]:
+    """Return every non-empty command of a cached recipe, in order."""
+    return [
+        str(command)
+        for phase in (recipe.get("build_plan") or {}).get("phases") or []
+        for command in phase.get("commands") or []
+        if str(command).strip()
+    ]
 
-    Performance mode needs a real build tree, so the port builds again.
-    The recipe of an earlier verified run replaces the analyst and the
-    scout: no planning LLM call. Its patches are applied first. When the
-    build fails anyway (the source moved on), the normal fixer and
-    re-plan loop takes over.
+
+def _plan_from_recipe(state: AgentState, recipe: Dict[str, Any]) -> bool:
+    """Make a cached recipe the build plan and apply its patches.
+
+    Used by cached_recipe_node (performance mode) and by the recall seed
+    of heuristic_plan_node. The note in
+    ``context_cache["cached_recipe_note"]`` says where the plan came
+    from and whether the source moved on since it was verified.
+
+    Returns:
+        False when the recipe holds no command; nothing changes then.
     """
-    recipe = state.cached_recipe or {}
     phases = []
     for phase in (recipe.get("build_plan") or {}).get("phases") or []:
         commands = [
@@ -5296,9 +7038,7 @@ def cached_recipe_node(state: AgentState) -> AgentState:
                 )
             )
     if not phases:
-        logger.warning("The cached recipe has no command; planning again")
-        state.cached_recipe = None
-        return state
+        return False
     build_system = str(recipe.get("build_system") or "unknown")
     built = recipe.get("last_built") or "an earlier run"
     commit = (recipe.get("verification") or {}).get("source_commit")
@@ -5310,28 +7050,6 @@ def cached_recipe_node(state: AgentState) -> AgentState:
             f"{recipe.get('build_duration_seconds', '?')}s (cached)"
         ),
         notes=[f"From the recipe cache: the verified run of {built}"],
-    )
-    artifacts = [
-        os.path.basename(str(item.get("path") or ""))
-        for item in recipe.get("artifacts") or []
-        if isinstance(item, dict) and item.get("path")
-    ]
-    state.package_analysis = PackageAnalysis(
-        purpose=_cached_purpose(recipe, state.repo_name),
-        language="unknown",
-        build_system=build_system,
-        build_system_confidence=1.0,
-        build_system_reasoning="recipe cache: a verified earlier run",
-        dependencies=[
-            {"name": str(name), "reason": "recipe cache"}
-            for name in (recipe.get("dependencies") or [])[:15]
-        ],
-        riscv_risks=[],
-        build_strategy="build with the cached recipe",
-        expected_artifacts=[name for name in artifacts if name][:10],
-        needs_custom_plan=False,
-        complexity=1,
-        llm_grounded=False,
     )
     applied = 0
     patches = [str(patch) for patch in recipe.get("patches") or []]
@@ -5360,8 +7078,440 @@ def cached_recipe_node(state: AgentState) -> AgentState:
         )
     logger.info(note)
     state.context_cache["cached_recipe_note"] = note
+    return True
+
+
+@agent_node(AgentRole.PLANNER)
+def cached_recipe_node(state: AgentState) -> AgentState:
+    """Use a verified cached recipe as the build plan, without planning.
+
+    Performance mode needs a real build tree, so the port builds again.
+    The recipe of an earlier verified run replaces the analyst and the
+    scout: no planning LLM call. Its patches are applied first. When the
+    build fails anyway (the source moved on), the normal fixer and
+    re-plan loop takes over.
+    """
+    recipe = state.cached_recipe or {}
+    misfit = _plan_isa_problems(state, _recipe_commands(recipe))
+    if misfit:
+        logger.warning(
+            f"The cached recipe compiles for {'; '.join(misfit)}; "
+            "planning again"
+        )
+        state.cached_recipe = None
+        return state
+    if not _plan_from_recipe(state, recipe):
+        logger.warning("The cached recipe has no command; planning again")
+        state.cached_recipe = None
+        return state
+    build_system = str(recipe.get("build_system") or "unknown")
+    artifacts = [
+        os.path.basename(str(item.get("path") or ""))
+        for item in recipe.get("artifacts") or []
+        if isinstance(item, dict) and item.get("path")
+    ]
+    state.package_analysis = PackageAnalysis(
+        purpose=_cached_purpose(recipe, state.repo_name),
+        language="unknown",
+        build_system=build_system,
+        build_system_confidence=1.0,
+        build_system_reasoning="recipe cache: a verified earlier run",
+        dependencies=[
+            {"name": str(name), "reason": "recipe cache"}
+            for name in (recipe.get("dependencies") or [])[:15]
+        ],
+        riscv_risks=[],
+        build_strategy="build with the cached recipe",
+        expected_artifacts=[name for name in artifacts if name][:10],
+        needs_custom_plan=False,
+        complexity=1,
+        llm_grounded=False,
+    )
     state.log_scripted_op("cached_recipe")
+    state.context_cache["plan_source"] = "cached_recipe"
     return state
+
+
+# Recall: what earlier runs of the package left (recipes, failures).
+
+
+# Directories of bundled third-party code. Their arch-specific code (an
+# x86 asm file in gnulib, zlib's contrib) does not decide whether the
+# package itself needs a custom plan.
+_VENDORED_DIR_RE = re.compile(
+    r"(?:^|/)(?:gnulib|build-aux|vendor|third_party|3rdparty|contrib|"
+    r"support)/"
+)
+
+
+def _in_vendored_dir(path: str) -> bool:
+    """Return True when a path lies in bundled third-party code."""
+    return bool(_VENDORED_DIR_RE.search(path or ""))
+
+
+def _foreign_recipe_layout(state: AgentState) -> Tuple[Dict[str, Any], str]:
+    """Return the layout facts of this package's recipe on another distro.
+
+    Its commands use another package manager, but the source layout
+    (main package, module directory) is the same.
+    """
+    entry = load_recipe_cache().get("packages", {}).get(state.repo_name)
+    if not isinstance(entry, dict):
+        return {}, ""
+    for sandbox in sorted(entry):
+        recipe = get_cached_recipe(
+            state.repo_name, sandbox=sandbox, repo_url=state.repo_url
+        )
+        if not recipe:
+            continue
+        layout = dict(recipe.get("layout") or {})
+        if not layout and recipe.get("build_system") == "go":
+            target, module_dir = _go_build_layout(
+                _recipe_commands(recipe), state.repo_path
+            )
+            if target:
+                layout = {"main_path": target, "module_dir": module_dir or ""}
+        if layout:
+            return layout, sandbox
+    return {}, ""
+
+
+def _recall(state: AgentState) -> Dict[str, Any]:
+    """Return what earlier runs left for this package; cached per run.
+
+    ``recipe`` and ``sandbox``: the cached recipe of this sandbox, else
+    of the same distro on the other target (QEMU or native). Without
+    one, ``layout`` and ``layout_sandbox``: the layout facts of a recipe
+    from another distro. ``failures``: the failure memory of the
+    package. Empty with --replan.
+    """
+    recall = state.context_cache.get("recall")
+    if recall is not None:
+        return recall
+    recall = {}
+    if not state.replan and state.repo_name:
+        for sandbox in recall_sandboxes():
+            recipe = get_cached_recipe(
+                state.repo_name, sandbox=sandbox, repo_url=state.repo_url
+            )
+            if recipe and _recipe_commands(recipe):
+                recall["recipe"] = {
+                    key: value
+                    for key, value in recipe.items()
+                    if key != "recipe_markdown"
+                }
+                recall["sandbox"] = sandbox
+                break
+        if "recipe" not in recall:
+            layout, where = _foreign_recipe_layout(state)
+            if layout:
+                recall["layout"] = layout
+                recall["layout_sandbox"] = where
+        failures = load_failure_records(state.repo_name)
+        if failures:
+            recall["failures"] = failures
+    state.context_cache["recall"] = recall
+    return recall
+
+
+def _recall_seed(state: AgentState) -> Optional[Dict[str, Any]]:
+    """Return the recalled recipe when it can be the plan, else None.
+
+    The recipe must be verified, every command must pass the plan
+    validator, and when the analyst names the artifacts, the recipe must
+    have built one of them: a verified entry can still record only a
+    side tool (netbird's recorded build makes a metrics helper).
+    """
+    recipe = _recall(state).get("recipe")
+    if not recipe:
+        return None
+    if (recipe.get("verification") or {}).get("status") != "verified":
+        return None
+    commands = _recipe_commands(recipe)
+    if not all(_plan_command_validator.is_safe(c)[0] for c in commands):
+        return None
+    trial = BuildPlan(
+        build_system=str(recipe.get("build_system") or "unknown"),
+        build_system_confidence=1.0,
+        phases=[
+            BuildPhase(index + 1, "recipe", [command])
+            for index, command in enumerate(commands)
+        ],
+        total_estimated_duration="unknown",
+    )
+    if not validate_build_plan(trial)[0]:
+        return None
+    misfit = _plan_isa_problems(state, commands)
+    if misfit:
+        logger.info(
+            f"The cached recipe of {state.repo_name} compiles for "
+            f"{'; '.join(misfit)}; it is a hint, not the plan"
+        )
+        return None
+    analysis = state.package_analysis
+    expected = [
+        os.path.basename(str(name)).lower()
+        for name in (analysis.expected_artifacts if analysis else [])
+        if str(name).strip()
+    ]
+    built = [
+        os.path.basename(str(item.get("path") or "")).lower()
+        for item in recipe.get("artifacts") or []
+        if isinstance(item, dict) and item.get("path")
+    ]
+    if (
+        expected
+        and built
+        and not any(
+            b == e or b.startswith(e + ".") or e.startswith(b + ".")
+            for b in built
+            for e in expected
+        )
+    ):
+        logger.info(
+            f"The cached recipe of {state.repo_name} built {built[:3]}, "
+            f"not the expected {expected[:3]}; it is a hint, not the plan"
+        )
+        return None
+    return recipe
+
+
+def _note_examples(state: AgentState, role: str, section: Any) -> None:
+    """Record the ids of the few-shot examples a prompt carried."""
+    shown = state.context_cache.setdefault("examples_shown", {})
+    for example_id in getattr(section, "ids", ()) or ():
+        ids = shown.setdefault(role, [])
+        if example_id not in ids:
+            ids.append(example_id)
+
+
+# Commands that every install fix holds; a match on them is no copy.
+_INDEX_UPDATE_RE = re.compile(r"^\s*(?:apt-get|apt|apk)\s+update\s*$")
+
+
+def _copied_examples(state: AgentState) -> List[str]:
+    """Return the shown fixer examples that a fix that worked repeated.
+
+    An example counts when one of its commands (a package index update
+    aside) is a command of a fix that worked, spaces aside.
+    """
+    shown = (state.context_cache.get("examples_shown") or {}).get("fixer")
+    if not shown:
+        return []
+
+    def norm(command: Any) -> str:
+        return " ".join(str(command or "").split())
+
+    ran = {
+        norm(action.get("command"))
+        for fix in state.fixes_attempted
+        if fix.success
+        for action in _learnable_actions(fix)
+        if action.get("command")
+    }
+    by_id = {ex.id: ex for ex in get_agent_memory("fixer").examples}
+    copied = []
+    for example_id in shown:
+        example = by_id.get(example_id)
+        actions = (
+            (example.fix or example.solution or {}).get("actions") or []
+            if example
+            else []
+        )
+        if any(
+            norm(a.get("command")) in ran
+            and not _INDEX_UPDATE_RE.match(norm(a.get("command")))
+            for a in actions
+            if isinstance(a, dict) and a.get("command")
+        ):
+            copied.append(example_id)
+    return copied
+
+
+def _log_data_effect(state: AgentState, outcome: Optional[str] = None) -> None:
+    """Write what the learned data gave this run to the call log.
+
+    One record per run (see ``llm_logger.log_data_effect``): the plan
+    source, the recalled recipe, the examples shown and copied, the
+    fixer rounds, the cost and the duration. A second call for the same
+    run writes nothing. Never raises.
+
+    Args:
+        state: The run state.
+        outcome: The outcome to record in place of the one the state
+            gives; ``main.py`` passes ``interrupted`` for a run that
+            Ctrl-C or the batch's SIGTERM stopped (nushell had none).
+    """
+    try:
+        if state.context_cache.get("data_effect_logged"):
+            return
+        if outcome:
+            pass
+        elif state.is_verified_success:
+            outcome = "verified"
+        elif state.build_status == BuildStatus.SUCCESS:
+            outcome = "unverified"
+        else:
+            outcome = "failed"
+        state.context_cache["data_effect_logged"] = True
+        log_data_effect(
+            {
+                "repo": state.repo_name,
+                "outcome": outcome,
+                "outcome_label": state.outcome_label,
+                "plan_source": state.context_cache.get("plan_source", ""),
+                "recall": _recall_label(state),
+                "examples_shown": state.context_cache.get("examples_shown")
+                or {},
+                "examples_copied": _copied_examples(state),
+                "fixer_rounds": len(state.fixes_attempted),
+                "builds": state.build_count,
+                "llm_calls": state.api_calls_made,
+                "cost_usd": round(state.api_cost_usd, 4),
+                "duration_seconds": round(state.get_execution_duration(), 1),
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Data-effect record failed (non-fatal): {e}")
+
+
+def _recall_label(state: AgentState) -> str:
+    """Return "<repo>[<sandbox>]" of the recalled recipe, or ""."""
+    recall = _recall(state)
+    if not recall.get("recipe"):
+        return ""
+    return f"{state.repo_name}[{recall.get('sandbox')}]"
+
+
+def _recall_prompt_section(state: AgentState) -> str:
+    """Render the recall for the scout and fixer prompts ("" if empty)."""
+    recall = _recall(state)
+    parts: List[str] = []
+    recipe = recall.get("recipe")
+    if recipe:
+        verdict = (recipe.get("verification") or {}).get("status")
+        heading = (
+            "## Verified plan of this package (earlier run)"
+            if verdict == "verified"
+            else (
+                "## Plan of this package from an earlier run (its "
+                "program crashed on the machine; do not repeat its "
+                "machine flags)"
+                if verdict == "crashes"
+                else "## Plan of this package from an earlier run "
+                "(not verified)"
+            )
+        )
+        phases = [
+            {"name": phase.get("name"), "commands": phase.get("commands")}
+            for phase in (recipe.get("build_plan") or {}).get("phases") or []
+        ]
+        if state.error_history and _recipe_commands(recipe) == _plan_commands(
+            state
+        ):
+            advice = (
+                "This run built with this plan and it failed, so the "
+                "source or the sandbox changed since that run."
+            )
+        else:
+            advice = (
+                "Reuse its commands unless the evidence above shows that "
+                "they no longer fit."
+            )
+        parts.append(
+            f"{heading}\n"
+            f"Sandbox: {recall.get('sandbox')} | Built: "
+            f"{str(recipe.get('last_built') or '?')[:10]} | Verification: "
+            f"{verdict or 'not recorded'}\n"
+            f"```json\n"
+            f"{cut_text(json.dumps({'phases': phases}, indent=2), 3000)}\n"
+            f"```\n{advice}"
+        )
+    elif recall.get("layout"):
+        parts.append(
+            "## Layout of this package from a verified build on "
+            f"{recall.get('layout_sandbox')}\n"
+            f"{json.dumps(recall['layout'])}"
+        )
+    failures = recall.get("failures") or {}
+    if failures:
+        lines = ["## Tried before on this package (the error stayed)"]
+        for key, records in list(failures.items())[:5]:
+            for record in records[-3:]:
+                commands = "; ".join(record.get("commands") or [])
+                lines.append(
+                    f"- Error `{_shorten(key, 160)}`: "
+                    f"{record.get('strategy', '')} (commands: "
+                    f"{_shorten(commands, 200)}); then: "
+                    f"{record.get('error_after', '')}"
+                )
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _extra_go_mains(
+    state: AgentState, go_main_info: Dict[str, Any], build_cmd: str
+) -> List[str]:
+    """Return a ``go build`` for each expected program the plan skips.
+
+    An expected artifact name with its own ``cmd/<name>`` directory in
+    the module gets one build command; the main build's own target is
+    left out. At most five.
+    """
+    analysis = state.package_analysis
+    if analysis is None or not analysis.llm_grounded:
+        return []
+    root = _to_host_path(state.repo_path)
+    module_dir = str(go_main_info.get("module_dir") or "").strip("/")
+    target, _ = _go_build_layout([build_cmd], state.repo_path)
+    built = target[2:] if target.startswith("./") else target
+    commands: List[str] = []
+    for name in analysis.expected_artifacts or []:
+        base = os.path.basename(str(name).strip())
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", base):
+            continue
+        rel = f"cmd/{base}"
+        if rel == built or not os.path.isdir(
+            os.path.join(root, module_dir, rel)
+        ):
+            continue
+        command = f"go build -buildvcs=false -o {base} ./{rel}"
+        if module_dir:
+            command = f"cd {shlex.quote(module_dir)} && {command}"
+        if command not in commands:
+            commands.append(command)
+    return commands[:5]
+
+
+def _analyst_go_settings(state: AgentState) -> Tuple[Dict[str, str], str]:
+    """Return the Go build environment and tags the analyst read.
+
+    Only when the analyst's strategy names a build file (GNUmakefile,
+    build.sh, ...): the settings then come from that file, not a guess
+    (vuls needs GOEXPERIMENT=jsonv2 from its GNUmakefile).
+    """
+    analysis = state.package_analysis
+    if analysis is None or not analysis.llm_grounded:
+        return {}, ""
+    text = " ".join(
+        [str(analysis.build_strategy or "")]
+        + [str(risk) for risk in analysis.riscv_risks]
+    )
+    if not re.search(
+        r"(?i)\b(?:GNUmakefile|Makefile|build\.sh|\.goreleaser|Taskfile|"
+        r"magefile|justfile)\b",
+        text,
+    ):
+        return {}, ""
+    # A value at the end of a sentence carries its full stop.
+    env = {
+        name: value.rstrip(".,;:")
+        for name, value in re.findall(
+            r"\b(CGO_ENABLED|GOEXPERIMENT)=([A-Za-z0-9_.,-]+)", text
+        )
+    }
+    tags = re.search(r"-tags[= ]+[\"']?([A-Za-z0-9_,.-]+)", text)
+    return env, tags.group(1).rstrip(".,;:") if tags else ""
 
 
 # optimize_node and the optimizer agent — performance mode (--optimize).
@@ -5370,6 +7520,21 @@ def cached_recipe_node(state: AgentState) -> AgentState:
 # A harness is a whole source file: a free coder model can need more
 # than the default wall time to write one.
 OPTIMIZER_CODE_TIMEOUT = 240
+
+# LLM cost limit of one --optimize step in USD (ATESOR_OPTIMIZE_COST_CAP).
+# The $1 cap of should_escalate covers the fix loop only, and one
+# workload source can ask up to 8 rounds (brotli: 23 calls, $0.19).
+OPTIMIZER_COST_CAP = 0.50
+
+
+def _optimizer_cost_cap() -> float:
+    """Return the optimize step's LLM cost cap in USD."""
+    try:
+        return float(
+            os.environ.get("ATESOR_OPTIMIZE_COST_CAP", OPTIMIZER_COST_CAP)
+        )
+    except ValueError:
+        return OPTIMIZER_COST_CAP
 
 
 def _llm_name(llm: Any) -> str:
@@ -5389,7 +7554,8 @@ def _optimizer_agent(
     program run. When no model of the role answers in time, the other
     role's models get the question once. Every call goes through
     ``llm_call_with_validation``: the reply must be JSON and pass the
-    caller's check, with critique retries and model fallbacks.
+    caller's check, with critique retries and model fallbacks. After
+    ``_optimizer_cost_cap`` USD of calls, the agent gives no answer.
     """
 
     def ask(
@@ -5397,6 +7563,13 @@ def _optimizer_agent(
         prompt: str,
         check: Callable[[Dict[str, Any]], Optional[str]],
     ) -> Tuple[Optional[Dict[str, Any]], str]:
+        cap = _optimizer_cost_cap()
+        spent = state.context_cache.get("optimizer_cost_usd", 0.0)
+        if spent >= cap:
+            return None, (
+                f"the optimize step used its LLM cost cap "
+                f"(${spent:.2f} of ${cap:.2f}, ATESOR_OPTIMIZE_COST_CAP)"
+            )
         code = phase.startswith("harness")
         role = AgentRole.BUILDER if code else AgentRole.PLANNER
         other = AgentRole.PLANNER if code else AgentRole.BUILDER
@@ -5430,6 +7603,10 @@ def _optimizer_agent(
                 tokens_in=outcome.input_tokens,
                 tokens_out=outcome.output_tokens,
                 calls=outcome.attempts,
+            )
+            state.context_cache["optimizer_cost_usd"] = (
+                state.context_cache.get("optimizer_cost_usd", 0.0)
+                + (outcome.cost_usd or 0.0)
             )
             return outcome
 
@@ -5503,6 +7680,14 @@ def optimize_node(state: AgentState) -> AgentState:
     record_optimization(
         state.repo_name, state.optimization, state.machine_profile
     )
+    # The verified build crashed in the timing runs: finish_node cached
+    # it as verified, and no later run may replay it as the plan.
+    crash = (state.optimization or {}).get("baseline_crash")
+    if crash:
+        label = (state.machine_profile or {}).get("label") or "this machine"
+        mark_recipe_verification(
+            state.repo_name, "crashes", f"on {label}: {crash}"
+        )
     state.current_phase = "finished"
     return state
 
@@ -5553,6 +7738,8 @@ def route_analyst_to_next(state: AgentState) -> str:
     """
     if state.package_analysis is None:
         logger.warning("Analyst produced no analysis; escalating")
+        return "escalate_node"
+    if state.context_cache.get("unsupported"):
         return "escalate_node"
     return "heuristic_plan_node"
 
@@ -5654,6 +7841,9 @@ def route_supervisor_to_next(state: AgentState) -> str:
 # tree. The builder does not mark such a fix successful, and the next
 # step is another fixer round instead of an identical rebuild.
 _NO_CHANGE = "no change applied"
+# The changes_made entry of a plan_command action whose new text is the
+# old text; it is no change a rebuild could use.
+_SAME_PLAN_COMMAND = "Plan command unchanged"
 
 # Prefix that execute_command writes for a command the whitelist blocks.
 _VALIDATOR_BLOCK = "Command blocked by safety validation"
@@ -5665,6 +7855,10 @@ _FIXER_INVALID = "FIXER proposed invalid fix"
 # Prefix of the error fixer_node records when the model says that no
 # fix inside the sandbox can work (the `escalate` field).
 _FIXER_ESCALATED = "FIXER escalated"
+
+
+# Fixer answers without a change (no rebuild) allowed per build.
+_MAX_REASKS = 3
 
 
 def _llm_refused(state: AgentState) -> bool:
@@ -5702,13 +7896,14 @@ def _fix_loop_stop_reason(state: AgentState) -> str:
     """Return why another fixer round cannot help, or an empty string.
 
     Stops on: a refusal; a ``should_escalate`` reason other than the
-    error category (attempt limit, three identical errors, cost cap); a
-    fixer round with no valid answer; and two or more fixes after which
-    the error did not change. The category alone does not stop the
-    loop: it comes from substring matches, and the fixer fixed errors
-    classified as DISK_SPACE. In October 2026
-    the fixer passed 21.7% of packages in round 1, but only 8.6% in
-    round 3 and 5.4% in round 4.
+    error category (attempt limit, three identical errors, cost cap);
+    ``_MAX_REASKS`` fixer answers since the last build that changed
+    nothing; a fixer round with no valid answer; and two or more fixes
+    after which the error did not change. The category alone does not
+    stop the loop: it comes from substring matches, and the fixer fixed
+    errors classified as DISK_SPACE. In October 2026 the fixer passed
+    21.7% of packages in round 1, but only 8.6% in round 3 and 5.4% in
+    round 4.
 
     Args:
         state: The current agent state.
@@ -5724,6 +7919,13 @@ def _fix_loop_stop_reason(state: AgentState) -> str:
     escalate, reason = should_escalate(state, check_category=False)
     if escalate:
         return reason
+    # Answers that change nothing never reach a build: after three of
+    # them since the last build, a fourth is unlikely to differ.
+    if state.context_cache.get("reasks_since_build", 0) >= _MAX_REASKS:
+        return (
+            f"the fixer gave {_MAX_REASKS} answers since the last build "
+            "that changed nothing in the tree"
+        )
     last = state.error_history[-1].message if state.error_history else ""
     # A provider fault (timeout, HTTP error) may pass; an answer that
     # fails validation or parsing three times will not. In October 2026
@@ -5735,9 +7937,12 @@ def _fix_loop_stop_reason(state: AgentState) -> str:
             "the fixer gave no valid fix after its retries; a rebuild of "
             "the unchanged tree would repeat the failure"
         )
+    # The error lines are compared as sets, without make's summary
+    # lines: progress is a line that is gone. One compared line missed
+    # progress (gomuks: the olm line had gone, and the loop stopped).
     if len(state.fixes_attempted) >= 2 and len(state.error_history) >= 2:
         before, after = state.error_history[-2:]
-        if _error_signature(before) == _error_signature(after):
+        if not (_error_lines(before.message) - _error_lines(after.message)):
             return (
                 f"the error did not change after fix "
                 f"{len(state.fixes_attempted)}; more fixer rounds are "
@@ -5748,6 +7953,8 @@ def _fix_loop_stop_reason(state: AgentState) -> str:
 
 def _escalation_reason(state: AgentState) -> str:
     """Return the reason the escalation report gives for this run."""
+    if state.context_cache.get("unsupported"):
+        return str(state.context_cache["unsupported"])
     last = state.error_history[-1].message if state.error_history else ""
     if (last or "").startswith(_FIXER_ESCALATED):
         return f"the fixer found no fix inside the sandbox: {last}"
@@ -5969,6 +8176,19 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
     }
     state.log_scripted_op("heuristic_plan_facts")
 
+    # A verified plan of this package from an earlier run is the plan:
+    # no default recipe and no scout call (see _recall_seed).
+    seed = _recall_seed(state)
+    if seed is not None and _plan_from_recipe(state, seed):
+        logger.info(
+            "Using the verified recipe of an earlier run "
+            f"({_recall(state).get('sandbox')}) as the plan"
+        )
+        state.log_scripted_op("recall_seed")
+        state.context_cache["plan_source"] = "recipe"
+        state.build_status = BuildStatus.PENDING
+        return state
+
     build_type = state.scout_build_system_result["type"]
     confidence = float(state.scout_build_system_result["confidence"])
 
@@ -6000,12 +8220,27 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
 
     # Heavily arch-specific repos need the LLM scout's judgement (SIMD
     # opt-outs, feature flags) rather than a generic default plan.
-    if (
-        state.scout_arch_issues_result["critical"]
-        or state.scout_arch_issues_result["high_severity"] >= 3
+    # Code in bundled third-party directories (gnulib, contrib, vendor)
+    # does not decide: wget, gawk and zlib went to the scout for guarded
+    # asm there, and the scout plans were not better than the default.
+    deciding = [a for a in arch_codes if not _in_vendored_dir(a.file)]
+    if any(a.severity == "critical" for a in deciding) or (
+        sum(1 for a in deciding if a.severity == "high") >= 3
     ):
         logger.info(
             "Significant arch-specific code detected; deferring to LLM scout"
+        )
+        return state
+
+    # Go files for amd64/arm64 with no riscv64 or generic version break
+    # the default build (steampipe: 14 minutes to "undefined:
+    # platform.Paths"); the scout prompt lists the files.
+    if build_type == "go" and any(
+        a.arch_type == "go_arch_files" for a in deciding
+    ):
+        logger.info(
+            "Go files for other architectures without a riscv64 version; "
+            "deferring to LLM scout"
         )
         return state
 
@@ -6025,7 +8260,25 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
             _setup_packages_for_plan(state, base, profile)
         )
 
+    # The build file can sit in a subdirectory (libexpat: expat/); init
+    # found it, so the default plan builds there.
+    root = ""
+    if bsi and bsi.type == build_type:
+        root = (getattr(bsi, "module_dir", "") or "").strip("/")
+
     if build_type == "cmake":
+        if root:
+            configure = (
+                f"cmake -S {shlex.quote(root)} -B build "
+                "-DCMAKE_BUILD_TYPE=Release"
+            )
+            build = "cmake --build build -j$(nproc)"
+        else:
+            configure = (
+                "mkdir -p build && cd build"
+                " && cmake .. -DCMAKE_BUILD_TYPE=Release"
+            )
+            build = "cd build && make -j$(nproc)"
         state.build_plan = BuildPlan(
             build_system="cmake",
             build_system_confidence=confidence,
@@ -6033,19 +8286,8 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
                 BuildPhase(
                     1, "setup", [_setup_cmd(["cmake", "gcc"])], False, "30s"
                 ),
-                BuildPhase(
-                    2,
-                    "configure",
-                    [
-                        "mkdir -p build && cd build"
-                        " && cmake .. -DCMAKE_BUILD_TYPE=Release"
-                    ],
-                    False,
-                    "1m",
-                ),
-                BuildPhase(
-                    3, "build", ["cd build && make -j$(nproc)"], True, "5m"
-                ),
+                BuildPhase(2, "configure", [configure], False, "1m"),
+                BuildPhase(3, "build", [build], True, "5m"),
             ],
             total_estimated_duration="7m",
             notes=["Default CMake plan (heuristic)"],
@@ -6057,7 +8299,19 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
             build_system_confidence=confidence,
             phases=[
                 BuildPhase(1, "setup", [_setup_cmd(["gcc"])], False, "30s"),
-                BuildPhase(2, "build", ["make -j$(nproc)"], True, "5m"),
+                BuildPhase(
+                    2,
+                    "build",
+                    [
+                        (
+                            f"make -C {shlex.quote(root)} -j$(nproc)"
+                            if root
+                            else "make -j$(nproc)"
+                        )
+                    ],
+                    True,
+                    "5m",
+                ),
             ],
             total_estimated_duration="6m",
             notes=["Default Make plan (heuristic)"],
@@ -6084,28 +8338,56 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
         logger.info("Created default Autotools BuildPlan (heuristic)")
     elif build_type == "go":
         go_main_info = state.context_cache.get("go_main_info", {})
-        needs_init = go_main_info.get("needs_go_init", False)
-        build_cmd = go_main_info.get(
-            "build_command", "go build -buildvcs=false ./..."
+        build_cmd = (
+            go_main_info.get("plan_command")
+            or go_main_info.get("build_command")
+            or "go build -buildvcs=false ./..."
         )
         if "-buildvcs=false" not in build_cmd and _is_go_build_command(
             build_cmd
         ):
             build_cmd = _inject_go_flag(build_cmd, "-buildvcs=false")
+        # The environment and tags the analyst read in the package's own
+        # build file (vuls: CGO_ENABLED=0 GOEXPERIMENT=jsonv2).
+        go_env, go_tags = _analyst_go_settings(state)
+        if _is_go_build_command(build_cmd):
+            if go_tags and "-tags" not in build_cmd:
+                build_cmd = _inject_go_flag(
+                    build_cmd, f"-tags {shlex.quote(go_tags)}"
+                )
+            settings = " ".join(
+                f"{name}={value}"
+                for name, value in go_env.items()
+                if f"{name}=" not in build_cmd
+            )
+            if settings:
+                build_cmd = _GO_BUILD_RE.sub(
+                    lambda match: f"{settings} {match.group(0)}",
+                    build_cmd,
+                    count=1,
+                )
 
-        go_phase_commands = []
-        if needs_init:
-            module_name = (
-                state.repo_url.replace("https://", "").rstrip("/")
-                if state.repo_url
-                else f"github.com/unknown/{state.repo_name}"
-            )
-            go_phase_commands.extend(
-                [f"go mod init {module_name}", "go mod tidy"]
-            )
-        else:
-            go_phase_commands.append("go mod tidy")
-        go_phase_commands.append(build_cmd)
+        module_name = (
+            state.repo_url.replace("https://", "").rstrip("/")
+            if state.repo_url
+            else f"github.com/unknown/{state.repo_name}"
+        )
+        go_phase_commands = _go_prepare_commands(
+            {**go_main_info, "plan_command": build_cmd}, module_name
+        )
+        # Each program the analyst names that has its own cmd/<name>
+        # directory is built too (age built age but not age-keygen).
+        for extra in _extra_go_mains(state, go_main_info, build_cmd):
+            if go_tags and "-tags" not in extra:
+                extra = _inject_go_flag(extra, f"-tags {shlex.quote(go_tags)}")
+            settings = " ".join(f"{n}={v}" for n, v in go_env.items())
+            if settings:
+                extra = _GO_BUILD_RE.sub(
+                    lambda match: f"{settings} {match.group(0)}",
+                    extra,
+                    count=1,
+                )
+            go_phase_commands.append(extra)
 
         state.build_plan = BuildPlan(
             build_system="go",
@@ -6129,6 +8411,7 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
         )
         return state
 
+    state.context_cache["plan_source"] = "heuristic"
     state.build_status = BuildStatus.PENDING
     return state
 
@@ -6141,6 +8424,157 @@ def heuristic_plan_node(state: AgentState) -> AgentState:
 # sends the list to an LLM. The verification summary keeps the full
 # counts.
 _MAX_RECORDED_ARTIFACTS = 60
+
+
+# The machine and what a build may ask of it.
+
+_MARCH_RE = re.compile(r"-march=(rv(?:32|64)[a-z0-9_]+)")
+# Extensions that a kernel can leave out of its ISA string although
+# every Linux board runs them.
+_ALWAYS_PRESENT = frozenset({"zicsr", "zifencei", "zmmul"})
+
+
+def _machine(state: AgentState) -> Optional[MachineProfile]:
+    """Return the probed profile of the native machine, once per run.
+
+    None under QEMU, where the CPU model runs every extension, and when
+    the probe fails (the checks that need it are then skipped).
+    """
+    if not is_native():
+        return None
+    cached = state.context_cache.get("machine_probe")
+    if cached is None:
+        profile, error = probe_machine("native")
+        if profile is None:
+            logger.warning(f"Machine probe failed ({error}); no ISA check")
+        cached = profile.to_dict() if profile else {}
+        state.context_cache["machine_probe"] = cached
+        if cached and not state.machine_profile:
+            state.machine_profile = cached
+    return MachineProfile.from_dict(cached) if cached else None
+
+
+def _isa_flags_the_machine_lacks(
+    commands: List[str], profile: Optional[MachineProfile]
+) -> List[str]:
+    """Return each ``-march`` value that names an extension not present.
+
+    libwebp was built six times with ``-march=rv64gcv`` on a board
+    without V; the analyst had suggested the flag.
+
+    Returns:
+        ``-march=X (the machine lacks a, b)`` texts; empty when every
+        value fits or no probe exists.
+    """
+    if profile is None or not profile.extensions:
+        return []
+    have = set(profile.extensions) | _ALWAYS_PRESENT
+    problems = set()
+    for command in commands:
+        for value in _MARCH_RE.findall(command):
+            missing = sorted(parse_isa_string(value) - have)
+            if missing:
+                problems.add(
+                    f"-march={value} (the machine lacks {', '.join(missing)})"
+                )
+    return sorted(problems)
+
+
+def _plan_isa_problems(state: AgentState, commands: List[str]) -> List[str]:
+    """Return the ``-march`` problems of plan commands on this machine.
+
+    The probe runs only when a command names ``-march``.
+    """
+    if not any("-march=" in command for command in commands):
+        return []
+    return _isa_flags_the_machine_lacks(commands, _machine(state))
+
+
+def _primary_executable(recorded: List[Any], repo_path: str) -> str:
+    """Return the first recorded riscv64 program in the tree, or ""."""
+    root = repo_path.rstrip("/") + "/"
+    for artifact in recorded:
+        path = str(artifact.path)
+        if (
+            artifact.type == "binary"
+            and path.startswith(root)
+            and not re.search(r"/(?:tests?|testdata|examples?)/", path)
+        ):
+            return path
+    return ""
+
+
+def _smoke_run(path: str) -> str:
+    """Run a built program with ``--version``, then ``--help``.
+
+    A program that the machine cannot run dies with a crash signal
+    (SIGILL for a missing extension). An exit status or a stop at the
+    10 s limit is no crash.
+
+    Returns:
+        The crash, as ``"<name> --version" died with SIGILL``, or "".
+    """
+    name = os.path.basename(path)
+    for flag in ("--version", "--help"):
+        result = execute_command([path, flag], timeout=20, validate=False)
+        signal = crash_signal(result.exit_code)
+        if signal:
+            return f"`{name} {flag}` died with {signal}"
+        if result.exit_code == 0:
+            return ""
+    return ""
+
+
+def _instruction_findings(
+    state: AgentState, recorded: List[Any], profile: MachineProfile
+) -> Tuple[List[str], List[str]]:
+    """Scan the riscv64 outputs for instructions the machine lacks.
+
+    Returns:
+        ``(problems, warnings)``. A problem: an output holds instructions
+        of an extension that a ``-march`` of the plan names and the
+        machine lacks. A warning: such instructions without that flag,
+        which can be runtime dispatch.
+    """
+    from .optimize import inspect_tree
+
+    missing = set(forbidden_classes(profile))
+    if not missing:
+        return [], []
+    root = state.repo_path.rstrip("/") + "/"
+    rels = [
+        str(a.path)[len(root) :]
+        for a in recorded
+        if a.type in ("binary", "library_shared")
+        and str(a.path).startswith(root)
+    ][:8]
+    if not rels:
+        return [], []
+    facts, error = inspect_tree(state.repo_path, rels, None, False, "native")
+    if facts is None:
+        logger.warning(f"Instruction scan could not run: {error}")
+        return [], []
+    flagged = {
+        name
+        for value in _MARCH_RE.findall(" ".join(_plan_commands(state)))
+        for name in parse_isa_string(value)
+    }
+    problems: List[str] = []
+    warnings: List[str] = []
+    for rel in rels:
+        counts = ((facts.get("artifacts") or {}).get(rel) or {}).get("counts")
+        found = sorted(name for name in counts or {} if name in missing)
+        if not found:
+            continue
+        text = (
+            f"{rel} holds {', '.join(found)} instructions that the machine "
+            f"({profile.label}) lacks"
+        )
+        if flagged & set(found):
+            problems.append(text + " (the plan's -march asks for them)")
+        else:
+            warnings.append(text + " (runtime dispatch, or a SIGILL risk)")
+    return problems, warnings
 
 
 def _artifacts_to_record(riscv64: List[Any], expected: List[str]) -> List[Any]:
@@ -6211,8 +8645,46 @@ def verify_node(state: AgentState) -> AgentState:
         )
     if verdict.status == UNVERIFIED:
         logger.warning(f"Build not verified: {verdict.reason}")
+    # The header proves the architecture, not that the machine can run
+    # the code: libwebp passed six times while it died with SIGILL.
+    problem = (
+        _runs_on_this_machine(state, recorded)
+        if verdict.status == VERIFIED and is_native()
+        else ""
+    )
+    if problem:
+        state.artifact_verification.update(status="crashes", reason=problem)
+        state.build_status = BuildStatus.FAILED
+        state.add_error(
+            create_error_record(
+                message=f"Artifact verification failed: {problem}",
+                category=ErrorCategory.ARCHITECTURE,
+            )
+        )
+        return state
     state.build_status = BuildStatus.SUCCESS
     return state
+
+
+def _runs_on_this_machine(state: AgentState, recorded: List[Any]) -> str:
+    """Return why the verified outputs cannot run on this machine, or "".
+
+    Native only. The instruction scan compares the outputs with the
+    machine probe, and the primary program runs once with ``--version``
+    (then ``--help``). The scan's warnings go into the verification
+    record; they never fail the port alone.
+    """
+    profile = _machine(state)
+    problems: List[str] = []
+    if profile is not None:
+        problems, warnings = _instruction_findings(state, recorded, profile)
+        if warnings:
+            state.artifact_verification["isa_warnings"] = warnings
+    primary = _primary_executable(recorded, state.repo_path)
+    crash = _smoke_run(primary) if primary else ""
+    if crash:
+        problems.append(f"the built program crashes on this machine: {crash}")
+    return "; ".join(problems)
 
 
 def create_build_fix_subgraph() -> StateGraph:

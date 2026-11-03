@@ -416,3 +416,100 @@ class TestGitMergeGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLearnedDataMerge(unittest.TestCase):
+    """The CI merge keeps every learned example and failed fix."""
+
+    def setUp(self) -> None:
+        """Import merge_data_artifacts.py."""
+        self.script = _load_script()
+
+    @staticmethod
+    def _fixer(ex_id: str, repo: str, pattern: str) -> dict:
+        """Return a minimal auto fixer example."""
+        return {
+            "id": ex_id,
+            "source": "auto",
+            "repo_name": repo,
+            "build_system": "go",
+            "sandbox": "debian-riscv64",
+            "error_pattern": pattern,
+            "timestamp": "2026-10-21",
+        }
+
+    def test_one_auto_id_from_two_shards_keeps_both(self) -> None:
+        """Shards hand out ids alone; a clash gets a new id."""
+        base = {"examples": [self._fixer("fixer-auto-028", "iputils", "cap")]}
+        shard_a = {
+            "examples": base["examples"]
+            + [self._fixer("fixer-auto-029", "jr", "rdkafka")]
+        }
+        shard_b = {
+            "examples": base["examples"]
+            + [self._fixer("fixer-auto-029", "steampipe", "Paths")]
+        }
+        merged = self.script._merge_examples_file(base, shard_a)
+        merged = self.script._merge_examples_file(merged, shard_b)
+        by_repo = {ex["repo_name"]: ex["id"] for ex in merged["examples"]}
+        self.assertEqual(
+            by_repo,
+            {
+                "iputils": "fixer-auto-028",
+                "jr": "fixer-auto-029",
+                "steampipe": "fixer-auto-030",
+            },
+        )
+
+    def test_the_same_example_from_two_shards_is_kept_once(self) -> None:
+        """An unchanged base example is no clash."""
+        ex = self._fixer("fixer-auto-028", "iputils", "cap")
+        merged = self.script._merge_examples_file(
+            {"examples": [ex]}, {"examples": [dict(ex)]}
+        )
+        self.assertEqual(len(merged["examples"]), 1)
+
+    def test_failure_memories_merge_per_error(self) -> None:
+        """One record per strategy, the newest wins, five at most."""
+
+        def memory(records):
+            return {
+                "version": "1.0",
+                "packages": {"jr": {"debian-riscv64": {"err": records}}},
+            }
+
+        old = [
+            {"strategy": f"s{i}", "date": f"2026-10-0{i}"} for i in range(1, 5)
+        ]
+        new = [
+            {"strategy": "s4", "date": "2026-10-09", "commands": ["x"]},
+            {"strategy": "s5", "date": "2026-10-05"},
+            {"strategy": "s6", "date": "2026-10-06"},
+        ]
+        merged = self.script._merge_failures(memory(old), memory(new))
+        records = merged["packages"]["jr"]["debian-riscv64"]["err"]
+        self.assertEqual(
+            [r["strategy"] for r in records], ["s2", "s3", "s5", "s6", "s4"]
+        )
+        self.assertEqual(records[-1]["commands"], ["x"])
+
+    def test_a_merge_is_kept_when_it_runs_again(self) -> None:
+        """One example under two shard ids is kept once, also on re-runs."""
+        base = {"examples": [self._fixer("fixer-auto-028", "iputils", "cap")]}
+        shard_a = {
+            "examples": base["examples"]
+            + [self._fixer("fixer-auto-029", "zlib", "z")]
+        }
+        shard_b = {
+            "examples": base["examples"]
+            + [
+                self._fixer("fixer-auto-029", "jr", "rdkafka"),
+                self._fixer("fixer-auto-030", "zlib", "z"),
+            ]
+        }
+        merged = self.script._merge_examples_file(base, shard_a)
+        merged = self.script._merge_examples_file(merged, shard_b)
+        repos = sorted(ex["repo_name"] for ex in merged["examples"])
+        self.assertEqual(repos, ["iputils", "jr", "zlib"])
+        again = self.script._merge_examples_file(merged, shard_b)
+        self.assertEqual(again["examples"], merged["examples"])

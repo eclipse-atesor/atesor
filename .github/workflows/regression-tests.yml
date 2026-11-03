@@ -55,6 +55,8 @@ jobs:
               tests/test_llm_helpers.py
               tests/test_llm_logger.py
               tests/test_data_files.py
+              tests/test_data_in_workflow.py
+              tests/test_data_effect.py
           - category: repo-analysis
             paths: >-
               tests/test_scripted_ops.py

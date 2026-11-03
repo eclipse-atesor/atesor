@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 
+from .evidence import strip_failure_prefix, strip_go_download_noise
+
 # Growth caps for the append-only run records (MEM-03). Both lists are
 # serialized wholesale into `<repo>_state_*.json`, so an escalated run
 # that walks the 120-step recursion limit would otherwise balloon both
@@ -66,7 +68,9 @@ class ErrorCategory(str, Enum):
     disk categories as fundamental blockers — reclassifying a message
     changes the path a run takes. No code sets
     ``LICENSE_INCOMPATIBLE``, ``REQUIRES_HARDWARE`` or
-    ``ARCHITECTURE_IMPOSSIBLE``.
+    ``ARCHITECTURE_IMPOSSIBLE``. ``INFRASTRUCTURE`` comes from the
+    builder's guard, not from ``classify_error``: the container or the
+    ssh session failed, not the build.
     """
 
     UNKNOWN = "UNKNOWN"
@@ -83,6 +87,7 @@ class ErrorCategory(str, Enum):
     LICENSE_INCOMPATIBLE = "LICENSE_INCOMPATIBLE"
     REQUIRES_HARDWARE = "REQUIRES_HARDWARE"
     ARCHITECTURE_IMPOSSIBLE = "ARCHITECTURE_IMPOSSIBLE"
+    INFRASTRUCTURE = "INFRASTRUCTURE"
 
 
 class FailureSeverity(str, Enum):
@@ -137,6 +142,12 @@ class CommandResult:
     stderr: str
     duration_seconds: float
     timestamp: datetime = field(default_factory=datetime.now)
+    # True when the in-container time limit stopped the command (exit
+    # 137 at the limit). That is not a memory kill.
+    timed_out: bool = False
+    # Wall-clock seconds of the run that the monotonic clock did not
+    # count: the host slept (a closed laptop lid) during the command.
+    slept_seconds: float = 0.0
 
     @property
     def success(self) -> bool:
@@ -185,6 +196,11 @@ class FixAttempt:
     action_results: List[str] = field(default_factory=list)
     # The fixer's one-sentence root cause for this fix.
     root_cause: str = ""
+    # One record per action the fixer ran: its type, the command, path
+    # or replaced plan command, the file content or diff when it is
+    # short (see graph._action_record), and ok. The learner and the
+    # recipe cache replay these; changes_made is the readable log.
+    actions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -350,6 +366,10 @@ class AgentState:
     # Execution tracking
     attempt_count: int = 0
     max_attempts: int = 5
+    # Builder runs of this port. attempt_count also counts error
+    # records and re-asks; this counts builds only (reports, the
+    # data-effect record).
+    build_count: int = 0
     last_successful_phase: int = 0
 
     # Error handling
@@ -417,6 +437,9 @@ class AgentState:
     # cached_recipe_node turns it into the build plan, so the port
     # builds again without the planning LLM calls.
     cached_recipe: Optional[Dict[str, Any]] = None
+    # Set from --replan: the run does not reuse the recipes, the failure
+    # memory or the few-shot examples of earlier runs.
+    replan: bool = False
     # The machine probe (MachineProfile.to_dict) and the optimization
     # record (src.optimize.run_optimization). None until optimize_node.
     machine_profile: Optional[Dict[str, Any]] = None
@@ -434,14 +457,23 @@ class AgentState:
         """Update the last_updated timestamp."""
         self.last_updated = datetime.now()
 
-    def add_error(self, error: ErrorRecord) -> None:
+    def add_error(
+        self, error: ErrorRecord, count_attempt: bool = True
+    ) -> None:
         """Record an error and count it against the attempt budget.
 
         History is capped at ``MAX_ERROR_HISTORY`` (MEM-03); the
         escalation logic only inspects recent errors. Note the side
-        effect: every recorded error increments ``attempt_count``,
-        which ``max_attempts`` and the routing functions compare
-        against.
+        effect: a recorded error increments ``attempt_count``, which
+        ``max_attempts`` and the routing functions compare against.
+
+        Args:
+            error: The error record.
+            count_attempt: False for an error that is no build attempt:
+                a scout call that failed (its fallback plan builds and
+                counts) or an LLM provider fault in the fixer. In
+                October 2026 such records ended wget run 1 at
+                "Maximum attempts (5)" after 3 builds.
         """
         self.error_history.append(error)
         if len(self.error_history) > MAX_ERROR_HISTORY:
@@ -449,7 +481,8 @@ class AgentState:
         self.last_error = error.message
         self.last_error_category = error.category
         self.last_error_severity = error.severity
-        self.attempt_count += 1
+        if count_attempt:
+            self.attempt_count += 1
         self.update_timestamp()
 
     def add_fix_attempt(self, fix: FixAttempt) -> None:
@@ -560,6 +593,25 @@ class AgentState:
         if not self.artifact_verification:
             return None
         return self.artifact_verification.get("status")
+
+    @property
+    def outcome_label(self) -> str:
+        """Return the label of a run that ended for an outside reason.
+
+        ``INFRASTRUCTURE`` when the builder's guard escalated (the
+        container or the ssh session failed), ``REFUSED`` when the model
+        refused the package, ``UNSUPPORTED`` when the analyst step found
+        that the package builds no riscv64 binary, else "". The exit
+        codes stay as they are; ``main.py`` prints the label and
+        ``batch_test.py`` reports it.
+        """
+        if self.last_error_category == ErrorCategory.INFRASTRUCTURE:
+            return "INFRASTRUCTURE"
+        if self.context_cache.get("llm_refused"):
+            return "REFUSED"
+        if self.context_cache.get("unsupported"):
+            return "UNSUPPORTED"
+        return ""
 
     @property
     def is_verified_success(self) -> bool:
@@ -722,6 +774,7 @@ def create_initial_state(
     optimize: bool = False,
     emulate_cpu: Optional[str] = None,
     cached_recipe: Optional[Dict[str, Any]] = None,
+    replan: bool = False,
 ) -> AgentState:
     """Create initial state for a new porting task.
 
@@ -733,6 +786,8 @@ def create_initial_state(
         emulate_cpu: The QEMU_CPU model for performance mode under QEMU.
         cached_recipe: A verified recipe-cache entry to build from
             instead of planning again (performance mode), or None.
+        replan: True to plan without the recipes, failure memory and
+            examples of earlier runs (``--replan``).
 
     Returns:
         A fresh ``AgentState`` for the repository.
@@ -760,6 +815,7 @@ def create_initial_state(
         optimize_requested=optimize,
         emulate_cpu=emulate_cpu,
         cached_recipe=cached_recipe,
+        replan=replan,
     )
 
 
@@ -769,13 +825,32 @@ _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 _NUMBER_RE = re.compile(r"\b\d+\b")
 
 
+# Markers of an error line for _first_meaningful_error_line. "error"
+# and "fatal" count at the start of a word: a module path such as
+# go-multierror or pkg/errors holds the letters, not the word. An
+# exception name before a colon (ModuleNotFoundError: ...) counts, and
+# so do Go's compile and module errors, which hold no error word:
+# without them, two different Python or Go errors got one signature
+# (the first line), and the loop check stopped a fix loop that made
+# progress.
+_SIGNATURE_MARKER_RE = re.compile(
+    r"(?<![\w./-])(?:error|fatal)|(?<=[a-z0-9])error(?=:)|"
+    r"undefined reference|multiple definition|"
+    r"relocation|no such file|not found|permission denied|no space left|"
+    r"timed out|killed|exit status|exit code|"
+    r"undefined: |no required module provides|build constraints exclude|"
+    r"missing go\.sum entry|cannot use |declared and not used|"
+    r"cannot find package"
+)
+
+
 def _first_meaningful_error_line(message: str) -> str:
     """Return the first line worth feeding to the error signature.
 
     Progress noise (``make:``, ``ninja:``, ``[``, ``warning:``,
     ``note:``, …) is skipped unless the same line also carries an
-    error marker; with no marker anywhere, the first non-empty line
-    is the fallback.
+    error marker, and Go's ``go: downloading`` lines are dropped; with
+    no marker anywhere, the first non-empty line is the fallback.
     """
     fallback = ""
     noisy_prefixes = (
@@ -788,34 +863,17 @@ def _first_meaningful_error_line(message: str) -> str:
         "compiling ",
         "checking ",
     )
-    markers = (
-        "error",
-        "fatal",
-        "undefined reference",
-        "multiple definition",
-        "relocation",
-        "no such file",
-        "not found",
-        "permission denied",
-        "no space left",
-        "timed out",
-        "killed",
-        "exit status",
-        "exit code",
-    )
-
-    for raw_line in message.splitlines():
+    for raw_line in strip_go_download_noise(message).splitlines():
         line = raw_line.strip()
         if not line:
             continue
         lowered = line.lower()
         if not fallback:
             fallback = line
-        if lowered.startswith(noisy_prefixes) and not any(
-            marker in lowered for marker in markers
-        ):
+        marked = bool(_SIGNATURE_MARKER_RE.search(lowered))
+        if lowered.startswith(noisy_prefixes) and not marked:
             continue
-        if any(marker in lowered for marker in markers):
+        if marked:
             return line
 
     return fallback
@@ -842,6 +900,19 @@ def _error_signature(error: ErrorRecord) -> tuple[ErrorCategory, str]:
     return error.category, _normalize_error_line(line)
 
 
+# Lower-case mark of the note that tools.execute_command adds when the
+# command time limit stopped a command.
+TIME_LIMIT_MARK = "[atesor] stopped at the command time limit"
+
+
+# A file path or a file name (networking/tc.c, src/simd.c, x.go): its
+# words name no network, SIMD or linker problem.
+_PATH_TOKEN_RE = re.compile(
+    r"\S*/\S*|\b[\w.+-]+\.(?:c|h|cc|cpp|cxx|hh|hpp|go|rs|py|s|o|a|so|mk|"
+    r"cmake|in|am|ac|txt|json|ya?ml)\b\S*"
+)
+
+
 def classify_error(error_message: str) -> ErrorCategory:
     """Classify an error message into a category.
 
@@ -857,7 +928,15 @@ def classify_error(error_message: str) -> ErrorCategory:
     Returns:
         The matching ``ErrorCategory``.
     """
-    error_lower = error_message.lower()
+    # The failed command and Go's download lines are not the error: a
+    # command line holds -DCMAKE_EXE_LINKER_FLAGS (libwebp: LINKING),
+    # and a module name holds "connection" or "429" (sq: RATE_LIMIT).
+    error_lower = strip_go_download_noise(
+        strip_failure_prefix(error_message or "")
+    ).lower()
+    # The text without file paths and file names, for the generic
+    # words: networking/tc.c (busybox) names no network problem.
+    prose_lower = _PATH_TOKEN_RE.sub(" ", error_lower)
 
     def has_any(terms: tuple[str, ...]) -> bool:
         """Return True when any term appears in the lower-case message."""
@@ -868,9 +947,10 @@ def classify_error(error_message: str) -> ErrorCategory:
         for term in (
             "rate limit",
             "too many requests",
-            "429",
             "quota exceeded",
         )
+    ) or re.search(
+        r"\b(?:http|status|code|error)\b[^\n]{0,20}\b429\b", error_lower
     ):
         return ErrorCategory.RATE_LIMIT
 
@@ -881,6 +961,11 @@ def classify_error(error_message: str) -> ErrorCategory:
     )
     if has_any(lock_terms):
         return ErrorCategory.DEPENDENCY
+
+    # A command stopped at its time limit also exits 137; it is neither
+    # a memory kill nor a disk problem (see tools.TIME_LIMIT_NOTE).
+    if TIME_LIMIT_MARK in error_lower:
+        return ErrorCategory.UNKNOWN
 
     if has_any(
         (
@@ -911,11 +996,9 @@ def classify_error(error_message: str) -> ErrorCategory:
             "no such device or address",
             "authentication failed",
             "could not read from remote",
-            "network",
-            "connection",
-            "timeout",
-            "unreachable",
         )
+    ) or re.search(
+        r"\b(?:network|connection|timeout|unreachable)\b", prose_lower
     ):
         return ErrorCategory.NETWORK
 
@@ -965,13 +1048,19 @@ def classify_error(error_message: str) -> ErrorCategory:
         r"(unrecognized|unknown|unsupported) command-line option "
         r"['\"]-(m64|msse\d*|mavx\d*|mfma|march=native)['\"]"
     )
+    # An unresolved symbol is a link error, also when an architecture
+    # word appears elsewhere in the output.
+    if has_any(
+        ("undefined reference", "ld returned", "collect2: error")
+    ) and not (has_any(arch_headers) or has_any(arch_terms)):
+        return ErrorCategory.LINKING
     if (
         has_any(arch_headers)
         or has_any(arch_terms)
         or re.search(option_pattern, error_lower)
         or re.search(
             r"\b(architecture|sse\d?|avx\d*|neon|simd" r"|x86[-_]64|amd64)\b",
-            error_lower,
+            prose_lower,
         )
     ):
         return ErrorCategory.ARCHITECTURE
@@ -992,7 +1081,7 @@ def classify_error(error_message: str) -> ErrorCategory:
             "undefined reference",
             "multiple definition",
             "linking error",
-            "linker",
+            "linker ",
             "undefined symbol",
             "cannot find -l",
             "ld returned",
@@ -1057,6 +1146,10 @@ def classify_error(error_message: str) -> ErrorCategory:
             "implicit declaration",
             "path_max unset",
             "fortified realpath",
+            # Go's compile errors.
+            "undefined: ",
+            "declared and not used",
+            "cannot use ",
         )
     ):
         return ErrorCategory.COMPILATION
@@ -1214,6 +1307,7 @@ def infer_failure_severity(
         ErrorCategory.ARCHITECTURE_IMPOSSIBLE,
         ErrorCategory.PERMISSION,
         ErrorCategory.DISK_SPACE,
+        ErrorCategory.INFRASTRUCTURE,
     }
     if category in high_categories:
         return FailureSeverity.HIGH
@@ -1256,8 +1350,8 @@ def should_escalate(
 
     Escalates on any of: the attempt ceiling, an error loop with no
     progress, a fundamental error category (license, hardware,
-    impossible architecture, permission, disk space), or the hard
-    per-package cost cap.
+    impossible architecture, permission, disk space, infrastructure),
+    or the hard per-package cost cap.
 
     Args:
         state: The current agent state.
@@ -1282,6 +1376,7 @@ def should_escalate(
         ErrorCategory.ARCHITECTURE_IMPOSSIBLE,
         ErrorCategory.PERMISSION,
         ErrorCategory.DISK_SPACE,
+        ErrorCategory.INFRASTRUCTURE,
     }
 
     if check_category and state.last_error_category in fundamental_categories:

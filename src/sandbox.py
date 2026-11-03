@@ -484,6 +484,35 @@ def create_container(name: str, image: str, workdir: str) -> None:
         raise PodmanError(_podman_failure("podman run", result))
 
 
+def ensure_container_running(name: str) -> str:
+    """Start the build container when it stopped, on either target.
+
+    The same inspect and start commands work with docker (qemu) and
+    podman (native).
+
+    Args:
+        name: The container name.
+
+    Returns:
+        ``"running"`` when it ran, ``"started"`` when this call started
+        it, ``"missing"`` when it does not exist, or ``"failed"`` when
+        the start failed.
+
+    Raises:
+        SandboxUnavailableError: On native, for a transport error.
+    """
+    probe = run_raw(
+        [engine(), "container", "inspect", "--format", "{{.State.Running}}"]
+        + [name]
+    )
+    if probe.returncode != 0:
+        return "missing"
+    if probe.stdout.strip().lower() == "true":
+        return "running"
+    started = run_raw([engine(), "start", name], timeout=120)
+    return "started" if started.returncode == 0 else "failed"
+
+
 def start_container(name: str) -> None:
     """Start a stopped native container.
 
@@ -674,6 +703,7 @@ __all__ = [
     "build_image",
     "container_exists",
     "create_container",
+    "ensure_container_running",
     "image_exists",
     "inspect_container",
     "remove_container",

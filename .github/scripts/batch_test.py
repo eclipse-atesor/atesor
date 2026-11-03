@@ -285,6 +285,9 @@ class PackageRunResult:
     output: str
     duration: float
     returncode: Optional[int] = None
+    # Why a failed run stopped, from main.py's "ATESOR_OUTCOME <label>"
+    # line: INFRASTRUCTURE or REFUSED; "" otherwise.
+    label: str = ""
 
     @property
     def success(self) -> bool:
@@ -414,8 +417,14 @@ _SCHEMA_VERSION = 1
 
 _MAX_ATTEMPTS = 5
 _AGENT_TIMEOUT_SECONDS = 3600
+# Seconds for the package tests of one batch port (decision D6 of the
+# agentic-flow plan); ATESOR_PACKAGE_TEST_TIMEOUT in the batch's own
+# environment wins, and 0 turns the tests off.
+_BATCH_PACKAGE_TEST_TIMEOUT = 180
 _LIST_DESCRIPTION = ""
 _PACKAGE_BUILDS = False
+# Forward --replan: plan without the recipes and examples of earlier runs.
+_REPLAN = False
 
 
 def _resolve_list_path(value: str) -> str:
@@ -714,6 +723,52 @@ def _kill_proc_group(pid: int) -> None:
         pass
 
 
+_OUTCOME_RE = re.compile(r"^ATESOR_OUTCOME ([A-Z_]+)\s*$", re.MULTILINE)
+
+
+def _outcome_label(text: str) -> str:
+    """Return the outcome label that main.py printed, or ""."""
+    found = _OUTCOME_RE.findall(text or "")
+    return found[-1] if found else ""
+
+
+_QUOTA_RESET_RE = re.compile(r"^ATESOR_QUOTA_RESET (\d+)\s*$", re.MULTILINE)
+
+# No port starts before this time (epoch seconds): a run hit the daily
+# free-model quota (zlib runs 5-8 on 2026-10-01 started after it).
+_quota_pause_until = 0.0
+_quota_lock = threading.Lock()
+
+
+def _quota_reset(text: str) -> float:
+    """Return the quota reset time that main.py printed, or 0."""
+    found = _QUOTA_RESET_RE.findall(text or "")
+    return float(found[-1]) if found else 0.0
+
+
+def _pause_for_quota(reset: float) -> None:
+    """Hold every port start until ``reset`` (one hour without a time)."""
+    global _quota_pause_until
+    until = reset if reset > time.time() else time.time() + 3600
+    with _quota_lock:
+        _quota_pause_until = max(_quota_pause_until, until)
+    stamp = datetime.fromtimestamp(until).strftime("%Y-%m-%d %H:%M")
+    _emit(
+        f"  {_yellow('QUOTA  ')} daily free-model quota used up; no port "
+        f"starts before {stamp}"
+    )
+
+
+def _wait_for_quota() -> None:
+    """Block until the quota pause ends or a shutdown starts."""
+    while not _shutdown_event.is_set():
+        with _quota_lock:
+            remaining = _quota_pause_until - time.time()
+        if remaining <= 0:
+            return
+        _shutdown_event.wait(min(remaining, 60.0))
+
+
 def _tail(path: str, n: int = 40) -> str:
     """Return the last *n* lines of a file (best-effort, bounded memory)."""
     try:
@@ -807,6 +862,30 @@ def _install_signal_handlers(future_map: dict) -> None:
 
 
 def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
+    """Run one port; after a ``QUOTA`` failure, wait and run it once more.
+
+    The quota run's log is kept as ``<repo_name>.quota.log``. See
+    ``_run_agent_once`` for the run itself.
+    """
+    result = _run_agent_once(repo_url, repo_name)
+    if result.label != "QUOTA" or _shutdown_event.is_set():
+        return result
+    _pause_for_quota(_quota_reset(result.output))
+    log_path = os.path.join(BATCH_LOGS_DIR, f"{repo_name}.log")
+    try:
+        os.replace(
+            log_path, os.path.join(BATCH_LOGS_DIR, f"{repo_name}.quota.log")
+        )
+    except OSError:
+        pass
+    result = _run_agent_once(repo_url, repo_name)
+    if result.label == "QUOTA":
+        # No third run; the other ports still wait for the reset.
+        _pause_for_quota(_quota_reset(result.output))
+    return result
+
+
+def _run_agent_once(repo_url: str, repo_name: str) -> PackageRunResult:
     """Run the agent on a single repository, streaming to a log file.
 
     Thread-safe: leases one container name from the per-worker pool, runs
@@ -825,6 +904,8 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
         TIMEOUT after the ``timeout_seconds`` kill, and FAIL after an
         exception. Else ``_status_from_returncode`` gives the status.
     """
+    # No port starts while the daily free-model quota is used up.
+    _wait_for_quota()
     start_time = time.time()
     log_path = os.path.join(BATCH_LOGS_DIR, f"{repo_name}.log")
 
@@ -888,6 +969,8 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
             cmd.extend(_target_args())
             if _PACKAGE_BUILDS:
                 cmd.append("--package")
+            if _REPLAN:
+                cmd.append("--replan")
 
             proc = subprocess.Popen(
                 cmd,
@@ -905,6 +988,15 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
                     "ATESOR_RUN_DEADLINE": str(
                         int(time.time()) + _AGENT_TIMEOUT_SECONDS
                     ),
+                    # The non-gating package tests used 262 min in 66
+                    # Megrez runs and never decided a port.
+                    "ATESOR_PACKAGE_TEST_TIMEOUT": os.environ.get(
+                        "ATESOR_PACKAGE_TEST_TIMEOUT",
+                        str(_BATCH_PACKAGE_TEST_TIMEOUT),
+                    ),
+                    # The workers share the board: the builder sets the
+                    # cargo job count from this worker's share.
+                    "ATESOR_BATCH_WORKERS": str(MAX_WORKERS),
                 },
             )
             _register_pid(proc.pid)
@@ -941,6 +1033,7 @@ def run_agent(repo_url: str, repo_name: str) -> PackageRunResult:
             tail,
             duration,
             proc.returncode,
+            label=_outcome_label(tail) if status == STATUS_FAIL else "",
         )
 
     except Exception as exc:
@@ -1005,6 +1098,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        metavar="S",
+        help=(
+            "Time limit of one package in seconds; it overrides the "
+            "list's defaults.timeout_seconds. More workers on one machine "
+            "make each package slower (run 41449773699: 4 workers on a "
+            "4-vCPU runner took 1.7 to 1.9 times as long as 2)."
+        ),
+    )
+    parser.add_argument(
         "--target",
         choices=target.TARGETS,
         default=None,
@@ -1023,6 +1128,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "zip artifact (recipe + source tree) under workspace/packages/ "
             "for every successful build. Used by CI to upload downloadable "
             "artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--replan",
+        action="store_true",
+        help=(
+            "Forward --replan to each main.py invocation: plan without "
+            "the recipes, failure memory and examples of earlier runs, "
+            "to measure the planning itself."
         ),
     )
     parser.add_argument(
@@ -1180,17 +1294,36 @@ def main() -> int:
     MAX_WORKERS = workers
     _populate_container_pool(MAX_WORKERS)
 
-    global _PACKAGE_BUILDS
+    global _PACKAGE_BUILDS, _REPLAN
     _PACKAGE_BUILDS = bool(args.package)
+    _REPLAN = bool(getattr(args, "replan", False))
 
     list_path = _resolve_list_path(args.list_name)
     all_packages, defaults, description = _load_package_list(list_path)
+
+    # A list can ask for fewer workers (its "defaults.workers"), unless
+    # --workers is given: Rust and large Go builds hit the 1770 s
+    # command limit with two workers on a 4-core board (jj, sling-cli,
+    # dalfox).
+    list_workers = defaults.get("workers")
+    if args.workers is None and isinstance(list_workers, int):
+        MAX_WORKERS = max(1, min(list_workers, MAX_WORKERS))
+        _populate_container_pool(MAX_WORKERS)
 
     global _MAX_ATTEMPTS, _AGENT_TIMEOUT_SECONDS, _LIST_DESCRIPTION
     _MAX_ATTEMPTS = int(defaults.get("max_attempts", _MAX_ATTEMPTS))
     _AGENT_TIMEOUT_SECONDS = int(
         defaults.get("timeout_seconds", _AGENT_TIMEOUT_SECONDS)
     )
+    if args.timeout_seconds is not None:
+        if args.timeout_seconds < 60:
+            print(
+                f"[ERROR] --timeout-seconds must be >= 60 "
+                f"(got {args.timeout_seconds}).",
+                file=sys.stderr,
+            )
+            return 2
+        _AGENT_TIMEOUT_SECONDS = args.timeout_seconds
     _LIST_DESCRIPTION = description
 
     # Validate sharding flags before anything else that depends on the
@@ -1405,7 +1538,8 @@ def main() -> int:
                     f"{_dim(_progress_tag())} {badge} "
                     f"{_cyan(name):<40} "
                     f"{_fmt_duration(result.duration):>10}  "
-                    f"{_dim(log_path)}"
+                    + (f"{_yellow(result.label)}  " if result.label else "")
+                    + f"{_dim(log_path)}"
                 )
     finally:
         _remove_sticky_bar()
@@ -1532,10 +1666,32 @@ def main() -> int:
     _stat_row(f"FINISHED       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     _stat_row(f"LOGS           {logs_abs}")
     print(_bold("╚" + "═" * (table_w - 2) + "╝"))
+    _write_outcome_labels(results)
 
     if _shutdown_event.is_set():
         return 130
     return 0 if failed == 0 and unverified == 0 else 1
+
+
+def _write_outcome_labels(results: "list[PackageRunResult]") -> None:
+    """Print and save the failed packages that carry an outcome label.
+
+    The labels say why a run stopped for an outside reason (a dropped
+    machine, a model refusal). The file lets the user decide which
+    packages a later list keeps; nothing skips them on its own.
+    """
+    labelled = sorted(
+        (r.name, r.label) for r in results if getattr(r, "label", "")
+    )
+    if not labelled:
+        return
+    print("Outcome labels: " + ", ".join(f"{n} ({l})" for n, l in labelled))
+    path = os.path.join(BATCH_LOGS_DIR, "outcome-labels.txt")
+    try:
+        with open(path, "w") as fh:
+            fh.writelines(f"{name} {label}\n" for name, label in labelled)
+    except OSError as exc:
+        print(f"Could not write {path}: {exc}")
 
 
 if __name__ == "__main__":

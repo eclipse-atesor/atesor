@@ -7,6 +7,7 @@ and terminal nodes, and the auto-learning step. The LLM and the
 sandbox are mocked.
 """
 
+import os
 import unittest
 from unittest import mock
 
@@ -184,6 +185,118 @@ class TestAnalystNode(unittest.TestCase):
             out = graph.analyst_node(state)
 
         self.assertTrue(out.package_analysis.llm_grounded)
+
+
+class TestUnsupportedPackage(unittest.TestCase):
+    """A package that builds no riscv64 binary stops before the build."""
+
+    def setUp(self) -> None:
+        import shutil
+        import tempfile
+
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self._write("package.json", "{}")
+        self._write("src/index.ts", "export {}")
+
+    def _write(self, rel: str, text: str = "") -> None:
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    @staticmethod
+    def _nginx_data(**changes):
+        """The analyst answer of nginx-binaries (2026-10-16)."""
+        data = dict(
+            _ANALYST_DATA,
+            language="TypeScript (compiled to CommonJS JavaScript)",
+            build_system={"type": "other", "confidence": 0.9},
+            expected_artifacts=["lib/index.js", "lib/index.d.ts"],
+        )
+        data.update(changes)
+        return data
+
+    def _analyst(self, data):
+        from src import graph
+
+        with (
+            mock.patch.object(
+                graph,
+                "llm_call_with_validation",
+                return_value=LLMCallOutcome(
+                    data=data, used_fallback=False, attempts=1
+                ),
+            ),
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "collect_build_evidence", return_value="### x\n"
+            ),
+            mock.patch.object(graph, "_to_host_path", return_value=self.repo),
+        ):
+            return graph.analyst_node(_state())
+
+    def test_script_outputs_without_native_code_stop_the_run(self) -> None:
+        from src import graph
+
+        out = self._analyst(self._nginx_data())
+        reason = out.context_cache.get("unsupported", "")
+        self.assertIn("lib/index.js, lib/index.d.ts", reason)
+        self.assertEqual(graph.route_analyst_to_next(out), "escalate_node")
+        self.assertEqual(out.outcome_label, "UNSUPPORTED")
+        with mock.patch.object(graph, "log_data_effect"):
+            out = graph.escalate_node(out)
+        self.assertIn(reason, out.context_cache["escalation_report"])
+
+    def test_a_native_file_or_output_keeps_the_pipeline(self) -> None:
+        from src import graph
+
+        cases = (
+            # A Node addon builds an ELF .node file.
+            ("binding.gyp", ["lib/index.js"]),
+            ("src/addon.c", ["lib/index.js"]),
+            ("", ["lib/index.js", "build/Release/addon.node"]),
+            # static-ffmpeg-binaries: names without a suffix.
+            ("", ["ffmpeg", "ffprobe"]),
+        )
+        for native_file, outputs in cases:
+            with self.subTest(native_file=native_file, outputs=outputs):
+                if native_file:
+                    self._write(native_file)
+                out = self._analyst(
+                    self._nginx_data(expected_artifacts=outputs)
+                )
+                self.assertNotIn("unsupported", out.context_cache)
+                self.assertEqual(
+                    graph.route_analyst_to_next(out), "heuristic_plan_node"
+                )
+                if native_file:
+                    os.remove(os.path.join(self.repo, native_file))
+
+    def test_no_label_without_a_grounded_answer_or_outputs(self) -> None:
+        from src import graph
+
+        out = self._analyst(self._nginx_data(expected_artifacts=[]))
+        self.assertNotIn("unsupported", out.context_cache)
+        state = _state()
+        state.package_analysis = graph._fallback_analysis(state)
+        state.package_analysis.expected_artifacts = ["lib/index.js"]
+        with mock.patch.object(graph, "_to_host_path", return_value=self.repo):
+            self.assertEqual(graph._unsupported_reason(state), "")
+
+    def test_an_unreadable_tree_counts_as_native(self) -> None:
+        from src import graph
+
+        missing = os.path.join(self.repo, "missing")
+        self.assertEqual(graph._native_build_input(missing), "(no tree)")
+        with mock.patch.object(graph, "_NATIVE_SCAN_LIMIT", 1):
+            self.assertEqual(
+                graph._native_build_input(self.repo), "(scan limit)"
+            )
 
 
 class TestAnalystRefusal(unittest.TestCase):
@@ -566,10 +679,14 @@ class TestScoutNode(unittest.TestCase):
             graph.scout_node(state)
 
         verdict = captured["validator"](
-            {"phases": [{"name": "setup", "commands": ["cabal --version"]}]}
+            {
+                "phases": [
+                    {"name": "setup", "commands": ["nix-build default.nix"]}
+                ]
+            }
         )
         self.assertFalse(verdict.ok)
-        self.assertIn("cabal --version", verdict.reason)
+        self.assertIn("nix-build default.nix", verdict.reason)
         ok = captured["validator"](
             {"phases": [{"name": "build", "commands": ["make -j4"]}]}
         )
@@ -1077,6 +1194,146 @@ class TestFixerNode(unittest.TestCase):
             out.fixes_attempted[-1].build_result, "no change applied"
         )
         self.assertEqual(graph.route_fix_result(out), "fix_node")
+
+    def test_three_answers_without_a_change_end_the_loop(self) -> None:
+        """The third no-change answer since a build stops the re-asks."""
+        from src import graph
+
+        state = self._fixer_state()
+        state.attempt_count = 1
+        strategy = {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": "install headers",
+                    "actions": [
+                        {"type": "command", "command": "apt-get install x"}
+                    ],
+                }
+            ],
+            "recommended_strategy_id": 1,
+        }
+        outcome = LLMCallOutcome(
+            data=strategy, used_fallback=False, attempts=1
+        )
+        failed = mock.MagicMock(success=False, stderr="E: no package")
+        routes = []
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ),
+            mock.patch.object(graph, "execute_command", return_value=failed),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+        ):
+            for _ in range(3):
+                state = graph.fixer_node(state)
+                routes.append(graph.route_fix_result(state))
+
+        # Attempt 4 of 5: the attempt limit did not stop the loop.
+        self.assertEqual(state.attempt_count, 4)
+        self.assertEqual(routes, ["fix_node", "fix_node", "__end__"])
+        self.assertIn("changed nothing", graph._escalation_reason(state))
+
+    def test_a_build_counts_and_resets_the_reasks(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.context_cache["reasks_since_build"] = 3
+        state.build_plan = BuildPlan(
+            build_system="make",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["make"])],
+            total_estimated_duration="1m",
+        )
+        ok = CommandResult("make", 0, "", "", 1.0)
+        with (
+            mock.patch.object(graph, "execute_command", return_value=ok),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            out = graph.builder_node(state)
+        self.assertEqual(out.build_count, 1)
+        self.assertEqual(out.context_cache["reasks_since_build"], 0)
+
+    def test_the_builder_runs_cargo_with_this_workers_jobs(self) -> None:
+        from src import graph
+        from src.machine import MachineProfile
+
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="cargo",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["cargo build --release"])],
+            total_estimated_duration="1m",
+        )
+        board = MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=["i"],
+            cores=4,
+            mem_kib=25 * 1024 * 1024,
+        )
+        ok = CommandResult("cargo", 0, "", "", 1.0)
+        with (
+            mock.patch.dict(os.environ, {"ATESOR_BATCH_WORKERS": "2"}),
+            mock.patch.object(graph, "_machine", return_value=board),
+            mock.patch.object(
+                graph, "execute_command", return_value=ok
+            ) as run,
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            graph.builder_node(state)
+        self.assertEqual(
+            run.call_args.args[0],
+            "env CARGO_BUILD_JOBS=2 cargo build --release",
+        )
+
+    def test_the_builder_installs_the_go_of_go_mod_first(self) -> None:
+        import shutil
+        import tempfile
+
+        from src import graph
+
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, True)
+        with open(os.path.join(repo, "go.mod"), "w") as fh:
+            fh.write("module example.com/x\n\ngo 1.27.0\n")
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="go",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["go build ./..."])],
+            total_estimated_duration="1m",
+        )
+
+        def fake_execute(cmd, *args, **kwargs):
+            out = "go1.26.5" if cmd == "go env GOVERSION" else ""
+            return CommandResult(cmd, 0, out, "", 0.1)
+
+        with (
+            mock.patch.object(graph, "_to_host_path", return_value=repo),
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ) as run,
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            graph.builder_node(state)
+        ran = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(ran[0], "go env GOVERSION")
+        self.assertIn("go1.27.0.linux-riscv64.tar.gz", ran[1])
+        self.assertEqual(ran[2], "go build ./...")
 
     def test_applied_fix_forces_a_full_rebuild(self) -> None:
         """A fix after a verify failure is compiled, not skipped."""
@@ -2739,6 +2996,39 @@ class TestOptimizeNode(unittest.TestCase):
         self.assertEqual(state.api_tokens_in, 14)
         self.assertEqual(state.api_calls_made, 4)
 
+    def test_the_agent_stops_at_the_cost_cap(self) -> None:
+        """One workload source can ask 8 rounds; the step has a cap."""
+        from src import graph
+        from src.llm_helpers import LLMCallOutcome
+
+        state = self._state()
+        outcome = LLMCallOutcome(
+            data={"source": "x"},
+            used_fallback=False,
+            attempts=1,
+            cost_usd=0.3,
+        )
+        with (
+            mock.patch.dict(os.environ, {"ATESOR_OPTIMIZE_COST_CAP": "0.5"}),
+            mock.patch.object(
+                graph, "get_model_pool_for_role", return_value=["coder"]
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", return_value=outcome
+            ) as call,
+        ):
+            agent = graph._optimizer_agent(state)
+            answers = [
+                agent("harness-c", "write a harness", lambda data: None)
+                for _ in range(3)
+            ]
+        # $0.30, then $0.60: the third question is not sent.
+        self.assertEqual(call.call_count, 2)
+        data, error = answers[2]
+        self.assertIsNone(data)
+        self.assertIn("cost cap ($0.60 of $0.50", error)
+        self.assertAlmostEqual(state.api_cost_usd, 0.6)
+
 
 class TestPromptSplit(unittest.TestCase):
     """Static text goes to the system prompt, package data to the user."""
@@ -2820,3 +3110,1739 @@ class TestPromptSplit(unittest.TestCase):
             graph.fixer_node, TestFixerNode._fixer_state(self)
         )
         self.assertEqual(again["system_prompt"], seen["system_prompt"])
+
+
+class TestPlanCommandAction(unittest.TestCase):
+    """The fixer can change a plan command (run 80: 17 wrong targets)."""
+
+    def _state(self):
+        state = TestFixerNode._fixer_state(self)
+        state.build_plan = BuildPlan(
+            build_system="go",
+            build_system_confidence=0.8,
+            phases=[
+                BuildPhase(1, "setup", ["apt-get update"]),
+                BuildPhase(2, "build", ["go build ./cmd/tinygo"]),
+            ],
+            total_estimated_duration="1m",
+        )
+        state.last_successful_phase = 2
+        return state
+
+    def test_plan_command_replaces_the_command_and_reruns_its_phase(
+        self,
+    ) -> None:
+        state = self._state()
+        out = TestFixerNode._run_fixer_with(
+            self,
+            state,
+            [
+                {
+                    "type": "plan_command",
+                    "replaces": "go build ./cmd/tinygo",
+                    "command": "cd v2 && go build ./cmd/tinygo",
+                    "path": "",
+                    "content": "",
+                }
+            ],
+        )
+        self.assertEqual(
+            out.build_plan.phases[1].commands,
+            ["cd v2 && go build ./cmd/tinygo"],
+        )
+        self.assertEqual(out.last_successful_phase, 1)
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+        self.assertIn("plan:", out.fixes_attempted[-1].action_results[0])
+
+    def test_the_same_command_text_is_no_change(self) -> None:
+        """nushell: "rerun unchanged" gave a third, doomed build."""
+        from src import graph
+
+        state = self._state()
+        state.last_successful_phase = 1
+        out = TestFixerNode._run_fixer_with(
+            self,
+            state,
+            [
+                {
+                    "type": "plan_command",
+                    "replaces": "go build ./cmd/tinygo",
+                    "command": "go build  ./cmd/tinygo",
+                    "path": "",
+                    "content": "",
+                }
+            ],
+        )
+        fix = out.fixes_attempted[-1]
+        self.assertEqual(fix.build_result, "no change applied")
+        self.assertIn("unchanged (the same text)", fix.action_results[0])
+        self.assertEqual(out.build_status, BuildStatus.FIXING)
+        self.assertEqual(graph.route_fix_result(out), "fix_node")
+        self.assertEqual(out.context_cache["reasks_since_build"], 1)
+
+    def test_the_same_text_with_a_real_change_reruns_its_phase(self) -> None:
+        """Install a library, then run the completed configure again."""
+        state = self._state()
+        state.build_plan = BuildPlan(
+            build_system="autotools",
+            build_system_confidence=0.8,
+            phases=[
+                BuildPhase(1, "setup", ["apt-get update"]),
+                BuildPhase(2, "configure", ["./configure"]),
+                BuildPhase(3, "build", ["make"]),
+            ],
+            total_estimated_duration="1m",
+        )
+        # configure passed; make failed.
+        state.last_successful_phase = 2
+        out = TestFixerNode._run_fixer_with(
+            self,
+            state,
+            [
+                {
+                    "type": "command",
+                    "command": "apt-get install -y libfoo-dev",
+                    "path": "",
+                    "content": "",
+                },
+                {
+                    "type": "plan_command",
+                    "replaces": "./configure",
+                    "command": "./configure",
+                    "path": "",
+                    "content": "",
+                },
+            ],
+        )
+        self.assertIsNone(out.fixes_attempted[-1].build_result)
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+        self.assertEqual(out.last_successful_phase, 1)
+
+    def test_validator_checks_replaces_against_the_plan(self) -> None:
+        from src.graph import validate_fixer_response
+
+        def reply(old, new):
+            return {
+                "strategies": [
+                    {
+                        "id": 1,
+                        "description": "x",
+                        "actions": [
+                            {
+                                "type": "plan_command",
+                                "replaces": old,
+                                "command": new,
+                            }
+                        ],
+                    }
+                ],
+                "recommended_strategy_id": 1,
+            }
+
+        plan = ["make", "make install"]
+        self.assertTrue(
+            validate_fixer_response(reply("make", "make -C src"), plan)[0]
+        )
+        ok, why = validate_fixer_response(reply("make all", "make"), plan)
+        self.assertFalse(ok)
+        self.assertIn("`make install`", why)
+        ok, why = validate_fixer_response(reply("make", "curl x | sh"), plan)
+        self.assertFalse(ok)
+        self.assertFalse(
+            validate_fixer_response(reply("make", "make"), None)[0]
+        )
+
+    def test_schema_and_prompt_offer_plan_command(self) -> None:
+        from src import graph
+
+        action = graph.FIXER_SCHEMA["properties"]["strategies"]["items"][
+            "properties"
+        ]["actions"]["items"]
+        self.assertIn("plan_command", action["properties"]["type"]["enum"])
+        self.assertIn("replaces", action["required"])
+        self.assertIn("`plan_command` action", graph.FIXER_PROMPT)
+
+
+class TestTimeLimitStop(unittest.TestCase):
+    """A stop at the command time limit is resumed, not run at -j1."""
+
+    def test_builder_resumes_the_command_that_was_stopped(self) -> None:
+        from src import graph
+        from src.state import TIME_LIMIT_MARK
+
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="cargo",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["cargo build --release"])],
+            total_estimated_duration="1m",
+        )
+        runs = []
+
+        def fake_execute(cmd, *args, **kwargs):
+            runs.append(cmd)
+            if len(runs) == 1:
+                return CommandResult(
+                    cmd,
+                    137,
+                    "",
+                    TIME_LIMIT_MARK + " (1770 s).",
+                    1770.0,
+                    timed_out=True,
+                )
+            return CommandResult(cmd, 0, "", "", 60.0)
+
+        with (
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            out = graph.builder_node(state)
+        self.assertEqual(runs[:2], ["cargo build --release"] * 2)
+        self.assertFalse(
+            any("-j 1" in r or "CARGO_BUILD_JOBS=1" in r for r in runs)
+        )
+        self.assertNotEqual(out.build_status, BuildStatus.FAILED)
+
+    def test_resume_gets_a_longer_time_limit(self) -> None:
+        """One crate can compile longer than the normal limit."""
+        from src import graph
+        from src.state import TIME_LIMIT_MARK
+
+        state = _state()
+        state.build_plan = BuildPlan(
+            build_system="cargo",
+            build_system_confidence=0.9,
+            phases=[BuildPhase(1, "build", ["cargo build --release"])],
+            total_estimated_duration="1m",
+        )
+        limits = []
+
+        def fake_execute(cmd, *args, **kwargs):
+            limits.append(kwargs.get("timeout"))
+            if len(limits) == 1:
+                return CommandResult(
+                    cmd,
+                    137,
+                    "",
+                    TIME_LIMIT_MARK + " (1770 s).",
+                    1770.0,
+                    timed_out=True,
+                )
+            return CommandResult(cmd, 0, "", "", 60.0)
+
+        with (
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            graph.builder_node(state)
+        self.assertEqual(limits[1], graph._RESUME_TIMEOUT_SECONDS)
+        self.assertGreater(graph._RESUME_TIMEOUT_SECONDS, 1800)
+
+    def test_time_limit_is_not_a_memory_kill(self) -> None:
+        from src import graph
+        from src.state import TIME_LIMIT_MARK, classify_error
+
+        msg = (
+            "Build command failed: make (exit 137) - cc ...\n"
+            + TIME_LIMIT_MARK
+            + " (1770 s)."
+        )
+        self.assertEqual(classify_error(msg), ErrorCategory.UNKNOWN)
+        self.assertIn("time limit", graph._exit_code_text(msg))
+        timed = CommandResult("make", 137, "", "", 1770.0, timed_out=True)
+        self.assertFalse(graph._is_suspected_oom(timed, "make -j4"))
+        killed = CommandResult("make", 137, "", "", 30.0)
+        self.assertTrue(graph._is_suspected_oom(killed, "make -j4"))
+
+
+class TestEscalationReasonFirst(unittest.TestCase):
+    """The report names the real stop reason before the category."""
+
+    def test_refusal_reason_beats_the_category(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.add_error(
+            create_error_record(
+                "Build command failed: cargo build (exit 137) - x",
+                ErrorCategory.DISK_SPACE,
+            )
+        )
+        state.context_cache["llm_refused"] = "fixer"
+        out = graph.escalate_node(state)
+        report = out.context_cache["escalation_report"]
+        rec = report.split("## Recommendation", 1)[1]
+        self.assertIn("refused", rec.split("##", 1)[0])
+
+
+class TestLearningLoop(unittest.TestCase):
+    """A verified run teaches every fix that worked, keyed on its error."""
+
+    _GO_ERROR = (
+        "Build command failed: go build -buildvcs=false ./cmd/tool (exit 1) "
+        "- go: downloading github.com/hashicorp/go-multierror v1.1.1\n"
+        "# example.com/tool/pkg\n"
+        "pkg/paths.go:70:62: undefined: platform.Paths"
+    )
+    _PCAP_ERROR = (
+        "Build command failed: go build -buildvcs=false ./cmd/tool (exit 1) "
+        "- pcap.go:30:10: fatal error: pcap.h: No such file or directory"
+    )
+
+    def _verified(self, build="go build -buildvcs=false ./cmd/tool"):
+        state = _state(
+            build_plan=BuildPlan(
+                build_system="go",
+                build_system_confidence=0.9,
+                phases=[
+                    BuildPhase(
+                        1,
+                        "setup",
+                        [
+                            "apt-get update && apt-get install -y "
+                            "--no-install-recommends git"
+                        ],
+                    ),
+                    BuildPhase(2, "build", [build]),
+                ],
+                total_estimated_duration="1m",
+            )
+        )
+        state.build_status = BuildStatus.SUCCESS
+        state.artifact_verification = {"status": "verified"}
+        state.curated_artifacts = [{"filepath": "tool", "role": "primary"}]
+        return state
+
+    @staticmethod
+    def _fix(strategy, actions, error):
+        return FixAttempt(
+            error_category=ErrorCategory.COMPILATION,
+            strategy=strategy,
+            changes_made=[
+                f"Executed: {a['command']}"
+                for a in actions
+                if a["type"] == "command"
+            ],
+            success=True,
+            error_message=error,
+            actions=actions,
+        )
+
+    @staticmethod
+    def _learn(state):
+        from src import graph
+
+        with (
+            mock.patch.object(graph, "save_learned_example") as save_example,
+            mock.patch.object(graph, "save_to_recipe_cache") as save_cache,
+            mock.patch.object(
+                graph, "get_model_for_role", return_value=mock.MagicMock()
+            ),
+            mock.patch(
+                "src.artifact_curator.curate_artifacts",
+                return_value=[{"filepath": "tool", "role": "primary"}],
+            ),
+        ):
+            graph._save_learning_data(state)
+        payloads = {}
+        for call in save_example.call_args_list:
+            payloads.setdefault(call.args[0], []).append(call.args[1])
+        cache = save_cache.call_args.kwargs if save_cache.called else {}
+        return payloads, cache
+
+    def test_every_working_fix_is_learned_on_its_error_line(self) -> None:
+        state = self._verified()
+        state.add_fix_attempt(
+            self._fix(
+                "add the riscv64 paths file",
+                [
+                    {
+                        "type": "command",
+                        "command": "cp pkg/paths_amd64.go "
+                        "pkg/paths_riscv64.go",
+                        "ok": True,
+                    }
+                ],
+                self._GO_ERROR,
+            )
+        )
+        state.add_fix_attempt(
+            self._fix(
+                "install libpcap headers",
+                [
+                    {
+                        "type": "command",
+                        "command": "apt-get install -y libpcap-dev",
+                        "ok": True,
+                    }
+                ],
+                self._PCAP_ERROR,
+            )
+        )
+        fixer = self._learn(state)[0]["fixer"]
+        self.assertEqual(
+            [f["error_context"]["error_message"] for f in fixer],
+            [
+                "pkg/paths.go:70:62: undefined: platform.Paths",
+                "pcap.go:30:10: fatal error: pcap.h: "
+                "No such file or directory",
+            ],
+        )
+        for payload in fixer:
+            self.assertNotIn("downloading", payload["error_pattern"])
+
+    def test_read_only_and_stub_fixes_teach_nothing(self) -> None:
+        state = self._verified()
+        state.add_fix_attempt(
+            self._fix(
+                "look at the Makefile",
+                [{"type": "command", "command": "cat Makefile", "ok": True}],
+                self._GO_ERROR,
+            )
+        )
+        state.add_fix_attempt(
+            self._fix(
+                "add a root package",
+                [
+                    {
+                        "type": "create_file",
+                        "path": "doc.go",
+                        "content": "// Package tool.\npackage tool\n",
+                        "ok": True,
+                    }
+                ],
+                self._PCAP_ERROR,
+            )
+        )
+        self.assertNotIn("fixer", self._learn(state)[0])
+
+    def test_plan_and_real_file_fixes_are_learned(self) -> None:
+        state = self._verified()
+        state.add_fix_attempt(
+            self._fix(
+                "build in the module directory",
+                [
+                    {
+                        "type": "plan_command",
+                        "replaces": "go build .",
+                        "command": "cd src && go build .",
+                        "ok": True,
+                    }
+                ],
+                self._GO_ERROR,
+            )
+        )
+        content = (
+            "//go:build riscv64\n\npackage platform\n\n"
+            'var Paths = []string{"/usr"}\n'
+        )
+        state.add_fix_attempt(
+            self._fix(
+                "add the riscv64 file",
+                [
+                    {
+                        "type": "create_file",
+                        "path": "pkg/platform/paths_linux_riscv64.go",
+                        "content": content,
+                        "ok": True,
+                    }
+                ],
+                self._PCAP_ERROR,
+            )
+        )
+        fixer = self._learn(state)[0]["fixer"]
+        self.assertEqual(
+            [f["fix"]["actions"][0]["type"] for f in fixer],
+            ["plan_command", "create_file"],
+        )
+        self.assertEqual(fixer[1]["fix"]["actions"][0]["content"], content)
+
+    def test_download_noise_alone_is_no_key(self) -> None:
+        state = self._verified()
+        state.add_fix_attempt(
+            self._fix(
+                "tidy",
+                [{"type": "command", "command": "go mod tidy", "ok": True}],
+                "Build command failed: go build . (exit 1) - "
+                "go: downloading example.com/errors v1.0.0\n",
+            )
+        )
+        self.assertNotIn("fixer", self._learn(state)[0])
+
+    def test_recipe_replays_the_fix_commands(self) -> None:
+        state = self._verified()
+        state.add_fix_attempt(
+            self._fix(
+                "install headers and patch the source",
+                [
+                    {
+                        "type": "command",
+                        "command": "apt-get update",
+                        "ok": True,
+                    },
+                    {
+                        "type": "command",
+                        "command": "apt-get install -y "
+                        "--no-install-recommends libpcap-dev",
+                        "ok": True,
+                    },
+                    {"type": "command", "command": "cat go.mod", "ok": True},
+                    {
+                        "type": "command",
+                        "command": "sed -i s/a/b/ x.go",
+                        "ok": True,
+                    },
+                    {
+                        "type": "command",
+                        "command": "go build ./...",
+                        "ok": True,
+                    },
+                    {"type": "command", "command": "make broken", "ok": False},
+                ],
+                self._PCAP_ERROR,
+            )
+        )
+        cache = self._learn(state)[1]
+        phases = cache["build_plan"]["phases"]
+        self.assertEqual(
+            [p["name"] for p in phases], ["setup", "pre_build", "build"]
+        )
+        self.assertEqual(
+            phases[1]["commands"],
+            [
+                "apt-get update",
+                "apt-get install -y --no-install-recommends libpcap-dev",
+                "sed -i s/a/b/ x.go",
+            ],
+        )
+        self.assertIn("libpcap-dev", cache["dependencies"])
+        self.assertEqual(cache["layout"]["main_path"], "./cmd/tool")
+
+    def test_scout_trigger_keeps_the_layout(self) -> None:
+        state = self._verified(
+            build="cd v1 && CGO_ENABLED=1 go build -buildvcs=false "
+            "-o tool ./cmd/tool"
+        )
+        scout = self._learn(state)[0]["scout"][0]
+        trigger = scout["trigger"]
+        self.assertEqual(trigger["main_path"], "./cmd/tool")
+        self.assertEqual(trigger["module_dir"], "v1")
+        self.assertTrue(trigger["has_cgo"])
+        self.assertEqual(trigger["build_env"], {"CGO_ENABLED": "1"})
+
+    def test_fix_that_removed_one_error_changed_the_error(self) -> None:
+        from datetime import datetime
+
+        from src import graph
+
+        for after, changed in (
+            ("b.c:2:1: error: y", True),
+            ("a.c:1:1: error: x\nb.c:2:1: error: y", False),
+        ):
+            with self.subTest(after=after):
+                state = _state()
+                fix = self._fix(
+                    "f", [], "a.c:1:1: error: x\nb.c:2:1: error: y"
+                )
+                fix.timestamp = datetime(2026, 1, 1)
+                state.add_fix_attempt(fix)
+                state.add_error(
+                    create_error_record(after, ErrorCategory.COMPILATION)
+                )
+                self.assertEqual(
+                    graph._fix_changed_the_error(state, fix), changed
+                )
+
+
+class TestFailureMemory(unittest.TestCase):
+    """A fix after which the error stayed is remembered once."""
+
+    def _state_with_fix(self, error_after):
+        from datetime import datetime
+
+        state = _state()
+        fix = FixAttempt(
+            error_category=ErrorCategory.COMPILATION,
+            strategy="install x",
+            changes_made=["Executed: apt-get install -y x"],
+            success=False,
+            error_message="Build command failed: make (exit 2) - "
+            "a.c:1:10: fatal error: x.h: No such file or directory",
+            actions=[
+                {
+                    "type": "command",
+                    "command": "apt-get install -y x",
+                    "ok": True,
+                }
+            ],
+        )
+        fix.timestamp = datetime(2026, 1, 1)
+        state.add_fix_attempt(fix)
+        state.add_error(
+            create_error_record(error_after, ErrorCategory.DEPENDENCY)
+        )
+        return state
+
+    def test_a_fix_that_left_the_error_is_remembered(self) -> None:
+        from src import graph
+
+        state = self._state_with_fix(
+            "Build command failed: make (exit 2) - "
+            "a.c:1:10: fatal error: x.h: No such file or directory"
+        )
+        with mock.patch.object(graph, "save_failure_record") as save:
+            graph._remember_failed_fixes(state)
+            graph._remember_failed_fixes(state)
+        save.assert_called_once()
+        repo, key, record = save.call_args.args
+        self.assertEqual(repo, state.repo_name)
+        self.assertIn("x.h", key)
+        self.assertEqual(record["strategy"], "install x")
+        self.assertEqual(record["commands"], ["apt-get install -y x"])
+
+    def test_a_fix_that_changed_the_error_is_not_remembered(self) -> None:
+        from src import graph
+
+        state = self._state_with_fix("b.c:2:1: error: y")
+        with mock.patch.object(graph, "save_failure_record") as save:
+            graph._remember_failed_fixes(state)
+        save.assert_not_called()
+
+
+class TestRecall(unittest.TestCase):
+    """Every run reuses what earlier runs of the package left."""
+
+    _RECIPE = {
+        "repo_url": "https://github.com/a/b.git",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "build_plan": {
+            "phases": [
+                {
+                    "name": "build",
+                    "commands": ["cd v1 && go build -buildvcs=false ./cmd/b"],
+                }
+            ]
+        },
+        "artifacts": [{"type": "binary", "path": "/workspace/repos/b/b"}],
+        "verification": {"status": "verified"},
+        "last_built": "2026-10-13T18:00:00",
+    }
+
+    def _recall(self, entries, failures=None, replan=False, expected=None):
+        from src import graph
+
+        state = _state()
+        state.replan = replan
+        state.package_analysis = PackageAnalysis(
+            purpose="a tool",
+            build_system="go",
+            build_system_confidence=0.9,
+            expected_artifacts=list(expected or []),
+            llm_grounded=True,
+        )
+
+        def lookup(name, sandbox=None, repo_url=None):
+            return entries.get(sandbox)
+
+        with (
+            mock.patch.object(
+                graph,
+                "recall_sandboxes",
+                return_value=["debian-riscv64-native", "debian-riscv64"],
+            ),
+            mock.patch.object(graph, "get_cached_recipe", side_effect=lookup),
+            mock.patch.object(
+                graph,
+                "load_recipe_cache",
+                return_value={"packages": {"b": dict(entries)}},
+            ),
+            mock.patch.object(
+                graph, "load_failure_records", return_value=failures or {}
+            ),
+        ):
+            return state, graph._recall(state)
+
+    def test_the_active_sandbox_comes_first(self) -> None:
+        native = {**self._RECIPE, "last_built": "2026-10-20T10:00:00"}
+        _, recall = self._recall(
+            {"debian-riscv64-native": native, "debian-riscv64": self._RECIPE}
+        )
+        self.assertEqual(recall["sandbox"], "debian-riscv64-native")
+
+    def test_the_other_target_is_the_fallback(self) -> None:
+        _, recall = self._recall({"debian-riscv64": self._RECIPE})
+        self.assertEqual(recall["sandbox"], "debian-riscv64")
+
+    def test_another_distro_gives_the_layout_only(self) -> None:
+        _, recall = self._recall({"alpine-riscv64": self._RECIPE})
+        self.assertNotIn("recipe", recall)
+        self.assertEqual(
+            recall["layout"], {"main_path": "./cmd/b", "module_dir": "v1"}
+        )
+        self.assertEqual(recall["layout_sandbox"], "alpine-riscv64")
+
+    def test_replan_recalls_nothing(self) -> None:
+        _, recall = self._recall({"debian-riscv64": self._RECIPE}, replan=True)
+        self.assertEqual(recall, {})
+
+    def test_a_verified_recipe_is_the_plan(self) -> None:
+        from src import graph
+
+        state, _ = self._recall(
+            {"debian-riscv64": self._RECIPE}, expected=["b"]
+        )
+        head = CommandResult("git", 0, "abc\n", "", 0.1)
+        with (
+            mock.patch.object(graph, "execute_command", return_value=head),
+            mock.patch.object(graph, "invoke_llm") as llm,
+        ):
+            out = graph.heuristic_plan_node(state)
+        llm.assert_not_called()
+        self.assertEqual(
+            [c for p in out.build_plan.phases for c in p.commands],
+            ["cd v1 && go build -buildvcs=false ./cmd/b"],
+        )
+        self.assertTrue(out.package_analysis.llm_grounded)
+
+    def test_unverified_or_other_target_recipe_is_only_a_hint(self) -> None:
+        from src import graph
+
+        unverified = {**self._RECIPE, "verification": None}
+        state, _ = self._recall({"debian-riscv64": unverified})
+        self.assertIsNone(graph._recall_seed(state))
+        state, _ = self._recall(
+            {"debian-riscv64": self._RECIPE}, expected=["netbird"]
+        )
+        self.assertIsNone(graph._recall_seed(state))
+
+    def test_prompts_show_the_plan_and_the_failed_fixes(self) -> None:
+        from src import graph
+
+        failures = {
+            "a.c:<n>: fatal error: x.h": [
+                {
+                    "strategy": "install x",
+                    "commands": ["apt-get install -y x"],
+                    "error_after": "a.c:1: fatal error: x.h",
+                }
+            ]
+        }
+        state, _ = self._recall({"debian-riscv64": self._RECIPE}, failures)
+        section = graph._recall_prompt_section(state)
+        self.assertIn("Verified plan of this package", section)
+        self.assertIn("cd v1 && go build -buildvcs=false ./cmd/b", section)
+        self.assertIn("Tried before on this package", section)
+        self.assertIn("install x", section)
+        self.assertEqual(graph._recall_label(state), "b[debian-riscv64]")
+
+
+class TestHeuristicPlanFacts(unittest.TestCase):
+    """The default plan uses what init and the analyst found."""
+
+    def _plan(
+        self,
+        build_type,
+        module_dir="",
+        arch_codes=(),
+        analysis=None,
+        go_main_info=None,
+    ):
+        from src import graph
+
+        state = _state()
+        state.context_cache["recall"] = {}
+        state.build_system_info = BuildSystemInfo(
+            type=build_type,
+            confidence=0.9,
+            primary_file="CMakeLists.txt",
+            module_dir=module_dir,
+        )
+        state.arch_specific_code = list(arch_codes)
+        if analysis is not None:
+            state.package_analysis = analysis
+        if go_main_info is not None:
+            state.context_cache["go_main_info"] = go_main_info
+        return graph.heuristic_plan_node(state).build_plan
+
+    def test_nested_cmake_root(self) -> None:
+        plan = self._plan("cmake", module_dir="expat")
+        self.assertEqual(
+            plan.phases[1].commands,
+            ["cmake -S expat -B build -DCMAKE_BUILD_TYPE=Release"],
+        )
+        self.assertEqual(
+            plan.phases[2].commands, ["cmake --build build -j$(nproc)"]
+        )
+
+    def test_go_files_for_other_arches_defer_to_the_scout(self) -> None:
+        finding = ArchSpecificCode(
+            file="/workspace/repos/b/pkg/paths_linux_amd64.go",
+            line=1,
+            code_snippet="arch-specific Go file",
+            arch_type="go_arch_files",
+            severity="medium",
+        )
+        self.assertIsNone(self._plan("go", arch_codes=[finding]))
+
+    def test_asm_in_bundled_code_does_not_defer(self) -> None:
+        findings = [
+            ArchSpecificCode(
+                file=f"/workspace/repos/b/gnulib/lib/x{i}.c",
+                line=1,
+                code_snippet="asm",
+                arch_type="inline_asm",
+                severity="high",
+            )
+            for i in range(3)
+        ]
+        self.assertIsNotNone(self._plan("cmake", arch_codes=findings))
+
+    def test_analyst_build_settings_reach_the_go_command(self) -> None:
+        analysis = PackageAnalysis(
+            purpose="a tool",
+            build_system="go",
+            build_system_confidence=0.9,
+            build_strategy=(
+                "The GNUmakefile builds with CGO_ENABLED=0 "
+                "GOEXPERIMENT=jsonv2 and -tags noweb."
+            ),
+            llm_grounded=True,
+        )
+        plan = self._plan(
+            "go",
+            analysis=analysis,
+            go_main_info={
+                "has_main": True,
+                "has_go_sum": True,
+                "plan_command": "go build ./cmd/b",
+            },
+        )
+        command = plan.phases[1].commands[-1]
+        self.assertTrue(
+            command.startswith("CGO_ENABLED=0 GOEXPERIMENT=jsonv2 go build"),
+            command,
+        )
+        self.assertIn("-tags noweb ", command)
+        self.assertNotIn("noweb.", command)
+        self.assertIn("-buildvcs=false", command)
+
+
+class TestFixOutcomeAndReplay(unittest.TestCase):
+    """A fix is judged on the lines it removed and replayed where it ran."""
+
+    _MAKE_ERROR = (
+        "Build command failed: make -j4 (exit 2) - "
+        "src/b.c:20:3: error: 'FOO' undeclared\n"
+        "make[1]: *** [Makefile:400: src/b.o] Error 1\n"
+        "make[1]: *** Waiting for unfinished jobs....\n"
+        "make: *** [Makefile:300: all] Error 2"
+    )
+
+    @staticmethod
+    def _at(seconds):
+        from datetime import datetime, timedelta
+
+        return datetime(2026, 1, 1) + timedelta(seconds=seconds)
+
+    def _error(self, state, seconds, message, command="make -j4"):
+        error = create_error_record(
+            message, ErrorCategory.COMPILATION, command=command
+        )
+        error.timestamp = self._at(seconds)
+        state.add_error(error)
+
+    def _fix(self, state, seconds, error, commands, success=True):
+        fix = FixAttempt(
+            error_category=ErrorCategory.DEPENDENCY,
+            strategy=f"run {commands[0]}",
+            changes_made=[f"Executed: {c}" for c in commands],
+            success=success,
+            error_message=error,
+            actions=[
+                {"type": "command", "command": c, "ok": True} for c in commands
+            ],
+        )
+        fix.timestamp = self._at(seconds)
+        state.add_fix_attempt(fix)
+        return fix
+
+    def test_make_summary_lines_are_no_progress(self) -> None:
+        """A parallel make prints a different number of summary lines."""
+        from src import graph
+
+        state = _state()
+        self._error(state, 0, self._MAKE_ERROR)
+        fix = self._fix(state, 1, self._MAKE_ERROR, ["true"], success=False)
+        self._error(
+            state,
+            2,
+            self._MAKE_ERROR.replace(
+                "make[1]: *** Waiting for unfinished jobs....\n", ""
+            ),
+        )
+        self.assertFalse(graph._fix_changed_the_error(state, fix))
+
+    def test_a_new_line_alone_is_no_progress(self) -> None:
+        from src import graph
+
+        state = _state()
+        before = "Build command failed: make (exit 2) - a.c:1:1: error: x"
+        self._error(state, 0, before)
+        fix = self._fix(state, 1, before, ["true"], success=False)
+        self._error(state, 2, before + "\nb.c:2:1: error: y")
+        self.assertFalse(graph._fix_changed_the_error(state, fix))
+
+    def test_the_key_is_the_line_the_fix_removed(self) -> None:
+        """A fix that removed the second of two errors is keyed on it."""
+        from src import graph
+
+        both = (
+            "Build command failed: make -j4 (exit 2) - "
+            "a.c:1:10: fatal error: pcap.h: No such file or directory\n"
+            "b.c:1:10: fatal error: sys/capability.h: No such file or "
+            "directory"
+        )
+        pcap = both.split("\nb.c")[0]
+        state = _state()
+        self._error(state, 0, both)
+        libcap = self._fix(state, 1, both, ["apt-get install -y libcap-dev"])
+        self._error(state, 2, pcap)
+        libpcap = self._fix(state, 3, pcap, ["apt-get install -y libpcap-dev"])
+        self.assertIn("sys/capability.h", graph._fix_key_line(state, libcap))
+        self.assertIn("pcap.h", graph._fix_key_line(state, libpcap))
+        self.assertEqual(
+            graph._fix_key_line(
+                state,
+                self._fix(state, 1, pcap, ["true"]),
+            ),
+            "",
+        )
+
+    def _replay_state(self):
+        state = _state(
+            build_plan=BuildPlan(
+                build_system="autotools",
+                build_system_confidence=0.9,
+                phases=[
+                    BuildPhase(1, "setup", ["apt-get update"]),
+                    BuildPhase(2, "configure", ["./configure"]),
+                    BuildPhase(3, "build", ["make -j4"]),
+                ],
+                total_estimated_duration="1m",
+            )
+        )
+        return state
+
+    def test_fix_commands_run_before_the_phase_that_failed(self) -> None:
+        """A sed of a generated Makefile runs after configure."""
+        from src import graph
+
+        state = self._replay_state()
+        warning = (
+            "Build command failed: make -j4 (exit 2) - "
+            "cc1: all warnings being treated as errors"
+        )
+        self._error(state, 0, warning)
+        self._fix(
+            state,
+            1,
+            warning,
+            [
+                "sed -i 's/-Werror//' src/Makefile",
+                "CGO_ENABLED=0 go build -o x .",
+            ],
+        )
+        phases, _ = graph._recipe_phases(state)
+        self.assertEqual(
+            [p["name"] for p in phases],
+            ["setup", "configure", "pre_build", "build"],
+        )
+        self.assertEqual(
+            phases[2]["commands"], ["sed -i 's/-Werror//' src/Makefile"]
+        )
+
+    def test_artifact_check_fixes_run_after_the_plan(self) -> None:
+        """A fix of the artifact check builds what the plan missed."""
+        from src import graph
+
+        state = self._replay_state()
+        missing = "No riscv64 ELF artifact found after the build"
+        self._error(state, 0, missing, command=None)
+        self._fix(state, 1, missing, ["go build -buildvcs=false -o x ."])
+        self._error(
+            state,
+            2,
+            "Build command failed: ./configure (exit 1) "
+            "- configure: error: no C compiler",
+            command="./configure",
+        )
+        self._fix(
+            state,
+            3,
+            "configure: error: no C compiler",
+            ["apt-get install -y gcc"],
+        )
+        phases, packages = graph._recipe_phases(state)
+        self.assertEqual(
+            [p["name"] for p in phases],
+            ["setup", "pre_configure", "configure", "build", "post_build"],
+        )
+        self.assertEqual(
+            phases[-1]["commands"], ["go build -buildvcs=false -o x ."]
+        )
+        self.assertEqual(packages, ["gcc"])
+
+    def test_header_with_preprocessor_lines_is_real_code(self) -> None:
+        from src import graph
+
+        header = "#ifndef CAP_H\n#define CAP_H\n#include <x.h>\n#endif\n"
+        self.assertFalse(graph._is_stub_content(header, "include/cap.h"))
+        self.assertTrue(graph._is_stub_content("# a comment\n", "fix.sh"))
+        self.assertTrue(
+            graph._is_stub_content("// doc\npackage tool\n", "doc.go")
+        )
+
+    def test_error_regex_matches_its_line_and_column(self) -> None:
+        import re
+
+        from src import graph
+
+        line = "pcap.go:30:10: fatal error: pcap/pcap.h: No such file"
+        pattern = graph._error_regex(line)
+        self.assertRegex(line, re.compile(pattern, re.IGNORECASE))
+        self.assertRegex(
+            "pcap.go:7: fatal error: pcap/pcap.h: No such file",
+            re.compile(pattern, re.IGNORECASE),
+        )
+
+
+class TestInfrastructureGuard(unittest.TestCase):
+    """A dead container or ssh session never reaches the fixer."""
+
+    def _build(self, results):
+        from src import graph
+
+        state = _state(
+            build_plan=BuildPlan(
+                build_system="cmake",
+                build_system_confidence=0.9,
+                phases=[BuildPhase(1, "build", ["ninja -C build"])],
+                total_estimated_duration="1m",
+            )
+        )
+        queue = list(results)
+        runs = []
+
+        def fake_execute(cmd, *args, **kwargs):
+            runs.append(cmd)
+            return queue.pop(0)
+
+        with (
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+            mock.patch.object(
+                graph, "ensure_build_container", return_value="started"
+            ) as ensure,
+        ):
+            out = graph.builder_node(state)
+        return out, runs, ensure
+
+    def test_one_rerun_after_a_dropped_session(self) -> None:
+        dropped = CommandResult(
+            "ninja -C build", 255, "", "go: downloading a.b/c v1.0.0\n", 30.0
+        )
+        done = CommandResult("ninja -C build", 0, "", "", 60.0)
+        out, runs, ensure = self._build([dropped, done])
+        self.assertEqual(runs, ["ninja -C build", "ninja -C build"])
+        ensure.assert_called_once()
+        self.assertEqual(out.error_history, [])
+        self.assertEqual(out.build_status, BuildStatus.SUCCESS)
+
+    def test_a_fault_that_stays_escalates_without_the_fixer(self) -> None:
+        from src import graph
+
+        dead = CommandResult("ninja -C build", 137, "", "", 2.0)
+        out, runs, _ = self._build([dead, dead])
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(out.build_status, BuildStatus.ESCALATED)
+        self.assertEqual(out.last_error_category, ErrorCategory.INFRASTRUCTURE)
+        self.assertTrue(out.last_error.startswith(graph._INFRA_FAULT))
+        self.assertEqual(graph.route_build_result(out), "__end__")
+
+    def test_a_build_error_after_the_rerun_goes_on_as_usual(self) -> None:
+        dead = CommandResult("ninja -C build", 137, "", "", 2.0)
+        broken = CommandResult(
+            "ninja -C build", 1, "", "a.c:1:1: error: x undeclared", 9.0
+        )
+        out, _, _ = self._build([dead, broken])
+        self.assertEqual(out.build_status, BuildStatus.FAILED)
+        self.assertEqual(out.last_error_category, ErrorCategory.COMPILATION)
+
+
+class TestFixerLoopRules(unittest.TestCase):
+    """Chains split, reading is investigation, history names refusals."""
+
+    def _state(self, plan=None, command="make"):
+        state = _state()
+        state.last_error = (
+            "Build command failed: make (exit 2) - a.c: error: x"
+        )
+        state.last_error_category = ErrorCategory.COMPILATION
+        state.build_plan = BuildPlan(
+            build_system="cmake",
+            build_system_confidence=0.8,
+            phases=plan or [BuildPhase(1, "build", ["make"])],
+            total_estimated_duration="1m",
+        )
+        state.error_history = [
+            create_error_record(
+                state.last_error, ErrorCategory.COMPILATION, command=command
+            )
+        ]
+        return state
+
+    @staticmethod
+    def _answer(*commands, description="fix it"):
+        return {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": description,
+                    "actions": [
+                        {"type": "command", "command": c} for c in commands
+                    ],
+                }
+            ],
+            "recommended_strategy_id": 1,
+            "reflection": {"root_cause": "x"},
+        }
+
+    def _run(self, state, answers, results=None, investigate=None):
+        """Run fixer_node; each answer goes through the real validator."""
+        from src import graph
+
+        queue = list(answers)
+        runs = []
+
+        def fake_call(**kwargs):
+            data = queue.pop(0)
+            if isinstance(data, LLMCallOutcome):
+                return data
+            verdict = kwargs["validator"](data)
+            if not verdict.ok:
+                return LLMCallOutcome(
+                    data=None,
+                    used_fallback=False,
+                    attempts=1,
+                    last_error=verdict.reason,
+                )
+            return LLMCallOutcome(data=data, used_fallback=False, attempts=1)
+
+        def fake_execute(cmd, *args, **kwargs):
+            runs.append(cmd)
+            if results and cmd in results:
+                return results[cmd]
+            return CommandResult(cmd, 0, "", "", 1.0)
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_call
+            ),
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+            mock.patch.object(
+                graph,
+                "_run_fixer_investigation",
+                return_value="results",
+            ) as inspect,
+        ):
+            out = graph.fixer_node(state)
+        return out, runs, inspect
+
+    def test_a_plain_chain_runs_as_single_commands(self) -> None:
+        """In snappy run 1 the right answer was refused twice for &&."""
+        out, runs, _ = self._run(
+            self._state(),
+            [self._answer("mkdir -p build && cd build && cmake ..")],
+        )
+        self.assertEqual(runs, ["mkdir -p build", "cd build && cmake .."])
+        self.assertEqual(out.build_status, BuildStatus.PENDING)
+
+    def test_a_failed_step_ends_its_chain(self) -> None:
+        failed = CommandResult("apt-get update", 100, "", "E: no net", 1.0)
+        out, runs, _ = self._run(
+            self._state(),
+            [self._answer("apt-get update && apt-get install -y libx-dev")],
+            results={"apt-get update": failed},
+        )
+        self.assertEqual(runs, ["apt-get update"])
+        self.assertTrue(
+            any("skipped" in r for r in out.fixes_attempted[-1].action_results)
+        )
+
+    def test_a_reading_strategy_is_the_investigation_round(self) -> None:
+        out, runs, inspect = self._run(
+            self._state(),
+            [
+                self._answer("cat Makefile", description="look"),
+                self._answer("apt-get install -y libx-dev"),
+            ],
+        )
+        inspect.assert_called_once()
+        self.assertEqual(inspect.call_args.args[1], ["cat Makefile"])
+        self.assertEqual(runs, ["apt-get install -y libx-dev"])
+
+    def test_a_reading_fix_in_the_last_round_changes_nothing(self) -> None:
+        from src import graph
+
+        state = self._state()
+        state.attempt_count = 1
+        out, runs, _ = self._run(
+            state,
+            [{"investigate": {"commands": ["ls"]}}, self._answer("cat x")],
+        )
+        self.assertEqual(runs, ["cat x"])
+        self.assertEqual(
+            out.fixes_attempted[-1].build_result, "no change applied"
+        )
+        self.assertEqual(out.attempt_count, 2)
+        self.assertEqual(graph.route_fix_result(out), "fix_node")
+
+    def test_a_failed_phase_command_the_fix_ran_is_done(self) -> None:
+        state = self._state(
+            plan=[
+                BuildPhase(1, "configure", ["./configure"]),
+                BuildPhase(2, "build", ["make"]),
+            ],
+            command="./configure",
+        )
+        out, _, _ = self._run(
+            state, [self._answer("apt-get install -y libx-dev", "./configure")]
+        )
+        self.assertTrue(out.get_cached_command_result("./configure").success)
+        self.assertIsNone(out.get_cached_command_result("make"))
+
+    def test_refused_answers_reach_the_next_prompt(self) -> None:
+        from src import graph
+
+        refused = LLMCallOutcome(
+            data=None,
+            used_fallback=False,
+            attempts=3,
+            last_error="Unsafe command: Chained commands are not allowed",
+        )
+        state = self._state()
+        before = state.attempt_count
+        out, _, _ = self._run(state, [refused])
+        self.assertEqual(out.attempt_count, before + 1)
+        text = graph._previous_fixes_text(out)
+        self.assertIn("Refused answer", text)
+        self.assertIn("Chained commands", text)
+
+    def test_a_provider_fault_is_no_attempt(self) -> None:
+        fault = LLMCallOutcome(
+            data=None,
+            used_fallback=False,
+            attempts=3,
+            last_error="LLM invocation raised TimeoutError: read timed out",
+        )
+        state = self._state()
+        before = state.attempt_count
+        out, _, _ = self._run(state, [fault])
+        self.assertEqual(out.attempt_count, before)
+
+    def test_the_prompt_names_the_command_that_ran(self) -> None:
+        state = self._state(command="./configure")
+        state.cache_command_result(
+            "./configure",
+            CommandResult("sh bootstrap && ./configure", 1, "", "x", 1.0),
+        )
+        seen = {}
+
+        def fake_call(**kwargs):
+            seen.update(kwargs)
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=1)
+
+        from src import graph
+
+        with (
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_call
+            ),
+            mock.patch.object(
+                graph, "error_context_excerpts", return_value=""
+            ),
+            mock.patch.object(graph, "top_level_listing", return_value="x"),
+        ):
+            graph.fixer_node(state)
+        self.assertIn("(run as `sh bootstrap && ./configure`)", seen["prompt"])
+
+
+class TestVerificationRunsTheBuild(unittest.TestCase):
+    """A verified build must also run on the native machine."""
+
+    _NO_V = ["i", "m", "a", "f", "d", "c", "zba", "zbb"]
+
+    def _profile(self):
+        from src.machine import MachineProfile
+
+        return MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=list(self._NO_V),
+            label="rv64gc+zba+zbb",
+        )
+
+    def _verify(self, run_code, counts=None, march=""):
+        from src import graph
+        from src.artifact_scanner import (
+            VERIFIED,
+            Artifact,
+            VerificationResult,
+        )
+
+        state = _state(
+            build_plan=BuildPlan(
+                build_system="cmake",
+                build_system_confidence=0.9,
+                phases=[
+                    BuildPhase(
+                        1,
+                        "build",
+                        [f"cmake -DCMAKE_C_FLAGS={march} -S . -B b"],
+                    )
+                ],
+                total_estimated_duration="1m",
+            )
+        )
+        tool = Artifact(
+            f"{state.repo_path}/b/cwebp", "binary", "riscv64", "lp64d", 9
+        )
+        verdict = VerificationResult(
+            status=VERIFIED, reason="1 riscv64 output", riscv64=[tool]
+        )
+        facts = {"artifacts": {"b/cwebp": {"exists": True, "counts": counts}}}
+        runs = []
+
+        def fake_execute(argv, *args, **kwargs):
+            runs.append(argv)
+            return CommandResult(" ".join(argv), run_code, "", "", 0.1)
+
+        with (
+            mock.patch.object(graph, "is_native", return_value=True),
+            mock.patch.object(graph, "_machine", return_value=self._profile()),
+            mock.patch.object(
+                graph.ArtifactScanner, "scan", return_value=verdict
+            ),
+            mock.patch("src.optimize.inspect_tree", return_value=(facts, "")),
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ),
+        ):
+            out = graph.verify_node(state)
+        return out, runs
+
+    def test_a_crash_signal_fails_the_build(self) -> None:
+        out, runs = self._verify(132)
+        self.assertEqual(out.build_status, BuildStatus.FAILED)
+        self.assertEqual(out.artifact_verification["status"], "crashes")
+        self.assertIn("SIGILL", out.last_error)
+        self.assertEqual(out.last_error_category, ErrorCategory.ARCHITECTURE)
+        self.assertEqual(runs[0][1], "--version")
+
+    def test_a_program_that_runs_passes(self) -> None:
+        out, _ = self._verify(0)
+        self.assertEqual(out.build_status, BuildStatus.SUCCESS)
+
+    def test_missing_extension_instructions_warn_or_fail(self) -> None:
+        """Without the plan's -march they can be runtime dispatch."""
+        out, _ = self._verify(0, counts={"v": 120})
+        self.assertEqual(out.build_status, BuildStatus.SUCCESS)
+        self.assertTrue(out.artifact_verification["isa_warnings"])
+        out, _ = self._verify(0, counts={"v": 120}, march="-march=rv64gcv")
+        self.assertEqual(out.build_status, BuildStatus.FAILED)
+        self.assertIn("-march asks for them", out.last_error)
+
+    def test_qemu_runs_no_check(self) -> None:
+        from src import graph
+        from src.artifact_scanner import VERIFIED, Artifact, VerificationResult
+
+        state = _state()
+        tool = Artifact(
+            f"{state.repo_path}/t", "binary", "riscv64", "lp64d", 9
+        )
+        verdict = VerificationResult(
+            status=VERIFIED, reason="ok", riscv64=[tool]
+        )
+        with (
+            mock.patch.object(graph, "is_native", return_value=False),
+            mock.patch.object(
+                graph.ArtifactScanner, "scan", return_value=verdict
+            ),
+            mock.patch.object(graph, "execute_command") as run,
+        ):
+            out = graph.verify_node(state)
+        run.assert_not_called()
+        self.assertEqual(out.build_status, BuildStatus.SUCCESS)
+
+
+class TestMachineFlags(unittest.TestCase):
+    """A -march the machine lacks never becomes or stays the plan."""
+
+    def _profile(self):
+        from src.machine import MachineProfile
+
+        return MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=["i", "m", "a", "f", "d", "c", "zba", "zbb"],
+            label="rv64gc+zba+zbb",
+        )
+
+    def test_the_check_names_the_missing_extensions(self) -> None:
+        from src import graph
+
+        profile = self._profile()
+        self.assertEqual(
+            graph._isa_flags_the_machine_lacks(
+                ["cmake -DCMAKE_C_FLAGS=-march=rv64gcv ."], profile
+            ),
+            ["-march=rv64gcv (the machine lacks v)"],
+        )
+        self.assertEqual(
+            graph._isa_flags_the_machine_lacks(
+                ["gcc -march=rv64gc_zba_zbb x.c"], profile
+            ),
+            [],
+        )
+        self.assertEqual(
+            graph._isa_flags_the_machine_lacks(["gcc -march=rv64gcv"], None),
+            [],
+        )
+
+    def test_a_cached_recipe_for_another_isa_is_only_a_hint(self) -> None:
+        """The native libwebp recipe compiles for rv64gcv."""
+        from src import graph
+
+        state = _state()
+        state.context_cache["recall"] = {
+            "recipe": {
+                "build_system": "cmake",
+                "build_plan": {
+                    "phases": [
+                        {
+                            "name": "build",
+                            "commands": [
+                                "cmake -S . -B build "
+                                "-DCMAKE_C_FLAGS=-march=rv64gcv"
+                            ],
+                        }
+                    ]
+                },
+                "verification": {"status": "verified"},
+            },
+            "sandbox": "debian-riscv64-native",
+        }
+        with mock.patch.object(
+            graph, "_machine", return_value=self._profile()
+        ):
+            self.assertIsNone(graph._recall_seed(state))
+
+    def test_the_prompt_says_a_recipe_crashed(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.context_cache["recall"] = {
+            "recipe": {
+                "build_plan": {
+                    "phases": [{"name": "b", "commands": ["make"]}]
+                },
+                "verification": {"status": "crashes"},
+            },
+            "sandbox": "debian-riscv64-native",
+        }
+        self.assertIn("crashed", graph._recall_prompt_section(state))
+
+    def test_a_baseline_crash_marks_the_recipe(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.machine_profile = {"label": "rv64gc+zba+zbb"}
+        crash = "the baseline run crashed with SIGILL in the timed phase"
+        with (
+            mock.patch(
+                "src.optimize.run_optimization",
+                return_value={
+                    "status": "not measured",
+                    "baseline_crash": crash,
+                },
+            ),
+            mock.patch.object(graph, "record_optimization"),
+            mock.patch.object(graph, "mark_recipe_verification") as mark,
+        ):
+            graph.optimize_node(state)
+        mark.assert_called_once()
+        self.assertEqual(mark.call_args.args[1], "crashes")
+        self.assertIn("SIGILL", mark.call_args.args[2])
+
+    def test_smoke_run_names_only_crash_signals(self) -> None:
+        from src import graph
+
+        for codes, expected in (
+            ([132], "died with SIGILL"),
+            ([0], ""),
+            ([2, 0], ""),
+            ([137, 137], ""),
+        ):
+            with self.subTest(codes=codes):
+                results = [CommandResult("x", c, "", "", 0.1) for c in codes]
+                with mock.patch.object(
+                    graph, "execute_command", side_effect=results
+                ):
+                    found = graph._smoke_run("/workspace/repos/b/tool")
+                if expected:
+                    self.assertIn(expected, found)
+                else:
+                    self.assertEqual(found, "")
+
+
+class TestScoutMachineFlags(unittest.TestCase):
+    """The scout gets no plan through with a -march the machine lacks."""
+
+    def test_the_plan_is_refused_and_asked_again(self) -> None:
+        from src import graph
+        from src.machine import MachineProfile
+
+        profile = MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=["i", "m", "a", "f", "d", "c"],
+            label="rv64gc",
+        )
+
+        def plan(command):
+            return {
+                "build_system": "cmake",
+                "phases": [{"id": 1, "name": "build", "commands": [command]}],
+            }
+
+        answers = [
+            plan("cmake -S . -B b -DCMAKE_C_FLAGS=-march=rv64gcv"),
+            plan("cmake -S . -B b"),
+        ]
+        verdicts = []
+
+        def fake_call(**kwargs):
+            for data in answers:
+                verdict = kwargs["validator"](data)
+                verdicts.append(verdict)
+                if verdict.ok:
+                    return LLMCallOutcome(
+                        data=data, used_fallback=False, attempts=2
+                    )
+            return LLMCallOutcome(data=None, used_fallback=False, attempts=2)
+
+        state = _state()
+        with (
+            mock.patch.object(graph, "_machine", return_value=profile),
+            mock.patch.object(
+                graph,
+                "get_model_pool_for_role",
+                return_value=[mock.MagicMock()],
+            ),
+            mock.patch.object(
+                graph, "llm_call_with_validation", side_effect=fake_call
+            ),
+            mock.patch.object(
+                graph.scripted_ops,
+                "get_system_info",
+                return_value={"architecture": "riscv64"},
+            ),
+            mock.patch.object(
+                graph, "collect_build_evidence", return_value="evidence"
+            ),
+            mock.patch.object(
+                graph, "get_system_knowledge_summary", return_value="k"
+            ),
+            mock.patch.object(
+                graph, "format_few_shot_examples", return_value=""
+            ),
+        ):
+            out = graph.scout_node(state)
+        self.assertFalse(verdicts[0].ok)
+        self.assertIn("lacks v", verdicts[0].reason)
+        self.assertEqual(
+            out.build_plan.phases[0].commands, ["cmake -S . -B b"]
+        )
+
+
+class TestExpectedGoPrograms(unittest.TestCase):
+    """Each named program with its own cmd/ directory is built."""
+
+    def test_age_keygen_is_built_next_to_age(self) -> None:
+        import tempfile
+
+        from src import graph
+
+        with tempfile.TemporaryDirectory() as root:
+            for name in ("age", "age-keygen", "internal"):
+                os.makedirs(os.path.join(root, "cmd", name))
+            state = _state()
+            state.package_analysis = PackageAnalysis(
+                purpose="encryption tool",
+                expected_artifacts=["age", "age-keygen", "libnothing.so"],
+                llm_grounded=True,
+            )
+            with mock.patch.object(graph, "_to_host_path", return_value=root):
+                extra = graph._extra_go_mains(
+                    state, {}, "go build -buildvcs=false ./cmd/age"
+                )
+        self.assertEqual(
+            extra, ["go build -buildvcs=false -o age-keygen ./cmd/age-keygen"]
+        )
+
+
+class TestCachedRecipeMachineFlags(unittest.TestCase):
+    """--optimize does not replay a recipe built for another ISA."""
+
+    def test_the_run_plans_again(self) -> None:
+        from src import graph
+        from src.machine import MachineProfile
+
+        profile = MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=["i", "m", "a", "f", "d", "c"],
+            label="rv64gc",
+        )
+        state = _state(
+            cached_recipe={
+                "build_system": "cmake",
+                "build_plan": {
+                    "phases": [
+                        {
+                            "name": "build",
+                            "commands": ["gcc -march=rv64gcv -o x x.c"],
+                        }
+                    ]
+                },
+                "verification": {"status": "verified"},
+            }
+        )
+        with mock.patch.object(graph, "_machine", return_value=profile):
+            out = graph.cached_recipe_node(state)
+        self.assertIsNone(out.build_plan)
+        self.assertIsNone(out.cached_recipe)
+        self.assertEqual(
+            graph.route_cached_recipe_to_next(out), "analyst_node"
+        )
+
+
+class TestDataEffectRecord(unittest.TestCase):
+    """Each run says what the learned data gave it."""
+
+    def _state_with_fix(self, command):
+        state = _state()
+        state.context_cache["examples_shown"] = {"fixer": ["fx-1"]}
+        state.add_fix_attempt(
+            FixAttempt(
+                error_category=ErrorCategory.DEPENDENCY,
+                strategy="install",
+                changes_made=[f"Executed: {command}"],
+                success=True,
+                actions=[{"type": "command", "command": command, "ok": True}],
+            )
+        )
+        return state
+
+    def _copied(self, state):
+        from src import graph
+        from src.memory import AgentExample
+
+        example = AgentExample(
+            id="fx-1",
+            name="pcap",
+            tags=[],
+            fix={
+                "actions": [
+                    {"type": "command", "command": "apt-get update"},
+                    {
+                        "type": "command",
+                        "command": "apt-get install -y libpcap-dev",
+                    },
+                ]
+            },
+        )
+        memory = mock.MagicMock(examples=[example])
+        with mock.patch.object(graph, "get_agent_memory", return_value=memory):
+            return graph._copied_examples(state)
+
+    def test_a_fix_that_repeats_an_example_copied_it(self) -> None:
+        state = self._state_with_fix("apt-get install  -y libpcap-dev")
+        self.assertEqual(self._copied(state), ["fx-1"])
+
+    def test_the_index_update_alone_is_no_copy(self) -> None:
+        self.assertEqual(
+            self._copied(self._state_with_fix("apt-get update")), []
+        )
+
+    def test_the_record_names_the_plan_and_the_outcome(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.context_cache["plan_source"] = "recipe"
+        state.build_status = BuildStatus.SUCCESS
+        state.artifact_verification = {"status": "verified"}
+        with mock.patch.object(graph, "log_data_effect") as log:
+            graph._log_data_effect(state)
+        record = log.call_args.args[0]
+        self.assertEqual(record["plan_source"], "recipe")
+        self.assertEqual(record["outcome"], "verified")
+        self.assertEqual(record["fixer_rounds"], 0)
+
+    def test_a_stopped_run_gets_one_interrupted_record(self) -> None:
+        """nushell: the batch's kill left the run without a record."""
+        from src import graph
+
+        state = _state()
+        with mock.patch.object(graph, "log_data_effect") as log:
+            graph._log_data_effect(state, outcome="interrupted")
+            graph._log_data_effect(state)
+        self.assertEqual(log.call_count, 1)
+        self.assertEqual(log.call_args.args[0]["outcome"], "interrupted")
+
+    def test_the_record_counts_the_builds(self) -> None:
+        from src import graph
+
+        state = _state()
+        state.build_count = 2
+        with mock.patch.object(graph, "log_data_effect") as log:
+            graph._log_data_effect(state)
+        self.assertEqual(log.call_args.args[0]["builds"], 2)
