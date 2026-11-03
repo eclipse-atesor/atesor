@@ -1,0 +1,305 @@
+{
+  "version": "1.0",
+  "packages": {
+    "slim": {
+      "alpine-riscv64": {
+        "# github.com/slimtoolkit/slim/pkg/app/master/probe/http": [
+          {
+            "strategy": "go mod tidy upgraded kin-openapi to a version where Paths is a *Paths struct; pin kin-openapi to the version the repo's vendor/ was built with, using vendor mode",
+            "commands": [
+              "go build -mod=vendor -buildvcs=false -tags appbom_noembed -o slim ./cmd/slim"
+            ],
+            "error_after": "# github.com/slimtoolkit/slim/pkg/app/master/probe/http",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "make": {
+      "alpine-riscv64": {
+        "autogen.sh: line <n>: can't open gnulib/gnulib-tool: no such file": [
+          {
+            "strategy": "Run autopull.sh to fetch gnulib (needs git), then rerun autogen via the plan",
+            "commands": [
+              "apk add git gettext gettext-dev bison texinfo gperf rsync wget",
+              "sh autogen.sh && ./configure"
+            ],
+            "error_after": "autogen.sh: line 1088: can't open gnulib/gnulib-tool: no such file",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "cherrybomb": {
+      "alpine-riscv64": {
+        "error: failed to run custom build command for `ring v0.<n>.<n>`": [
+          {
+            "strategy": "ring 0.16.20 does not support riscv64; update ring to 0.17.x, which does, via cargo update",
+            "commands": [
+              "cd /workspace/repos/cherrybomb && cargo update -p ring@0.16.20 --precise 0.16.20"
+            ],
+            "error_after": "error: failed to run custom build command for `ring v0.16.20`",
+            "date": "2026-11-03"
+          },
+          {
+            "strategy": "Find which dependency pulls in ring 0.16.20, then upgrade the ring dependency tree so ring 0.17 is used (riscv64 supported)",
+            "commands": [
+              "cd /workspace/repos/cherrybomb && cargo update -p ring@0.16.20"
+            ],
+            "error_after": "error: failed to run custom build command for `ring v0.16.20`",
+            "date": "2026-11-03"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "error: failed to run custom build command for `ring v0.<n>.<n>`": [
+          {
+            "strategy": "ring 0.16.20 does not support riscv64; update rustls/reqwest chain so ring 0.17 is used via a full cargo update of the TLS crates",
+            "commands": [
+              "cargo update -p reqwest -p rustls -p rustls-webpki -p tokio-rustls -p hyper-rustls -p webpki-roots -p ring"
+            ],
+            "error_after": "error: failed to run custom build command for `ring v0.16.20`",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "tar": {
+      "alpine-riscv64": {
+        "fatal: unable to find current revision in submodule path 'gnulib'": [
+          {
+            "strategy": "Bootstrap fails because the gnulib submodule is not checked out and the sandbox may lack network. Skip gnulib submodule update via --gnulib-srcdir is not possible, so initialize submodule first…",
+            "commands": [
+              "apk add git bison gettext-dev texinfo rsync wget gperf xz tar",
+              "sh bootstrap --skip-po && ./configure FORCE_UNSAFE_CONFIGURE=1"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-03"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "fatal: unable to find current revision in submodule path 'gnulib'": [
+          {
+            "strategy": "Bootstrap fails because the gnulib submodule has no checked-out revision (likely a shallow or incomplete clone). Install git, then init the submodule so bootstrap can proceed, then run bootstrap to…",
+            "commands": [
+              "apt-get update",
+              "apt-get install -y --no-install-recommends git autopoint gettext bison gperf texinfo rsync wget xz-utils m4 perl",
+              "sh bootstrap --skip-po && ./configure"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-03"
+          },
+          {
+            "strategy": "Remove the broken empty gnulib submodule dir and let bootstrap clone gnulib fresh from savannah (bootstrap clones it when the dir is absent)",
+            "commands": [
+              "rm -rf gnulib",
+              "sh bootstrap --skip-po --no-git --gnulib-srcdir=gnulib && ./configure"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "binutils-gdb": {
+      "alpine-riscv64": {
+        "./syslex_wrap.c:<n>: fatal error: syslex.c: no such file or directory": [
+          {
+            "strategy": "syslex.c is generated by flex from sysinfo.l; a parallel build raced or the earlier failed run left it missing. Remove stale generated sysinfo files and rebuild binutils serially.",
+            "commands": [
+              "cd binutils && rm -f syslex.c sysinfo.c sysinfo.h syslex_wrap.o sysinfo.o",
+              "make -j1 all-binutils && make -j$(nproc)"
+            ],
+            "error_after": "./syslex_wrap.c:25:10: fatal error: syslex.c: No such file or directory",
+            "date": "2026-11-03"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "./syslex_wrap.c:<n>: fatal error: syslex.c: no such file or directory": [
+          {
+            "strategy": "Regenerate syslex.c with flex in binutils dir (previously missing flex at first make), then re-run build",
+            "commands": [
+              "cd /workspace/repos/binutils-gdb/binutils && rm -f syslex.c syslex_wrap.o sysinfo.c sysinfo.h",
+              "cd /workspace/repos/binutils-gdb/binutils && make syslex.c"
+            ],
+            "error_after": "./syslex_wrap.c:25:10: fatal error: syslex.c: No such file or directory",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "wget2": {
+      "alpine-riscv64": {
+        "fatal: unable to find current revision in submodule path 'gnulib'": [
+          {
+            "strategy": "Bootstrap fails trying to git-update the gnulib submodule (no usable revision). Skip the gnulib submodule update with --skip-po and --no-git, using the existing gnulib directory as the source.",
+            "commands": [
+              "ls gnulib",
+              "sh bootstrap --no-git --gnulib-srcdir=gnulib --skip-po && ./configure"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "static-php-cli": {
+      "alpine-riscv64": {
+        "php fatal error: uncaught error: undefined constant \"staticphp\\exception\\spc_output_log\" in <path>:<n>": [
+          {
+            "strategy": "Install the other commonly needed PHP extensions (mbstring, iconv, openssl, phar, curl, zlib, session, xmlreader) that Alpine's php85 ships separately",
+            "commands": [
+              "apk update"
+            ],
+            "error_after": "PHP Fatal error: Uncaught Error: Undefined constant \"StaticPHP\\Exception\\SPC_OUTPUT_LOG\" in /workspace/repos/static-php-cli/src/StaticPHP/Exception/ExceptionHandler.php:114",
+            "date": "2026-11-03"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "php fatal error: uncaught error: undefined constant \"staticphp\\exception\\spc_output_log\" in <path>:<n>": [
+          {
+            "strategy": "Install the PHP extensions spc needs (mbstring, xml, curl, zip) and regenerate the autoloader so the globals files that define SPC_OUTPUT_LOG are loaded",
+            "commands": [
+              "apt-get install -y --no-install-recommends php-mbstring php-xml php-curl php-zip",
+              "cd /workspace/repos/static-php-cli && composer dump-autoload --no-dev --optimize"
+            ],
+            "error_after": "PHP Fatal error: Uncaught Error: Undefined constant \"StaticPHP\\Exception\\SPC_OUTPUT_LOG\" in /workspace/repos/static-php-cli/src/StaticPHP/Exception/ExceptionHandler.php:114",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "libavif": {
+      "alpine-riscv64": {
+        "cmake error at cmakelists.txt:<n> (message):": [
+          {
+            "strategy": "Install libyuv dev package so libavif finds it via pkg-config, and clear stale build dir",
+            "commands": [
+              "apk update",
+              "apk add libyuv-dev",
+              "rm -rf build"
+            ],
+            "error_after": "CMake Error at CMakeLists.txt:203 (message):",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "gogo": {
+      "alpine-riscv64": {
+        "<path>:<n>: missing go.sum entry for module providing package github.com/wasilibs/go-re2 (imported by github.com/chainreactors/fingers/fingers); to add:": [
+          {
+            "strategy": "Fix the replace pseudo-version timestamp for go-re2 in v2/go.mod, then run go mod tidy to regenerate go.sum",
+            "commands": [
+              "sed -i 's/v1.11.1-0.20260716082604-8121b6cd261e/v1.11.1-0.20260716152604-8121b6cd261e/' v2/go.mod"
+            ],
+            "error_after": "/root/go/pkg/mod/github.com/chainreactors/fingers@v1.2.2-0.20260714063144-070758342f45/fingers/regexp_re2.go:6:8: missing go.sum entry for module providing package github.com/wasilibs/go-re2…",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "dav1d": {
+      "alpine-riscv64": {
+        "ls: cannot access 'build/src/libdav1d.a': no such file or directory": [
+          {
+            "strategy": "dav1d defaults to a shared library, so no libdav1d.a is built. Reconfigure with default_library=both so both artifacts exist.",
+            "commands": [
+              "meson setup build --wipe --buildtype=release --default-library=both -Denable_tests=false -Denable_examples=false -Denable_asm=false"
+            ],
+            "error_after": "ls: cannot access 'build/src/libdav1d.a': No such file or directory",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "gfx": {
+      "alpine-riscv64": {
+        "fatal: could not read username for 'https:<path>': terminal prompts disabled": [
+          {
+            "strategy": "Drop 'go mod tidy' (it resolves test deps of dependencies and fails on a bogus sourcegraph lib pseudo-version); go.sum is present, so build directly",
+            "commands": [
+              ""
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-03"
+          },
+          {
+            "strategy": "Build with the module cache/vendor-free mode and disable VCS prompting; the error is from error_pool.go importing a test/lib module not in go.sum, so fetch it via GOFLAGS=-mod=mod with GOPRIVATE…",
+            "commands": [
+              "go mod download github.com/sourcegraph/conc && go build -buildvcs=false -o gfx ."
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-03"
+          }
+        ]
+      },
+      "debian-riscv64": {
+        "fatal: could not read username for 'https:<path>': terminal prompts disabled": [
+          {
+            "strategy": "Skip go mod tidy (it tries to resolve test deps of dependencies via a nonexistent sourcegraph repo); download modules per go.sum and build directly",
+            "commands": [
+              "go mod download"
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-03"
+          },
+          {
+            "strategy": "Skip go mod download (it fetches modules needed only for the full module graph, including a nonexistent sourcegraph/lib); build directly so Go fetches only the packages actually imported",
+            "commands": [
+              "",
+              "env GOFLAGS=-mod=mod GOPRIVATE= GONOSUMDB=* GOFLAGS=-mod=mod CGO_ENABLED=0 go build -buildvcs=false -o gfx ."
+            ],
+            "error_after": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "wget": {
+      "debian-riscv64": {
+        "fatal: unable to find current revision in submodule path 'gnulib'": [
+          {
+            "strategy": "The gnulib submodule checkout is broken, so tell bootstrap to skip the git submodule step and fetch gnulib itself via a fresh clone into gnulib using --gnulib-srcdir",
+            "commands": [
+              "sh bootstrap --no-git --gnulib-srcdir=/tmp/gnulib-src && ./configure"
+            ],
+            "error_after": "fatal: Unable to find current revision in submodule path 'gnulib'",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "libsodium": {
+      "debian-riscv64": {
+        "bash: line <n>: ./configure: no such file or directory": [
+          {
+            "strategy": "Run autogen.sh to generate configure (the plan's ./autogen.sh apparently did not produce it, so run it via sh and see output), then rerun configure via plan",
+            "commands": [
+              "sh autogen.sh"
+            ],
+            "error_after": "bash: line 1: ./configure: No such file or directory",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    "sling-cli": {
+      "debian-riscv64": {
+        "cmd/sling/sling_assist.go:<n>: missing go.sum entry for module providing package github.com/flarco/g (imported by github.com/slingdata-io/sling-cli/cmd/sling); to add:": [
+          {
+            "strategy": "Remove the local replace of github.com/slingdata-io/sling => ../sling (sibling dir missing), then fetch modules so go.sum gets flarco/g entries",
+            "commands": [
+              "sed -i '/^replace github.com\\/slingdata-io\\/sling => \\.\\.\\/sling$/d' go.mod"
+            ],
+            "error_after": "cmd/sling/sling_assist.go:11:2: missing go.sum entry for module providing package github.com/flarco/g (imported by github.com/slingdata-io/sling-cli/cmd/sling); to add:",
+            "date": "2026-11-03"
+          }
+        ]
+      }
+    }
+  }
+}
