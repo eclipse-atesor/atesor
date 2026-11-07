@@ -2591,6 +2591,76 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: dura (cargo)",
+      "tags": [
+        "cargo",
+        "dura"
+      ],
+      "build_system": "cargo",
+      "repo_name": "dura",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apt-get update && apt-get install -y --no-install-recommends rust"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "env CARGO_BUILD_JOBS=1 cargo build -j 1 --release"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful dura build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-150",
+      "source": "auto",
+      "timestamp": "2026-11-07"
+    },
+    {
+      "name": "Auto: dust (cargo)",
+      "tags": [
+        "cargo",
+        "dust"
+      ],
+      "build_system": "cargo",
+      "repo_name": "dust",
+      "trigger": {
+        "build_system": "cargo",
+        "has_main": false
+      },
+      "plan": {
+        "build_system": "cargo",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "rustc --version && cargo --version"
+            ]
+          },
+          {
+            "name": "build",
+            "commands": [
+              "cd /workspace/repos/dust && cargo build --release --locked"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful dust build.",
+      "sandbox": "debian-riscv64",
+      "id": "scout-auto-151",
+      "source": "auto",
+      "timestamp": "2026-11-07"
     }
   ]
 }
