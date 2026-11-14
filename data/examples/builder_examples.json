@@ -2115,6 +2115,36 @@
       "id": "builder-auto-152",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: wush build execution",
+      "tags": [
+        "go",
+        "wush"
+      ],
+      "build_system": "go",
+      "repo_name": "wush",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apt-get update && apt-get install -y --no-install-recommends git"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "go mod tidy",
+            "go build -buildvcs=false ./cmd/wush"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from wush.",
+      "sandbox": "debian-riscv64",
+      "id": "builder-auto-153",
+      "source": "auto",
+      "timestamp": "2026-11-14"
     }
   ]
 }
