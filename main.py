@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -1180,17 +1181,26 @@ def _verified_cached_recipe(repo_url: str) -> Optional[Dict[str, Any]]:
     return cached if verdict.get("status") == "verified" else None
 
 
+def _recall_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """Return the run_agent argument of --replan, when it is set."""
+    return {"replan": True} if getattr(args, "replan", False) else {}
+
+
 def _performance_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
     """Return the run_agent arguments of performance mode, if it is on.
 
-    With --optimize (and no --force), a verified cached recipe of the
-    package becomes the build plan, so the port builds again without
-    planning.
+    With --optimize (and no --force or --replan), a verified cached
+    recipe of the package becomes the build plan, so the port builds
+    again without planning.
     """
     kwargs: Dict[str, Any] = {}
     if args.optimize:
         kwargs["optimize"] = True
-        if not getattr(args, "force", False) and args.repo:
+        if (
+            not getattr(args, "force", False)
+            and not getattr(args, "replan", False)
+            and args.repo
+        ):
             cached = _verified_cached_recipe(args.repo)
             if cached:
                 kwargs["cached_recipe"] = cached
@@ -1233,6 +1243,7 @@ def _run_native(args: argparse.Namespace, infra_only: bool) -> int:
             verbose=args.verbose,
             package=args.package,
             **_performance_kwargs(args),
+            **_recall_kwargs(args),
         )
     finally:
         if ported:
@@ -1844,6 +1855,34 @@ def _print_optimization(optimization: Optional[Dict[str, Any]]) -> None:
         )
 
 
+def _raise_interrupt(signum: int, frame: Any) -> None:
+    """Turn SIGTERM into KeyboardInterrupt (see ``_stop_on_sigterm``)."""
+    raise KeyboardInterrupt
+
+
+def _stop_on_sigterm() -> Any:
+    """Make SIGTERM stop the port like Ctrl-C; return the old handler.
+
+    Without a handler, SIGTERM ended the process at once: no cleanup
+    ran, and the build went on in the sandbox. Outside the main thread
+    a handler cannot be set; the call then changes nothing.
+    """
+    try:
+        return signal.signal(signal.SIGTERM, _raise_interrupt)
+    except ValueError:
+        return None
+
+
+def _restore_sigterm(previous: Any) -> None:
+    """Put back the SIGTERM handler that ``_stop_on_sigterm`` replaced."""
+    if previous is None:
+        return
+    try:
+        signal.signal(signal.SIGTERM, previous)
+    except ValueError:
+        pass
+
+
 def run_agent(
     repo_url: str,
     max_attempts: int = 5,
@@ -1852,6 +1891,7 @@ def run_agent(
     optimize: bool = False,
     emulate_cpu: Optional[str] = None,
     cached_recipe: Optional[Dict[str, Any]] = None,
+    replan: bool = False,
 ) -> int:
     """Run the RISC-V porting agent on a repository.
 
@@ -1921,6 +1961,7 @@ def run_agent(
         optimize=optimize,
         emulate_cpu=emulate_cpu,
         cached_recipe=cached_recipe,
+        replan=replan,
     )
     initial_state.messages = [
         HumanMessage(
@@ -1932,6 +1973,10 @@ def run_agent(
         )
     ]
 
+    # The batch stops a port with SIGTERM. As an interrupt, it runs the
+    # cleanup: the sandbox command is killed, the logs are flushed, and
+    # the run exits 130.
+    previous_sigterm = _stop_on_sigterm()
     try:
         final_state = initial_state
         step_count = 0
@@ -2225,11 +2270,33 @@ def run_agent(
                         )
                     )
 
+            # The last line, so batch_test.py finds it in the log tail.
+            label = getattr(final_state, "outcome_label", "")
+            from src.llm_helpers import daily_cap_reset_at
+
+            reset = daily_cap_reset_at()
+            if not label and reset is not None:
+                # The batch waits for the reset and runs the port again.
+                label = "QUOTA"
+                print(f"ATESOR_QUOTA_RESET {int(reset)}", flush=True)
+            if label:
+                logger.info(f"Outcome label: {label}")
+                print(f"ATESOR_OUTCOME {label}", flush=True)
             return 1
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        logger.info("Interrupted (Ctrl-C or SIGTERM); the run stops here")
         print(colored("\n\nInterrupted by user", "yellow"))
+        # The batch's kill ends a run here; without a record, the
+        # data-effect report misses the run (nushell, 2026-10-27).
+        stopped = locals().get("final_state")
+        if stopped is not None:
+            try:
+                from src.graph import _log_data_effect
+
+                _log_data_effect(stopped, outcome="interrupted")
+            except Exception as exc:  # the interrupt still ends the run
+                logger.debug(f"No data-effect record: {exc}")
         return 130
     except Exception as e:
         logger.error(f"Unexpected error during agent execution: {e}")
@@ -2238,6 +2305,7 @@ def run_agent(
         return 1
 
     finally:
+        _restore_sigterm(previous_sigterm)
         # Flush the root logger's handlers; configure_logging attaches
         # them to the root, so this module's own logger has none.
         for handler in logging.getLogger().handlers:
@@ -2570,7 +2638,14 @@ def _main() -> int:
     porting.add_argument(
         "--force",
         action="store_true",
-        help="ignore the recipe cache and re-run the full pipeline",
+        help="build again instead of printing a cached recipe; the run "
+        "still reuses the cached plan and failed fixes (--replan does not)",
+    )
+    porting.add_argument(
+        "--replan",
+        action="store_true",
+        help="plan without the recipes, failure memory and few-shot "
+        "examples of earlier runs",
     )
     porting.add_argument(
         "-v", "--verbose", action="store_true", help="show agent activity"
@@ -2820,17 +2895,18 @@ def _main() -> int:
         print(colored("\nRebuild complete!", "green"))
         return 0
 
-    # Recipe-cache fast path (skip with --force): a cache hit needs
-    # neither API keys nor a running sandbox — it only rewrites the
-    # recipe file from the cache — so check it BEFORE key validation
-    # and Docker provisioning instead of paying for both first.
-    # --optimize needs a real build tree, so it skips this fast path;
-    # a verified cached recipe becomes its build plan instead
-    # (_performance_kwargs).
+    # Recipe-cache fast path (skip with --force or --replan): a cache
+    # hit needs neither API keys nor a running sandbox — it only
+    # rewrites the recipe file from the cache — so check it BEFORE key
+    # validation and Docker provisioning instead of paying for both
+    # first. --replan asks for a new plan, so it builds. --optimize
+    # needs a real build tree, so it skips this fast path; a verified
+    # cached recipe becomes its build plan instead (_performance_kwargs).
     if (
         args.repo
         and not args.setup_only
         and not args.force
+        and not getattr(args, "replan", False)
         and not args.optimize
     ):
         from src.memory import get_cached_recipe, materialize_cached_recipe
@@ -2966,6 +3042,7 @@ def _main() -> int:
         verbose=args.verbose,
         package=args.package,
         **_performance_kwargs(args),
+        **_recall_kwargs(args),
     )
 
     return exit_code

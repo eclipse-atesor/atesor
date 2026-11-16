@@ -40,6 +40,8 @@ from src.state import (
     FailureSeverity,
     FixAttempt,
     TaskPlan,
+    _error_signature,
+    _first_meaningful_error_line,
     classify_error,
     create_error_record,
     create_initial_state,
@@ -1069,3 +1071,149 @@ class TestUncoveredHelperBranches(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestErrorLineMarkers(unittest.TestCase):
+    """Module names that hold the letters of "error" are no error."""
+
+    def test_module_paths_are_not_markers(self) -> None:
+        message = (
+            "# github.com/hashicorp/go-multierror\n"
+            "warning: unused\n"
+            "a.c:1:10: fatal error: a.h: No such file or directory"
+        )
+        self.assertEqual(
+            _first_meaningful_error_line(message),
+            "a.c:1:10: fatal error: a.h: No such file or directory",
+        )
+
+    def test_go_download_lines_are_skipped(self) -> None:
+        message = (
+            "go: downloading github.com/pkg/errors v0.9.1\n"
+            "go: build failed: exit status 2"
+        )
+        self.assertEqual(
+            _first_meaningful_error_line(message),
+            "go: build failed: exit status 2",
+        )
+
+    def test_classifier_ignores_module_names_of_downloads(self) -> None:
+        message = (
+            "Build command failed: go build . (exit 1) - "
+            "go: downloading github.com/x/connection-pool v1.0.0\n"
+            "main.go:3:2: undefined: pool.New"
+        )
+        self.assertNotEqual(classify_error(message), ErrorCategory.NETWORK)
+
+
+class TestSignatureOfDifferentErrors(unittest.TestCase):
+    """Two different errors never get one signature line."""
+
+    @staticmethod
+    def _traceback(module: str) -> str:
+        return (
+            "Build command failed: ninja -C build (exit 1) - "
+            "[1/40] Generating gen.h with a custom command\n"
+            "FAILED: gen.h\n"
+            "Traceback (most recent call last):\n"
+            '  File "../gen.py", line 4, in <module>\n'
+            f"    import {module}\n"
+            f"ModuleNotFoundError: No module named '{module}'\n"
+            "ninja: build stopped: subcommand failed."
+        )
+
+    def test_python_errors_of_two_modules_differ(self) -> None:
+        """The exception line decides, not the generator line."""
+        first = create_error_record(self._traceback("mako"))
+        second = create_error_record(self._traceback("yaml"))
+        self.assertIn("mako", _first_meaningful_error_line(first.message))
+        self.assertNotEqual(_error_signature(first), _error_signature(second))
+
+    def test_go_compile_errors_of_one_package_differ(self) -> None:
+        """Go's "undefined:" carries no error word but is the error."""
+        first = "# example.com/tool/pkg\npkg/a.go:1:2: undefined: A"
+        second = "# example.com/tool/pkg\npkg/b.go:2:3: undefined: B"
+        self.assertNotEqual(
+            _first_meaningful_error_line(first),
+            _first_meaningful_error_line(second),
+        )
+
+    def test_download_line_is_never_the_fallback(self) -> None:
+        """With no marker, the first line after the downloads is used."""
+        message = "go: downloading example.com/a v1.0.0\nsomething odd here"
+        self.assertEqual(
+            _first_meaningful_error_line(message), "something odd here"
+        )
+
+
+class TestClassifierReadsTheOutput(unittest.TestCase):
+    """The command, file paths and module names never decide a class."""
+
+    def test_module_hash_with_429_is_no_rate_limit(self) -> None:
+        """sq: a pseudo-version holds the digits 429."""
+        message = (
+            "Build command failed: go build . (exit 1) - go: "
+            "github.com/x/y@v0.0.0-20240429101112-abcdef012345: invalid "
+            "version: unknown revision"
+        )
+        self.assertNotEqual(classify_error(message), ErrorCategory.RATE_LIMIT)
+        self.assertEqual(
+            classify_error("anthropic: Error code: 429 - overloaded"),
+            ErrorCategory.RATE_LIMIT,
+        )
+
+    def test_file_path_words_are_no_network(self) -> None:
+        """busybox: the source file is networking/tc.c."""
+        message = (
+            "Build command failed: make (exit 2) - networking/tc.c:12:5: "
+            "error: 'TCA_CBQ_MAX' undeclared"
+        )
+        self.assertEqual(classify_error(message), ErrorCategory.COMPILATION)
+
+    def test_linker_flags_of_the_command_are_no_link_error(self) -> None:
+        """libwebp: the cmake command line holds the linker flags."""
+        message = (
+            "Build command failed: cmake -S . -B build "
+            "-DCMAKE_EXE_LINKER_FLAGS=-static (exit 1) - CMake Error: "
+            "The source directory does not appear to contain "
+            "CMakeLists.txt"
+        )
+        self.assertNotEqual(classify_error(message), ErrorCategory.LINKING)
+
+    def test_module_names_in_downloads_are_no_network(self) -> None:
+        """nuclei: a module named networkpolicy is no network fault."""
+        message = (
+            "Build command failed: go build ./cmd/nuclei (exit 1) - "
+            "go: downloading github.com/projectdiscovery/networkpolicy "
+            "v0.1.1\n"
+            "pkg/a.go:3:2: undefined: networkpolicy.New"
+        )
+        self.assertEqual(classify_error(message), ErrorCategory.COMPILATION)
+
+    def test_go_compile_error_is_compilation(self) -> None:
+        self.assertEqual(
+            classify_error("pkg/a.go:70:62: undefined: platform.Paths"),
+            ErrorCategory.COMPILATION,
+        )
+
+    def test_unresolved_symbol_is_linking_before_architecture(self) -> None:
+        message = (
+            "x.c:(.text+0x10): undefined reference to `foo'\n"
+            "note: built for the generic architecture\n"
+            "collect2: error: ld returned 1 exit status"
+        )
+        self.assertEqual(classify_error(message), ErrorCategory.LINKING)
+
+
+class TestErrorsThatAreNoAttempt(unittest.TestCase):
+    """A scout failure or a provider fault is no build attempt."""
+
+    def test_count_attempt_false_keeps_the_count(self) -> None:
+        state = create_initial_state("https://github.com/x/y")
+        state.add_error(
+            create_error_record("Scout failed: no plan"), count_attempt=False
+        )
+        self.assertEqual(state.attempt_count, 0)
+        self.assertEqual(state.last_error, "Scout failed: no plan")
+        state.add_error(create_error_record("a.c:1: error: x"))
+        self.assertEqual(state.attempt_count, 1)

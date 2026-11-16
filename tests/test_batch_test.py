@@ -174,6 +174,12 @@ class TestMainPyArgv(_BatchTestCase):
         self.assertTrue(success)
         return popen.call_args.args[0]
 
+    def test_replan_is_forwarded(self) -> None:
+        """The batch --replan flag reaches every main.py run."""
+        with mock.patch.object(self.bt, "_REPLAN", True):
+            self.assertIn("--replan", self._agent_argv())
+        self.assertNotIn("--replan", self._agent_argv())
+
     def test_child_gets_the_kill_deadline(self) -> None:
         """main.py learns when the batch kills it, to size its tests."""
         proc = mock.MagicMock(pid=4242, returncode=0)
@@ -194,6 +200,132 @@ class TestMainPyArgv(_BatchTestCase):
         )
         # The rest of the environment is inherited unchanged.
         self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
+
+    def test_child_gets_the_batch_test_limit(self) -> None:
+        """Decision D6: 180 s of package tests, unless the user set one."""
+        proc = mock.MagicMock(pid=4242, returncode=0)
+        self.bt._populate_container_pool(1)
+        for env_value, expected in ((None, "180"), ("0", "0")):
+            with self.subTest(env_value=env_value):
+                extra = (
+                    {"ATESOR_PACKAGE_TEST_TIMEOUT": env_value}
+                    if env_value is not None
+                    else {}
+                )
+                with (
+                    mock.patch.dict(os.environ, extra),
+                    mock.patch.object(
+                        self.bt.subprocess, "Popen", return_value=proc
+                    ) as popen,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    if env_value is None:
+                        os.environ.pop("ATESOR_PACKAGE_TEST_TIMEOUT", None)
+                    self.bt.run_agent(_URL, "zlib")
+                env = popen.call_args.kwargs["env"]
+                self.assertEqual(env["ATESOR_PACKAGE_TEST_TIMEOUT"], expected)
+
+    def test_child_gets_the_worker_count(self) -> None:
+        """The builder sizes cargo jobs from this worker's share."""
+        proc = mock.MagicMock(pid=4242, returncode=0)
+        self.bt._populate_container_pool(1)
+        with (
+            mock.patch.object(self.bt, "MAX_WORKERS", 3),
+            mock.patch.object(
+                self.bt.subprocess, "Popen", return_value=proc
+            ) as popen,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.bt.run_agent(_URL, "zlib")
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["ATESOR_BATCH_WORKERS"], "3"
+        )
+
+    def test_a_quota_failure_pauses_and_runs_once_more(self) -> None:
+        """The zlib runs 5-8 started after the daily quota was used up."""
+        reset = int(self.bt.time.time()) + 7200
+        quota = self.bt.PackageRunResult(
+            "zlib",
+            self.bt.STATUS_FAIL,
+            f"ATESOR_QUOTA_RESET {reset}\nATESOR_OUTCOME QUOTA\n",
+            1.0,
+            1,
+            label="QUOTA",
+        )
+        passed = self.bt.PackageRunResult(
+            "zlib", self.bt.STATUS_PASS, "", 1.0, 0
+        )
+        self.addCleanup(setattr, self.bt, "_quota_pause_until", 0.0)
+        with (
+            mock.patch.object(
+                self.bt, "_run_agent_once", side_effect=[quota, passed]
+            ) as once,
+            mock.patch.object(self.bt.os, "replace") as keep_log,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = self.bt.run_agent(_URL, "zlib")
+        self.assertIs(result, passed)
+        self.assertEqual(once.call_count, 2)
+        self.assertEqual(self.bt._quota_pause_until, float(reset))
+        self.assertTrue(keep_log.call_args.args[1].endswith("zlib.quota.log"))
+
+    def test_a_second_quota_failure_pauses_without_a_third_run(self) -> None:
+        reset = int(self.bt.time.time()) + 7200
+
+        def quota(at):
+            return self.bt.PackageRunResult(
+                "zlib",
+                self.bt.STATUS_FAIL,
+                f"ATESOR_QUOTA_RESET {at}\nATESOR_OUTCOME QUOTA\n",
+                1.0,
+                1,
+                label="QUOTA",
+            )
+
+        self.addCleanup(setattr, self.bt, "_quota_pause_until", 0.0)
+        with (
+            mock.patch.object(
+                self.bt,
+                "_run_agent_once",
+                side_effect=[quota(reset), quota(reset + 600)],
+            ) as once,
+            mock.patch.object(self.bt.os, "replace"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = self.bt.run_agent(_URL, "zlib")
+        self.assertEqual(result.label, "QUOTA")
+        self.assertEqual(once.call_count, 2)
+        self.assertEqual(self.bt._quota_pause_until, float(reset + 600))
+
+    def test_other_failures_run_once(self) -> None:
+        failed = self.bt.PackageRunResult(
+            "zlib", self.bt.STATUS_FAIL, "", 1.0, 1, label="REFUSED"
+        )
+        with mock.patch.object(
+            self.bt, "_run_agent_once", return_value=failed
+        ) as once:
+            self.assertIs(self.bt.run_agent(_URL, "zlib"), failed)
+        self.assertEqual(once.call_count, 1)
+
+    def test_no_port_starts_during_the_pause(self) -> None:
+        self.addCleanup(setattr, self.bt, "_quota_pause_until", 0.0)
+        self.bt._quota_pause_until = self.bt.time.time() + 3600
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            self.bt._quota_pause_until = 0.0
+            return False
+
+        with mock.patch.object(self.bt._shutdown_event, "wait", wait):
+            self.bt._wait_for_quota()
+        self.assertEqual(waits, [60.0])
+        self.assertEqual(self.bt._quota_reset("no line"), 0.0)
+
+    def test_the_outcome_label_comes_from_the_log(self) -> None:
+        tail = "PORTING STOPPED / FAILED\nATESOR_OUTCOME INFRASTRUCTURE\n"
+        self.assertEqual(self.bt._outcome_label(tail), "INFRASTRUCTURE")
+        self.assertEqual(self.bt._outcome_label("no label\n"), "")
 
     def test_qemu_argv_is_unchanged(self) -> None:
         """QEMU calls keep the pinned argv, with no --target."""
@@ -348,6 +480,50 @@ class TestBatchMain(_BatchTestCase):
         self.assertIn(
             f"Machine    {_ALIAS} (host rv-box), 8 cores, 12 GiB", out
         )
+
+    def test_a_list_can_ask_for_fewer_workers(self) -> None:
+        """Rust and large Go lists run with one worker; --workers wins."""
+        self.list_path.write_text(
+            json.dumps(
+                {
+                    "$schema_version": 1,
+                    "defaults": {"workers": 1},
+                    "packages": [{"name": "zlib", "url": _URL}],
+                }
+            )
+        )
+        code, _, _, _ = self._run("--target", "native")
+        self.assertEqual(0, code)
+        self.assertEqual(1, self.bt.MAX_WORKERS)
+        code, _, _, _ = self._run("--target", "native", "--workers", "2")
+        self.assertEqual(2, self.bt.MAX_WORKERS)
+
+    def test_timeout_flag_overrides_the_list_value(self) -> None:
+        """4 workers on a 4-vCPU runner need a longer limit per package."""
+        self.addCleanup(
+            setattr,
+            self.bt,
+            "_AGENT_TIMEOUT_SECONDS",
+            self.bt._AGENT_TIMEOUT_SECONDS,
+        )
+        self.list_path.write_text(
+            json.dumps(
+                {
+                    "$schema_version": 1,
+                    "defaults": {"timeout_seconds": 2400},
+                    "packages": [{"name": "zlib", "url": _URL}],
+                }
+            )
+        )
+        code, _, _, _ = self._run()
+        self.assertEqual(0, code)
+        self.assertEqual(2400, self.bt._AGENT_TIMEOUT_SECONDS)
+        code, _, _, _ = self._run("--timeout-seconds", "4800")
+        self.assertEqual(0, code)
+        self.assertEqual(4800, self.bt._AGENT_TIMEOUT_SECONDS)
+        code, _, err, _ = self._run("--timeout-seconds", "30")
+        self.assertEqual(2, code)
+        self.assertIn("--timeout-seconds must be >= 60", err)
 
     def test_workers_flag_overrides_the_native_default(self) -> None:
         code, _, _, _ = self._run("--target", "native", "--workers", "2")

@@ -40,6 +40,10 @@ on:
         description: "Max packages per full-list shard (job)"
         type: string
         default: "25"
+      timeout_seconds:
+        description: "Time limit of one package in seconds; empty = the list value (2400). For workers 4, use 4800 with group_size 15"
+        type: string
+        default: ""
       force_all:
         description: "Rebuild ALL packages (ignore already-released zips under the monthly tag)"
         type: boolean
@@ -104,6 +108,7 @@ jobs:
       ATESOR_PLATFORM: debian
       LIST: smoke
       WORKERS: ${{ inputs.workers || '2' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '' }}
       PREBUILT_IMAGE: cloudv10x/atesor-sandbox:debian-latest
       LOCAL_IMAGE: atesor-ai-sandbox-debian:latest
     steps:
@@ -138,7 +143,7 @@ jobs:
       - name: Provision sandbox
         run: python3 main.py --setup-only --platform "$ATESOR_PLATFORM"
       - name: Run smoke batch
-        run: python3 .github/scripts/batch_test.py --list "$LIST" --workers "$WORKERS" --package
+        run: python3 .github/scripts/batch_test.py --list "$LIST" --workers "$WORKERS" --package ${TIMEOUT_SECONDS:+--timeout-seconds "$TIMEOUT_SECONDS"}
       - name: Publish zip artifacts to monthly release
         if: ${{ !cancelled() }}
         uses: ./.github/actions/release-zips
@@ -158,6 +163,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -290,6 +296,7 @@ jobs:
       ATESOR_PLATFORM: debian
       LIST: full
       WORKERS: ${{ inputs.workers || '2' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '' }}
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_TOTAL: ${{ needs.plan-full.outputs.debian_total }}
     steps:
@@ -352,6 +359,7 @@ jobs:
             --list "$LIST" \
             --workers "$WORKERS" \
             --package \
+            ${TIMEOUT_SECONDS:+--timeout-seconds "$TIMEOUT_SECONDS"} \
             $PKGS
       - name: Publish zip artifacts to monthly release
         if: ${{ !cancelled() }}
@@ -372,6 +380,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -395,6 +404,7 @@ jobs:
       ATESOR_PLATFORM: alpine
       LIST: smoke
       WORKERS: ${{ inputs.workers || '2' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '' }}
       PREBUILT_IMAGE: cloudv10x/atesor-sandbox:alpine-latest
       LOCAL_IMAGE: atesor-ai-sandbox:latest
     steps:
@@ -429,7 +439,7 @@ jobs:
       - name: Provision sandbox
         run: python3 main.py --setup-only --platform "$ATESOR_PLATFORM"
       - name: Run smoke batch
-        run: python3 .github/scripts/batch_test.py --list "$LIST" --workers "$WORKERS" --package
+        run: python3 .github/scripts/batch_test.py --list "$LIST" --workers "$WORKERS" --package ${TIMEOUT_SECONDS:+--timeout-seconds "$TIMEOUT_SECONDS"}
       - name: Publish zip artifacts to monthly release
         if: ${{ !cancelled() }}
         uses: ./.github/actions/release-zips
@@ -449,6 +459,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -479,6 +490,7 @@ jobs:
       ATESOR_PLATFORM: alpine
       LIST: full
       WORKERS: ${{ inputs.workers || '2' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '' }}
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_TOTAL: ${{ needs.plan-full.outputs.alpine_total }}
     steps:
@@ -536,6 +548,7 @@ jobs:
             --list "$LIST" \
             --workers "$WORKERS" \
             --package \
+            ${TIMEOUT_SECONDS:+--timeout-seconds "$TIMEOUT_SECONDS"} \
             $PKGS
       - name: Publish zip artifacts to monthly release
         if: ${{ !cancelled() }}
@@ -556,6 +569,7 @@ jobs:
             workspace/packages/
             data/examples/
             data/recipe_cache.json
+            data/failures.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -715,6 +729,7 @@ jobs:
           Included files:
           - data/recipe_cache.json
           - data/examples/*.json
+          - data/failures.json (failed fixes, per package and error)
 
           Merge policy used in CI:
           - Recipe cache entries: newest `last_built` wins per

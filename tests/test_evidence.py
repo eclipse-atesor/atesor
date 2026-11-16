@@ -12,6 +12,7 @@ from src.evidence import (
     failure_digest,
     first_error_line,
     has_error_line,
+    strip_go_download_noise,
     top_level_listing,
 )
 
@@ -328,3 +329,100 @@ class TestCutText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGoDownloadNoise(unittest.TestCase):
+    """Go's "go: downloading" progress lines are never the error."""
+
+    MESSAGE = (
+        "Build command failed: go build -buildvcs=false . (exit 1) - "
+        "go: downloading github.com/hashicorp/go-multierror v1.1.1\n"
+        "go: downloading github.com/pkg/errors v0.9.1\n"
+        "# example.com/tool/pkg/paths\n"
+        "pkg/paths/db.go:70:62: undefined: platform.Paths"
+    )
+
+    def test_strip_keeps_the_prefix_and_the_error(self) -> None:
+        self.assertEqual(
+            strip_go_download_noise(self.MESSAGE),
+            "Build command failed: go build -buildvcs=false . (exit 1) - "
+            "# example.com/tool/pkg/paths\n"
+            "pkg/paths/db.go:70:62: undefined: platform.Paths",
+        )
+
+    def test_first_error_line_is_the_compile_error(self) -> None:
+        self.assertEqual(
+            first_error_line(self.MESSAGE),
+            "pkg/paths/db.go:70:62: undefined: platform.Paths",
+        )
+
+    def test_download_lines_alone_name_no_error(self) -> None:
+        message = (
+            "Build command failed: go build . (exit 1) - "
+            "go: downloading example.com/errors v1.0.0\n"
+            "go: downloading example.com/b v2.0.0\n"
+        )
+        self.assertEqual(first_error_line(message), "")
+
+    def test_digest_leaves_out_download_lines(self) -> None:
+        key, tail = failure_digest(self.MESSAGE)
+        self.assertEqual(key, "")
+        self.assertNotIn("go: downloading", tail)
+        self.assertTrue(tail.endswith("undefined: platform.Paths"))
+
+    def test_go_and_dash_errors_are_key_lines(self) -> None:
+        for line in (
+            "x.go:3:2: undefined: unix.Mmsghdr",
+            "x.go:1:1: missing go.sum entry for module providing package y",
+            "main.go:4:2: no required module provides package a/b",
+            "autogen.sh: 1088: cannot open gnulib",
+        ):
+            self.assertTrue(has_error_line(line), line)
+
+
+class TestErrorLineChoice(unittest.TestCase):
+    """The decisive line: exception names count, a skip test drops."""
+
+    def test_exception_name_is_an_error_line(self) -> None:
+        message = (
+            "Build command failed: ninja -C build (exit 1) - "
+            "[1/40] Generating gen.h with a custom command\n"
+            "Traceback (most recent call last):\n"
+            '  File "../gen.py", line 4, in <module>\n'
+            "    import mako\n"
+            "ModuleNotFoundError: No module named 'mako'"
+        )
+        self.assertEqual(
+            first_error_line(message),
+            "ModuleNotFoundError: No module named 'mako'",
+        )
+        self.assertTrue(has_error_line("TypeError: x is not a function"))
+
+    def test_module_name_before_a_space_is_no_error(self) -> None:
+        self.assertEqual(
+            first_error_line("# github.com/hashicorp/go-multierror v1"), ""
+        )
+
+    def test_download_line_with_an_error_word_does_not_count(self) -> None:
+        """A module path can hold "failed"; its download line is noise."""
+        message = (
+            "Build command failed: go build . (exit 1) - "
+            "go: downloading example.com/x/failed v1.0.0\n"
+            "main.go:3:2: undefined: y"
+        )
+        self.assertEqual(
+            first_error_line(message), "main.go:3:2: undefined: y"
+        )
+
+    def test_skip_drops_the_lines_it_names(self) -> None:
+        message = (
+            "a.c:1:10: fatal error: pcap.h: No such file or directory\n"
+            "b.c:1:10: fatal error: sys/capability.h: No such file or "
+            "directory"
+        )
+        self.assertEqual(
+            first_error_line(message, skip=lambda line: "pcap.h" in line),
+            "b.c:1:10: fatal error: sys/capability.h: No such file or "
+            "directory",
+        )
+        self.assertEqual(first_error_line(message, skip=lambda line: True), "")

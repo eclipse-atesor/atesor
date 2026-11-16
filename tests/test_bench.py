@@ -774,3 +774,35 @@ class TestMeasure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunnerInfrastructureFault(unittest.TestCase):
+    """A dead session gives one more runner session, never a result."""
+
+    def _run(self, results):
+        from src.state import CommandResult
+
+        queue = [CommandResult("python3", *r) for r in results]
+        with (
+            mock.patch.object(bench, "execute_command", side_effect=queue),
+            mock.patch.object(
+                bench, "ensure_build_container", return_value="started"
+            ) as ensure,
+        ):
+            return bench.run_jobs({"jobs": {}}, 600), ensure
+
+    def test_second_session_after_a_fault(self) -> None:
+        payload = bench._RUNNER_MARKER + json.dumps({"runs": [1]})
+        result, ensure = self._run([(255, "", "", 5.0), (0, payload, "", 9.0)])
+        self.assertEqual(result, {"runs": [1]})
+        ensure.assert_called_once()
+
+    def test_a_fault_that_stays_is_named(self) -> None:
+        result, _ = self._run([(255, "", "", 5.0), (255, "", "", 5.0)])
+        self.assertTrue(result["error"].startswith("infrastructure fault"))
+
+    def test_a_result_is_kept_whatever_the_exit_status(self) -> None:
+        payload = bench._RUNNER_MARKER + json.dumps({"runs": [2]})
+        result, ensure = self._run([(255, payload, "", 5.0)])
+        self.assertEqual(result, {"runs": [2]})
+        ensure.assert_not_called()

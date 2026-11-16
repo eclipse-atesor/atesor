@@ -54,10 +54,12 @@ from src.state import (
     ArchSpecificCode,
     BuildPhase,
     BuildPlan,
+    BuildStatus,
     BuildSystemInfo,
     CommandResult,
     DependencyInfo,
     ErrorCategory,
+    FixAttempt,
     PackageAnalysis,
     create_initial_state,
 )
@@ -988,6 +990,14 @@ class TestReplanSignature(unittest.TestCase):
     def test_unknown_signature(self) -> None:
         self.assertEqual(_replan_signature("some random error"), "")
 
+    def test_module_in_a_subdirectory_needs_a_new_plan(self) -> None:
+        """arc: go.mod is in v1/, so the plan builds in the wrong place."""
+        msg = (
+            "go: cannot find main module, but found .git/config in "
+            "/workspace/repos/arc"
+        )
+        self.assertEqual(_replan_signature(msg), "go_no_main_module")
+
 
 class _Res:
     """Minimal CommandResult stand-in for retry-helper tests."""
@@ -1054,6 +1064,97 @@ class TestSerializeBuildCommand(unittest.TestCase):
     def test_npm_install_gets_jobs_flag(self) -> None:
         out = _serialize_build_command("npm install")
         self.assertIn("npm install --jobs 1", out)
+
+
+class TestCargoJobs(unittest.TestCase):
+    """The cargo job count follows this worker's share of the board."""
+
+    @staticmethod
+    def _profile(cores=4, mem_gib=25):
+        from src.machine import MachineProfile
+
+        return MachineProfile(
+            kind="native",
+            emulated_cpu=None,
+            extensions=["i"],
+            cores=cores,
+            mem_kib=mem_gib * 1024 * 1024,
+        )
+
+    def _rewrite(self, command, workers="2", profile=None):
+        from src import graph
+
+        state = create_initial_state("https://github.com/a/b.git")
+        with (
+            mock.patch.dict(os.environ, {"ATESOR_BATCH_WORKERS": workers}),
+            mock.patch.object(
+                graph, "_machine", return_value=profile or self._profile()
+            ),
+        ):
+            return graph._with_cargo_jobs(command, state)
+
+    def test_the_share_of_cores_and_memory_sets_the_jobs(self) -> None:
+        from src import graph
+
+        cases = (
+            # The Megrez: 4 cores, 25 GiB.
+            ("1", self._profile(), 4),
+            ("2", self._profile(), 2),
+            ("4", self._profile(), 1),
+            # Memory, not cores, limits a small board.
+            ("1", self._profile(cores=8, mem_gib=8), 2),
+            ("x", self._profile(), 4),
+        )
+        for workers, profile, jobs in cases:
+            with self.subTest(workers=workers, cores=profile.cores):
+                with mock.patch.dict(
+                    os.environ, {"ATESOR_BATCH_WORKERS": workers}
+                ):
+                    self.assertEqual(graph._cargo_jobs(profile), jobs)
+        self.assertIsNone(graph._cargo_jobs(None))
+
+    def test_each_compile_segment_gets_the_jobs(self) -> None:
+        """nushell: 4 jobs next to another worker ran out of memory."""
+        self.assertEqual(
+            self._rewrite(
+                "cd /workspace/repos/nushell && "
+                "cargo build --release --locked -p nu"
+            ),
+            "cd /workspace/repos/nushell && "
+            "env CARGO_BUILD_JOBS=2 cargo build --release --locked -p nu",
+        )
+        self.assertEqual(
+            self._rewrite('cargo fetch && RUSTFLAGS="-C x" cargo build'),
+            'cargo fetch && env CARGO_BUILD_JOBS=2 RUSTFLAGS="-C x" '
+            "cargo build",
+        )
+
+    def test_a_set_job_count_and_other_commands_stay(self) -> None:
+        for command in (
+            "cargo build -j 2 --release",
+            "env CARGO_BUILD_JOBS=1 cargo build",
+            "cargo fetch",
+            "make -j4 && ./build.sh",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self._rewrite(command), command)
+
+    def test_no_change_for_one_worker_or_without_a_probe(self) -> None:
+        from src import graph
+
+        command = "cargo build --release"
+        # 4 jobs on 4 cores is cargo's own default.
+        self.assertEqual(self._rewrite(command, workers="1"), command)
+        state = create_initial_state("https://github.com/a/b.git")
+        with mock.patch.object(graph, "_machine", return_value=None):
+            self.assertEqual(graph._with_cargo_jobs(command, state), command)
+
+    def test_the_oom_retry_still_runs_one_job(self) -> None:
+        """The -j 1 of the retry overrides the variable."""
+        out = _serialize_build_command(
+            self._rewrite("cd x && cargo build --release")
+        )
+        self.assertIn("cargo build -j 1 --release", out)
 
 
 class TestBuilderRetryAllowed(unittest.TestCase):
@@ -1242,6 +1343,84 @@ class TestGoToolchainDownloadCommand(unittest.TestCase):
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
 
 
+class TestGoToolchainBeforeTheBuild(unittest.TestCase):
+    """The Go of go.mod is installed before the first Go command."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.state = create_initial_state("https://github.com/a/b.git")
+
+    def _go_mod(self, text: str, sub: str = "") -> None:
+        directory = os.path.join(self.repo, sub)
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "go.mod"), "w") as fh:
+            fh.write(f"module example.com/x\n\n{text}\n")
+
+    def _run(self, command: str, running: str = "go1.26.5"):
+        """Return the commands that the check ran."""
+        from src import graph
+
+        def fake_execute(cmd, *args, **kwargs):
+            out = running if cmd == "go env GOVERSION" else ""
+            return CommandResult(cmd, 0, out, "", 0.1)
+
+        with (
+            mock.patch.object(graph, "_to_host_path", return_value=self.repo),
+            mock.patch.object(
+                graph, "execute_command", side_effect=fake_execute
+            ) as run,
+        ):
+            graph._ensure_go_toolchain(self.state, command)
+        return [c.args[0] for c in run.call_args_list], run
+
+    def test_versions_compare_as_go_orders_them(self) -> None:
+        from src.graph import _go_version_key
+
+        self.assertLess(_go_version_key("1.26.5"), _go_version_key("1.27"))
+        self.assertEqual(_go_version_key("1.27"), _go_version_key("1.27.0"))
+        self.assertLess(_go_version_key("1.27rc1"), _go_version_key("1.27.0"))
+        self.assertIsNone(_go_version_key("1.27-devel"))
+
+    def test_a_newer_go_line_downloads_before_the_build(self) -> None:
+        """gobusybox: go 1.27.0 in src/go.mod, the image has 1.26.5."""
+        self._go_mod("go 1.27.0", sub="src")
+        ran, run = self._run("cd src && go build -buildvcs=false ./cmd/x")
+        self.assertEqual(ran[0], "go env GOVERSION")
+        self.assertEqual(ran[1], _download_go_toolchain_cmd("1.27.0"))
+        # Fixed text, not an LLM answer: no whitelist check.
+        self.assertFalse(run.call_args_list[1].kwargs["validate"])
+
+    def test_a_short_go_line_names_the_first_release(self) -> None:
+        self._go_mod("go 1.27")
+        ran, _ = self._run("go mod tidy")
+        self.assertEqual(ran[1], _download_go_toolchain_cmd("1.27.0"))
+
+    def test_the_check_runs_once_per_run(self) -> None:
+        self._go_mod("go 1.27.1")
+        self._run("go build ./...")
+        ran, _ = self._run("go test ./...")
+        self.assertEqual(ran, [])
+
+    def test_no_download_when_the_sandbox_go_is_new_enough(self) -> None:
+        self._go_mod("go 1.26.0\ntoolchain go1.27.0")
+        ran, _ = self._run("go build ./...")
+        self.assertEqual(ran, ["go env GOVERSION"])
+
+    def test_no_check_without_a_go_line_or_a_go_command(self) -> None:
+        for command in ("make -j4", "GOTOOLCHAIN=auto go build ./..."):
+            with self.subTest(command=command):
+                self._go_mod("go 1.27.0")
+                ran, _ = self._run(command)
+                self.assertEqual(ran, [])
+        os.remove(os.path.join(self.repo, "go.mod"))
+        ran, _ = self._run("go mod init example.com/x")
+        self.assertEqual(ran, [])
+        self.assertNotIn("go_toolchain_checked", self.state.context_cache)
+
+
 class TestRepoGitmodules(unittest.TestCase):
     """Tests for ``.gitmodules`` presence detection."""
 
@@ -1310,9 +1489,9 @@ class TestFixCommandRejectionNamesTheCommand(unittest.TestCase):
     """A retry can only fix what the critique names."""
 
     def test_unknown_tool_reason_names_command_and_tools(self) -> None:
-        ok, reason = validate_fix_command("cabal build exe:hadolint")
+        ok, reason = validate_fix_command("nix-build default.nix")
         self.assertFalse(ok)
-        self.assertIn("`cabal build exe:hadolint`", reason)
+        self.assertIn("`nix-build default.nix`", reason)
         self.assertIn("Allowed tools include", reason)
 
     def test_chain_reason_names_command(self) -> None:
@@ -1536,6 +1715,21 @@ class TestPackageTestPhase(unittest.TestCase):
         ):
             return graph._run_package_tests(self.state)
 
+    def test_a_dead_session_is_no_test_failure(self) -> None:
+        """A dropped ssh session says nothing about the tests."""
+        from src import graph
+
+        self._put("Makefile", "check:\n\ttrue\n")
+        result = CommandResult("make check", 255, "", "", 3.0)
+        clock = iter([100.0, 103.0])
+        with (
+            mock.patch.object(graph, "execute_command", return_value=result),
+            mock.patch.object(graph.time, "time", lambda: next(clock)),
+        ):
+            outcome = graph._run_package_tests(self.state)
+        self.assertEqual(outcome["status"], "error")
+        self.assertIn("infrastructure fault", outcome["reason"])
+
     def test_outcomes(self) -> None:
         """Exit codes and elapsed time give passed, failed or timeout."""
         self.assertEqual(self._run(0)["status"], "passed")
@@ -1587,6 +1781,127 @@ class TestPackageTestPhase(unittest.TestCase):
             timeout=graph.PACKAGE_TEST_TIMEOUT,
             extra_env={"CC": "/w/cc"},
         )
+
+
+class TestPackageTestsKeepTheVerifiedBuild(unittest.TestCase):
+    """The port's package tests cannot change its verified build."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.state = create_initial_state("https://github.com/a/b.git")
+        repo = self.state.repo_path.rstrip("/")
+        self.state.build_artifacts = [
+            {"filepath": f"{repo}/programs/cachedObjs/P/lz4"},
+            {"filepath": "/usr/lib/outside.so"},
+        ]
+
+    def _run(self, keep, restore):
+        """Run make check; return the outcome and the commands that ran."""
+        from src import graph
+
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            calls.append(command)
+            if isinstance(command, list):
+                return keep if graph._TEST_KEEP_SCRIPT in command else restore
+            return CommandResult(command, 0, "ok", "", 1.0)
+
+        with (
+            mock.patch.dict(os.environ, {"ATESOR_PACKAGE_TEST_TIMEOUT": ""}),
+            mock.patch.object(graph, "execute_command", fake_execute),
+        ):
+            outcome = graph._run_package_tests(
+                self.state, detected=("make check", "make check")
+            )
+        return outcome, calls
+
+    def test_a_changed_link_is_put_back(self) -> None:
+        """lz4: make check pointed programs/lz4 at the test build."""
+        from src import graph
+
+        keep = CommandResult("keep", 0, "/tmp/atesor-test-keep.x\n", "", 0.1)
+        restore = CommandResult("restore", 0, "./programs/lz4\n", "", 0.1)
+        outcome, calls = self._run(keep, restore)
+        self.assertEqual(outcome["status"], "passed")
+        self.assertEqual(outcome["restored"], ["./programs/lz4"])
+        self.assertEqual(calls[1], "make check")
+        # Only the artifacts inside the tree are kept.
+        self.assertEqual(
+            calls[0],
+            ["sh", "-c", graph._TEST_KEEP_SCRIPT, "sh"]
+            + ["programs/cachedObjs/P/lz4"],
+        )
+        self.assertEqual(calls[2][-1], "/tmp/atesor-test-keep.x")
+
+    def test_a_failed_copy_or_restore_never_stops_the_port(self) -> None:
+        failed = CommandResult("keep", 1, "", "cp: no space", 0.1)
+        outcome, calls = self._run(failed, None)
+        self.assertEqual(outcome["status"], "passed")
+        self.assertEqual(len(calls), 2)
+        keep = CommandResult("keep", 0, "/tmp/atesor-test-keep.k\n", "", 0.1)
+        broken = CommandResult("restore", 1, "", "ln: denied", 0.1)
+        outcome, _ = self._run(keep, broken)
+        self.assertEqual(outcome["status"], "passed")
+        self.assertIn("ln: denied", outcome["restore_error"])
+
+    def test_the_scripts_restore_links_and_files(self) -> None:
+        """Run both scripts with sh on a tree like lz4's."""
+        import subprocess
+
+        from src import graph
+
+        tree = os.path.join(self.root, "lz4")
+        for rel, text in (
+            ("programs/cachedObjs/P/lz4", "verified"),
+            ("lib/cachedObjs/L/liblz4.so", "library"),
+        ):
+            os.makedirs(os.path.dirname(os.path.join(tree, rel)))
+            with open(os.path.join(tree, rel), "w") as fh:
+                fh.write(text)
+        os.symlink("cachedObjs/P/lz4", os.path.join(tree, "programs/lz4"))
+        os.symlink("programs/lz4", os.path.join(tree, "lz4"))
+        env = dict(os.environ, TMPDIR=self.root)
+
+        def sh(script, *args):
+            return subprocess.run(
+                ["sh", "-c", script, "sh", *args],
+                cwd=tree,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+
+        rels = ["programs/cachedObjs/P/lz4", "lib/cachedObjs/L/liblz4.so"]
+        folder = sh(graph._TEST_KEEP_SCRIPT, *rels).splitlines()[0]
+        # The tests build another lz4, point the link at it, and change
+        # the library in place.
+        os.makedirs(os.path.join(tree, "programs/cachedObjs/T"))
+        with open(os.path.join(tree, "programs/cachedObjs/T/lz4"), "w") as fh:
+            fh.write("test build")
+        os.remove(os.path.join(tree, "programs/lz4"))
+        os.symlink("cachedObjs/T/lz4", os.path.join(tree, "programs/lz4"))
+        with open(os.path.join(tree, "lib/cachedObjs/L/liblz4.so"), "w") as fh:
+            fh.write("rebuilt")
+
+        out = sh(graph._TEST_RESTORE_SCRIPT, folder).splitlines()
+        self.assertEqual(
+            sorted(out), ["./programs/lz4", "lib/cachedObjs/L/liblz4.so"]
+        )
+        self.assertEqual(
+            os.readlink(os.path.join(tree, "programs/lz4")),
+            "cachedObjs/P/lz4",
+        )
+        with open(os.path.join(tree, "lz4")) as fh:
+            self.assertEqual(fh.read(), "verified")
+        with open(os.path.join(tree, "lib/cachedObjs/L/liblz4.so")) as fh:
+            self.assertEqual(fh.read(), "library")
+        self.assertFalse(os.path.exists(folder))
 
 
 class TestExtractContentThinking(unittest.TestCase):
@@ -1699,3 +2014,311 @@ class TestBuildPlanTestCommands(unittest.TestCase):
         from src.graph import SCOUT_PROMPT
 
         self.assertIn("Never add a command that runs tests", SCOUT_PROMPT)
+
+
+class TestRejectionHints(unittest.TestCase):
+    """Rejections point to the allowed form of the change."""
+
+    def test_redirection_points_to_create_file(self) -> None:
+        ok, reason = validate_fix_command("printf 'x' > .cargo/config.toml")
+        self.assertFalse(ok)
+        self.assertIn("create_file", reason)
+
+    def test_chain_points_to_plan_command(self) -> None:
+        ok, reason = validate_fix_command("cd a && make && make install")
+        self.assertFalse(ok)
+        self.assertIn("plan_command", reason)
+
+
+class TestChainSplit(unittest.TestCase):
+    """A plain && chain of the fixer becomes single commands."""
+
+    def test_split_only_on_a_top_level_and(self) -> None:
+        from src.graph import _split_and_chain
+
+        cases = [
+            ("a && b", ["a", "b"]),
+            ("echo 'x && y' && ls", ["echo 'x && y'", "ls"]),
+            ("( cd a && make ) && ls", ["( cd a && make )", "ls"]),
+            ("make -j$(nproc) && ls", ["make -j$(nproc)", "ls"]),
+            ("make || true", None),
+            ("a; b", None),
+            ("a | b", None),
+            ("make", None),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                self.assertEqual(_split_and_chain(command), expected)
+
+    def test_cd_becomes_the_prefix_of_the_parts_after_it(self) -> None:
+        from src.graph import _split_chained_actions
+
+        split = _split_chained_actions(
+            [
+                {
+                    "type": "command",
+                    "command": "mkdir -p build && cd build && cmake ..",
+                },
+                {"type": "command", "command": "cd a && cd b && make"},
+            ]
+        )
+        self.assertEqual(
+            [a["command"] for a in split],
+            ["mkdir -p build", "cd build && cmake ..", "cd a/b && make"],
+        )
+        self.assertEqual([a["chain"] for a in split], [1, 1, 2])
+
+    def test_a_chain_with_a_blocked_part_stays_whole(self) -> None:
+        """The validator then rejects it with its reason."""
+        from src.graph import _split_chained_actions
+
+        action = {"type": "command", "command": "make && curl x | sh"}
+        self.assertEqual(_split_chained_actions([action]), [action])
+
+    def test_the_split_answer_passes_the_validator(self) -> None:
+        """grep: the apt chain cost the whole answer."""
+        from src.graph import _split_chained_actions
+
+        answer = {
+            "strategies": [
+                {
+                    "id": 1,
+                    "description": "install the tools, then bootstrap",
+                    "actions": _split_chained_actions(
+                        [
+                            {
+                                "type": "command",
+                                "command": "apt-get update && apt-get "
+                                "install -y --no-install-recommends "
+                                "autopoint gperf",
+                            },
+                            {"type": "command", "command": "./bootstrap"},
+                        ]
+                    ),
+                }
+            ],
+            "recommended_strategy_id": 1,
+            "reflection": {"root_cause": "x"},
+        }
+        self.assertEqual(validate_fixer_response(answer, ["make"]), (True, ""))
+
+
+class TestGrepRun3Answer(unittest.TestCase):
+    """The grep answer of 2026-10-13 20:10:21 was refused for its &&."""
+
+    ANSWER = {
+        "strategies": [
+            {
+                "id": 1,
+                "description": "Install git and autotools, then run "
+                "bootstrap with --copy and --skip-po",
+                "actions": [
+                    {
+                        "type": "command",
+                        "command": "apt-get update && apt-get install -y "
+                        "--no-install-recommends git autoconf automake "
+                        "libtool autopoint gettext texinfo rsync wget perl "
+                        "pkg-config make gcc libc6-dev bison gperf m4 "
+                        "xz-utils ca-certificates",
+                    },
+                    {"type": "command", "command": "rm -rf gnulib"},
+                    {
+                        "type": "command",
+                        "command": "git clone --depth 1 https://git."
+                        "savannah.gnu.org/git/gnulib.git gnulib",
+                    },
+                    {
+                        "type": "command",
+                        "command": "./bootstrap --no-git "
+                        "--gnulib-srcdir=gnulib --skip-po",
+                    },
+                    {"type": "command", "command": "./configure"},
+                ],
+            }
+        ],
+        "recommended_strategy_id": 1,
+        "reflection": {"root_cause": "gnulib has no checked-out revision"},
+    }
+
+    def test_the_answer_passes_after_the_split(self) -> None:
+        import copy
+
+        from src.graph import _split_chained_actions
+
+        answer = copy.deepcopy(self.ANSWER)
+        self.assertFalse(validate_fixer_response(answer, ["./configure"])[0])
+        strategy = answer["strategies"][0]
+        strategy["actions"] = _split_chained_actions(strategy["actions"])
+        self.assertEqual(
+            validate_fixer_response(answer, ["./configure"]), (True, "")
+        )
+        self.assertEqual(len(strategy["actions"]), 6)
+
+
+class TestFixedGettextRewrite(unittest.TestCase):
+    """The gettext copy rewrite only protects a fixed m4/gettext.m4."""
+
+    def setUp(self) -> None:
+        """Put an m4/gettext.m4 into a scratch repository on the host."""
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        os.makedirs(os.path.join(self._tmp.name, "m4"))
+        with open(os.path.join(self._tmp.name, "m4", "gettext.m4"), "w") as f:
+            f.write("dnl old\n")
+        host = mock.patch(
+            "src.graph._to_host_path", return_value=self._tmp.name
+        )
+        host.start()
+        self.addCleanup(host.stop)
+        self.state = create_initial_state("https://github.com/a/b.git")
+
+    def _built(self, fixed: bool) -> list:
+        from src import graph
+
+        self.state.build_plan = BuildPlan(
+            "autotools",
+            0.9,
+            [BuildPhase(1, "regen", ["autoreconf -fi"])],
+            "1m",
+        )
+        if fixed:
+            self.state.add_fix_attempt(
+                FixAttempt(
+                    ErrorCategory.CONFIGURATION,
+                    "use the system gettext.m4",
+                    ["Created file: m4/gettext.m4"],
+                    True,
+                    actions=[
+                        {
+                            "type": "create_file",
+                            "path": "m4/gettext.m4",
+                            "ok": True,
+                        }
+                    ],
+                )
+            )
+        runs = []
+
+        def fake(cmd, *args, **kwargs):
+            runs.append(cmd)
+            return CommandResult(cmd, 0, "", "", 1.0)
+
+        with (
+            mock.patch.object(graph, "execute_command", side_effect=fake),
+            mock.patch.object(graph, "predict_build_issues", return_value=[]),
+        ):
+            graph.builder_node(self.state)
+        return runs
+
+    def test_no_fix_runs_autoreconf(self) -> None:
+        self.assertEqual(self._built(fixed=False), ["autoreconf -fi"])
+
+    def test_a_fixed_file_gets_the_copy_first_sequence(self) -> None:
+        runs = self._built(fixed=True)
+        self.assertNotIn("autoreconf", runs[0])
+        self.assertIn("aclocal", runs[0])
+
+
+class TestPackageTestsMatchTheBuild(unittest.TestCase):
+    """The tests run with the build's environment and Go tags."""
+
+    def test_env_and_tags_of_the_last_build(self) -> None:
+        from src.graph import _match_tests_to_build
+
+        state = create_initial_state("https://github.com/a/b.git")
+        state.build_plan = BuildPlan(
+            "go",
+            0.9,
+            [
+                BuildPhase(
+                    1,
+                    "build",
+                    [
+                        "CGO_ENABLED=1 go build -buildvcs=false -tags "
+                        "dynamic -o jr ."
+                    ],
+                )
+            ],
+            "1m",
+        )
+        detected, env = _match_tests_to_build(
+            state, ("go test", "go test ./...")
+        )
+        self.assertEqual(detected, ("go test", "go test -tags dynamic ./..."))
+        self.assertEqual(env, {"CGO_ENABLED": "1"})
+
+    def test_nothing_set_keeps_the_command(self) -> None:
+        from src.graph import _match_tests_to_build
+
+        state = create_initial_state("https://github.com/a/b.git")
+        state.build_plan = BuildPlan(
+            "cmake", 0.9, [BuildPhase(1, "b", ["cmake --build build"])], "1m"
+        )
+        self.assertEqual(
+            _match_tests_to_build(state, ("ctest", "ctest --test-dir build")),
+            (("ctest", "ctest --test-dir build"), None),
+        )
+
+
+class TestBatchPackageTests(unittest.TestCase):
+    """A batch port skips the tests of a slow or unverified build."""
+
+    def setUp(self) -> None:
+        """Create a scratch repository; use the default test limit."""
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.state = create_initial_state("https://github.com/a/b.git")
+        env = mock.patch.dict(
+            os.environ,
+            {"ATESOR_PACKAGE_TEST_TIMEOUT": "", "ATESOR_RUN_DEADLINE": ""},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        host = mock.patch("src.graph._to_host_path", return_value=self.root)
+        host.start()
+        self.addCleanup(host.stop)
+
+    def _put(self, rel: str, text: str = "") -> None:
+        with open(os.path.join(self.root, rel), "w") as fh:
+            fh.write(text)
+
+    def _skip(self, verified: bool, seconds: float) -> str:
+        from src.graph import _batch_test_skip
+
+        if verified:
+            self.state.build_status = BuildStatus.SUCCESS
+            self.state.artifact_verification = {"status": "verified"}
+        self.state.cache_command_result(
+            "make", CommandResult("make", 0, "", "", seconds)
+        )
+        with mock.patch.dict(
+            os.environ, {"ATESOR_RUN_DEADLINE": "9999999999"}
+        ):
+            return _batch_test_skip(self.state)
+
+    def test_skips(self) -> None:
+        self.assertIn("not verified", self._skip(False, 10.0))
+        self.assertIn("minutes", self._skip(True, 900.0))
+        self.assertEqual(self._skip(True, 60.0), "")
+
+    def test_a_single_run_never_skips(self) -> None:
+        from src.graph import _batch_test_skip
+
+        self.assertEqual(_batch_test_skip(self.state), "")
+
+    def test_go_test_gets_its_own_timeout(self) -> None:
+        from src import graph
+
+        self._put("go.mod", "module x\n")
+        result = CommandResult("go test", 0, "ok", "", 1.0)
+        with mock.patch.object(
+            graph, "execute_command", return_value=result
+        ) as run:
+            outcome = graph._run_package_tests(self.state)
+        self.assertIn("go test -timeout 570s", outcome["command"])
+        self.assertIn("-timeout", run.call_args.args[0])

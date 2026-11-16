@@ -556,10 +556,23 @@ def _artifact_from_entry(
 
 
 def _safe_expected_names(names: Sequence[str]) -> List[str]:
-    """Return the expected artifact names that are plain basenames."""
+    """Return the expected artifact names as plain basenames.
+
+    A relative path of plain parts gives its last part: the analyst
+    named fping's output ``src/fping``, and the dropped name turned off
+    the search outside the tree. A path with ``..`` or an absolute path
+    is dropped.
+    """
     safe: List[str] = []
     for raw in names or ():
         name = str(raw).strip()
+        while name.startswith("./"):
+            name = name[2:]
+        if "/" in name:
+            parts = name.split("/")
+            name = (
+                "" if any(p in ("", ".", "..") for p in parts) else parts[-1]
+            )
         if name in ("", ".", "..") or not _SAFE_BASENAME.match(name):
             continue
         if name not in safe:

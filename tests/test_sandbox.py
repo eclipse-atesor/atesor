@@ -569,5 +569,47 @@ class TestBuildImage(_NativeCase):
         self.assertFalse(os.path.exists(context))
 
 
+class TestEnsureContainerRunning(_NativeCase):
+    """The guard starts a stopped build container on either target."""
+
+    def _calls(self, *results):
+        with mock.patch("src.sandbox.subprocess.run") as run:
+            run.side_effect = list(results)
+            value = sandbox.ensure_container_running("box")
+        argvs = [
+            shlex.split(self.remote_script(call.args[0]))
+            for call in run.call_args_list
+        ]
+        return value, argvs
+
+    def test_native_states(self) -> None:
+        value, argvs = self._calls(_done([], 0, "true\n"))
+        self.assertEqual(value, "running")
+        self.assertEqual(
+            argvs[0][:4], ["podman", "container", "inspect", "--format"]
+        )
+        value, argvs = self._calls(_done([], 0, "false\n"), _done([], 0))
+        self.assertEqual(value, "started")
+        self.assertEqual(argvs[1], ["podman", "start", "box"])
+        value, _ = self._calls(_done([], 125, err="no such container box"))
+        self.assertEqual(value, "missing")
+        value, _ = self._calls(_done([], 0, "false"), _done([], 125))
+        self.assertEqual(value, "failed")
+
+    def test_qemu_uses_docker(self) -> None:
+        with (
+            mock.patch.object(sandbox.target, "is_native", return_value=False),
+            mock.patch("src.sandbox.subprocess.run") as run,
+        ):
+            run.side_effect = [_done([], 0, "false\n"), _done([], 0)]
+            self.assertEqual(
+                sandbox.ensure_container_running("box"), "started"
+            )
+        self.assertEqual(run.call_args_list[0].args[0][0], "docker")
+        self.assertEqual(
+            run.call_args_list[1].args[0], ["docker", "start", "box"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

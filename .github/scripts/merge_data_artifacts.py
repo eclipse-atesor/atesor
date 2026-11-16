@@ -160,6 +160,47 @@ def _example_id(ex: dict[str, Any]) -> str:
     return json.dumps(ex, sort_keys=True)
 
 
+def _same_example(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return True when two entries with one id teach the same thing.
+
+    A manual id always names one example. An auto id is handed out by
+    each shard on its own, so two shards can give it to examples of
+    different packages or errors.
+    """
+    if "-auto-" not in _example_id(a):
+        return True
+    return all(
+        a.get(key) == b.get(key)
+        for key in ("repo_name", "build_system", "sandbox", "error_pattern")
+    )
+
+
+def _next_auto_id(merged: dict[str, Any], ex_id: str) -> str:
+    """Return the next free id with the prefix of ``ex_id``."""
+    prefix = ex_id.rsplit("-", 1)[0] + "-"
+    numbers = [
+        int(key[len(prefix) :])
+        for key in merged
+        if key.startswith(prefix) and key[len(prefix) :].isdigit()
+    ]
+    return f"{prefix}{max(numbers, default=0) + 1:03d}"
+
+
+def _auto_twin(merged: dict[str, Any], ex: dict[str, Any]) -> Optional[str]:
+    """Return the id of a merged auto example that ``ex`` repeats.
+
+    Shards number their auto examples on their own, so one example can
+    come in under another id. Without this, a second merge of the same
+    shards added the example again under a new id.
+    """
+    if "-auto-" not in _example_id(ex):
+        return None
+    for key, item in merged.items():
+        if "-auto-" in key and _same_example(item, ex):
+            return key
+    return None
+
+
 def _merge_examples_file(
     base: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
@@ -171,10 +212,19 @@ def _merge_examples_file(
     for ex in incoming.get("examples", []):
         ex_id = _example_id(ex)
         existing = merged.get(ex_id)
-        if existing is None:
+        if existing is not None and _same_example(existing, ex):
+            merged[ex_id] = _prefer_example(existing, ex)
+            continue
+        twin = _auto_twin(merged, ex)
+        if twin is not None:
+            merged[twin] = {**_prefer_example(merged[twin], ex), "id": twin}
+        elif existing is None:
             merged[ex_id] = ex
         else:
-            merged[ex_id] = _prefer_example(existing, ex)
+            # Two shards gave one auto id to different examples: keep
+            # both under distinct ids.
+            new_id = _next_auto_id(merged, ex_id)
+            merged[new_id] = {**ex, "id": new_id}
 
     out["examples"] = [merged[k] for k in sorted(merged.keys())]
     out.setdefault(
@@ -228,6 +278,62 @@ def _merge_examples_files(repo_data_dir: Path, artifact_root: Path) -> bool:
         if target_changed:
             _save_json(target, merged)
             changed = True
+    return changed
+
+
+# Failed fixes kept per package, sandbox and error, as
+# MAX_FAILURES_PER_ERROR in src/memory.py.
+_MAX_FAILURES_PER_ERROR = 5
+
+
+def _merge_failures(
+    base: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge two failure memories (data/failures.json).
+
+    Per package, sandbox and error: the records of both sides, one per
+    strategy (the later date wins), oldest first, at most
+    _MAX_FAILURES_PER_ERROR.
+    """
+    out: dict[str, Any] = {
+        "version": base.get("version", incoming.get("version", "1.0")),
+        "packages": json.loads(json.dumps(base.get("packages", {}))),
+    }
+    for repo, sandboxes in incoming.get("packages", {}).items():
+        for sandbox, errors in (sandboxes or {}).items():
+            slot = out["packages"].setdefault(repo, {}).setdefault(sandbox, {})
+            for key, records in (errors or {}).items():
+                by_strategy: dict[str, dict[str, Any]] = {}
+                for record in list(slot.get(key, [])) + list(records or []):
+                    strategy = str(record.get("strategy", ""))
+                    old = by_strategy.get(strategy)
+                    if old is None or str(record.get("date", "")) >= str(
+                        old.get("date", "")
+                    ):
+                        by_strategy[strategy] = record
+                ordered = sorted(
+                    by_strategy.values(), key=lambda r: str(r.get("date", ""))
+                )
+                slot[key] = ordered[-_MAX_FAILURES_PER_ERROR:]
+    return out
+
+
+def _merge_failure_files(repo_data_dir: Path, artifact_root: Path) -> bool:
+    """Merge the failure memories of the shard artifacts into data/."""
+    target = repo_data_dir / "failures.json"
+    merged = (
+        _load_json(target)
+        if target.exists()
+        else {"version": "1.0", "packages": {}}
+    )
+    changed = False
+    for path in artifact_root.rglob("data/failures.json"):
+        before = json.dumps(merged, sort_keys=True)
+        merged = _merge_failures(merged, _load_json(path))
+        if json.dumps(merged, sort_keys=True) != before:
+            changed = True
+    if changed:
+        _save_json(target, merged)
     return changed
 
 
@@ -387,9 +493,11 @@ def main() -> int:
 
     rc_changed = _merge_recipe_cache_files(repo_data_dir, artifact_root)
     ex_changed = _merge_examples_files(repo_data_dir, artifact_root)
+    fm_changed = _merge_failure_files(repo_data_dir, artifact_root)
     print(
         "Merged data artifacts: "
-        f"recipe_cache_changed={rc_changed}, examples_changed={ex_changed}"
+        f"recipe_cache_changed={rc_changed}, examples_changed={ex_changed}, "
+        f"failures_changed={fm_changed}"
     )
     return 0
 

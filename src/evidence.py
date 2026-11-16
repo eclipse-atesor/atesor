@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .config import to_host_path
 
@@ -200,13 +200,24 @@ def collect_build_evidence(repo_path: str) -> str:
     return "\n\n".join(sections)
 
 
+# An exception name that ends in "Error" and comes before a colon
+# (ModuleNotFoundError: No module named 'mako') holds no separate
+# error word.
+_EXCEPTION_NAME = r"(?<=[a-z0-9])error(?=:)"
+
 # Lines of a failed command's output that carry the cause. A word
 # inside a hyphenated name (the package node-error-ex) does not count.
+# Go's compile and module errors carry no error word (undefined: X,
+# missing go.sum entry), and dash reports a missing file as "cannot
+# open".
 _KEY_LINE_RE = re.compile(
     r"(?i)((?<![\w-])(error|fatal|failed|killed|requires)(?![\w-])|"
     r"undefined reference|no such file|not found|cannot find|could not|"
     r"panic:|segmentation fault|permission denied|unable to|"
-    r"no rule to make|\*\*\*)"
+    r"no rule to make|\*\*\*|"
+    r"undefined: |no required module provides|build constraints exclude|"
+    r"missing go\.sum entry|cannot use |declared and not used|"
+    r"cannot open|" + _EXCEPTION_NAME + r")"
 )
 _MAX_KEY_LINES = 20
 _KEY_LINE_CHARS = 300
@@ -224,19 +235,35 @@ _MAKE_RECIPE_FAILED_RE = re.compile(
 )
 
 
-def first_error_line(text: str) -> str:
+def first_error_line(
+    text: str, skip: Optional[Callable[[str], bool]] = None
+) -> str:
     """Return the line that best names the error, or "".
 
-    The first line with the word "error" or "fatal" wins; otherwise the
-    first line that matches another error pattern (make's "No rule to
-    make target"). A "not found" warning before the error line does not
-    win. The builder's "<command> (exit N) - " prefix and make's generic
-    "*** [target] Error N" lines do not count.
+    The first line with the word "error" or "fatal" (or an exception
+    name such as ``ModuleNotFoundError:``) wins; otherwise the first
+    line that matches another error pattern (make's "No rule to make
+    target"). A "not found" warning before the error line does not win.
+    The builder's "<command> (exit N) - " prefix, Go's "go: downloading"
+    lines and make's generic "*** [target] Error N" lines do not count.
+
+    Args:
+        text: The failure message.
+        skip: An optional test; a line for which it returns True does
+            not count. The learner skips the error lines that are still
+            there after a fix, so the key is a line the fix removed.
+
+    Returns:
+        The line, stripped; "" when no line counts.
     """
     lines = [
         line.strip()
-        for line in strip_failure_prefix(text).splitlines()
-        if line.strip() and not _MAKE_RECIPE_FAILED_RE.match(line.strip())
+        for line in strip_go_download_noise(
+            strip_failure_prefix(text)
+        ).splitlines()
+        if line.strip()
+        and not _MAKE_RECIPE_FAILED_RE.match(line.strip())
+        and not (skip and skip(line.strip()))
     ]
     for pattern in (_ERROR_WORD_RE, _KEY_LINE_RE):
         for line in lines:
@@ -253,6 +280,25 @@ def has_error_line(text: str) -> bool:
 def strip_failure_prefix(message: str) -> str:
     """Drop the builder's "<command> (exit N) - " prefix from a message."""
     return _FAILURE_PREFIX_RE.sub("", message or "", count=1)
+
+
+# Go prints "go: downloading <module> <version>" (and "extracting") for
+# each module it fetches, before the error. These lines are progress,
+# never the cause, and a module name can hold an error word
+# (go-multierror, pkg/errors). The first one can follow the builder's
+# "<command> (exit N) - " prefix on the same line.
+_GO_PROGRESS_RE = re.compile(
+    r"(?:(?<=\) - )|^)[ \t]*go: (?:downloading|extracting) \S+ \S+[ \t]*"
+    r"(?:\n|\Z)",
+    re.MULTILINE,
+)
+
+
+def strip_go_download_noise(text: str) -> str:
+    """Drop Go's "go: downloading <module> <version>" progress lines."""
+    if not text or "go: " not in text:
+        return text or ""
+    return _GO_PROGRESS_RE.sub("", text)
 
 
 def _tail_start(text: str, limit: int) -> int:
@@ -279,7 +325,8 @@ def failure_digest(
     lines are the distinct lines before the tail that match an error
     pattern (first 12 and last 8 when there are more than 20). No line
     is shown twice. The "<command> (exit N) - " prefix is dropped,
-    because the prompt gives the command and the exit code.
+    because the prompt gives the command and the exit code, and so are
+    Go's "go: downloading" progress lines.
 
     Args:
         output: The captured output (the recorded error message).
@@ -290,7 +337,7 @@ def failure_digest(
         holds the whole output or no earlier line matched. A cut tail
         starts with ``[... N earlier characters cut ...]``.
     """
-    text = strip_failure_prefix(output)
+    text = strip_go_download_noise(strip_failure_prefix(output))
     start = _tail_start(text, tail_chars)
     tail = text[start:]
     if start:
@@ -330,7 +377,9 @@ _MAX_ERROR_FILES = 3
 
 # A line that reports an error; its file references are read first.
 # A word inside a hyphenated name (node-error-ex) does not count.
-_ERROR_WORD_RE = re.compile(r"(?i)(?<![\w-])(error|fatal)(?![\w-])")
+_ERROR_WORD_RE = re.compile(
+    r"(?i)(?<![\w-])(error|fatal)(?![\w-])|" + _EXCEPTION_NAME
+)
 
 
 def _repo_relative(error_text: str, repo_path: str, host_repo: str) -> str:
@@ -419,5 +468,6 @@ __all__ = [
     "first_error_line",
     "has_error_line",
     "strip_failure_prefix",
+    "strip_go_download_noise",
     "top_level_listing",
 ]

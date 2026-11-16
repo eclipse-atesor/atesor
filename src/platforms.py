@@ -187,6 +187,14 @@ ALPINE_RISCV = PlatformProfile(
         "libarchive": "libarchive-dev",
         # db
         "sqlite": "sqlite-dev",
+        # libraries named by missing headers in the October 2026 runs
+        "libpcap": "libpcap-dev",
+        "libcap": "libcap-dev",
+        "librdkafka": "librdkafka-dev",
+        "libolm": "olm-dev",
+        "libde265": "libde265-dev",
+        "libyuv": "libyuv-dev",
+        "ncurses": "ncurses-dev",
         # C++
         "abseil-cpp": "abseil-cpp-dev",
         "absl": "abseil-cpp-dev",
@@ -253,6 +261,14 @@ ALPINE_RISCV = PlatformProfile(
             " builder downloads that Go release by itself; do not"
             " install golang packages and do not escalate for this."
         ),
+        (
+            "A Go module with bundled C code can set its cgo flags for"
+            " amd64/arm64 only (`#cgo amd64 CXXFLAGS: -Ilibde265 ...`);"
+            " on riscv64 the build then lacks include paths or defines."
+            " Read the `#cgo` lines of the failing package in"
+            " /root/go/pkg/mod and put the same flags, with absolute"
+            " paths, in CGO_CFLAGS or CGO_CXXFLAGS of the plan command."
+        ),
     ],
 )
 
@@ -288,16 +304,17 @@ DEBIAN_RISCV = PlatformProfile(
         "perl": "perl",
         "fortran": "gfortran",
         # languages
-        # NOTE: deliberately no "go" entry — Ubuntu jammy's golang-go package
-        # is Go 1.18, which cannot parse modern go.mod files (`toolchain`
-        # directive, `go 1.24.0` 3-part version). The sandbox bakes a recent
-        # Go riscv64 toolchain into /usr/local/go via Dockerfile.debian; let
-        # the agent use that and never `apt-get install golang*`.
+        # NOTE: deliberately no "go" entry — the distro golang-go package
+        # is older than the Go riscv64 toolchain that Dockerfile.debian and
+        # Dockerfile.native bake into /usr/local/go (jammy's was Go 1.18,
+        # which cannot parse modern go.mod files); let the agent use that
+        # and never `apt-get install golang*`.
         # Likewise no "rust" entry: rustup provides a current toolchain in
-        # /root/.cargo, and jammy's rustc would shadow it on PATH.
+        # /root/.cargo, and a distro rustc would shadow it on PATH.
         "python3": "python3 python3-pip python3-dev",
         "node": "nodejs npm",
-        "java": "openjdk-17-jdk",
+        # default-jdk: trixie has no openjdk-17 (it ships 21).
+        "java": "default-jdk",
         # core C/C++
         "zlib": "zlib1g-dev",
         "openssl": "libssl-dev",
@@ -346,6 +363,14 @@ DEBIAN_RISCV = PlatformProfile(
         "libarchive": "libarchive-dev",
         # db
         "sqlite": "libsqlite3-dev",
+        # libraries named by missing headers in the October 2026 runs
+        "libpcap": "libpcap-dev",
+        "libcap": "libcap-dev",
+        "librdkafka": "librdkafka-dev",
+        "libolm": "libolm-dev",
+        "libde265": "libde265-dev",
+        "libyuv": "libyuv-dev",
+        "ncurses": "libncurses-dev",
         # C++
         "abseil-cpp": "libabsl-dev",
         "absl": "libabsl-dev",
@@ -410,9 +435,8 @@ DEBIAN_RISCV = PlatformProfile(
         ),
         (
             "Go is pre-installed at /usr/local/go (riscv64) — do NOT"
-            " `apt-get install golang*`. Ubuntu jammy ships Go 1.18"
-            " which cannot parse modern go.mod files (toolchain"
-            " directive, 3-part `go 1.X.Y` version)."
+            " `apt-get install golang*`: the distro Go is older and"
+            " would shadow it."
         ),
         "GOTOOLCHAIN=local is set image-wide.",
         (
@@ -428,6 +452,14 @@ DEBIAN_RISCV = PlatformProfile(
             "If go.mod needs a newer Go than the bundled toolchain, the"
             " builder downloads that Go release by itself; do not"
             " install golang packages and do not escalate for this."
+        ),
+        (
+            "A Go module with bundled C code can set its cgo flags for"
+            " amd64/arm64 only (`#cgo amd64 CXXFLAGS: -Ilibde265 ...`);"
+            " on riscv64 the build then lacks include paths or defines."
+            " Read the `#cgo` lines of the failing package in"
+            " /root/go/pkg/mod and put the same flags, with absolute"
+            " paths, in CGO_CFLAGS or CGO_CXXFLAGS of the plan command."
         ),
     ],
 )

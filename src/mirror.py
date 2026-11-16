@@ -41,6 +41,17 @@ logger = logging.getLogger(__name__)
 
 # Seconds. The first copy of a large repository can take a while.
 PULL_TIMEOUT = 900
+# The copy skips these. Rust build intermediates are never a
+# deliverable, but they are most of a target/ tree (jj: 918 MB of
+# 1.1 GB), and over a slow link to the machine they can take longer
+# than PULL_TIMEOUT.
+_EXCLUDES = (
+    ".git",
+    "*.rlib",
+    "*.rmeta",
+    ".fingerprint/",
+    "target/**/incremental/",
+)
 # rsync exit statuses that are only warnings: 23 means that some files
 # did not transfer, and 24 means that some source files vanished.
 _WARNING_EXITS = (23, 24)
@@ -151,7 +162,7 @@ def _copy(repo: str) -> None:
     # compares whole seconds only. --modify-window=-1 compares the
     # nanoseconds too, so a same-size edit in the same second is copied.
     argv = ["rsync", "-a", "--delete", "--modify-window=-1"]
-    argv.append("--exclude=.git")
+    argv.extend(f"--exclude={pattern}" for pattern in _EXCLUDES)
     argv.extend(["-e", shlex.join(target.ssh_argv())])
     argv.append(f"{target.ssh_alias()}:{workdir}/repos/{repo}/")
     argv.append(local + "/")

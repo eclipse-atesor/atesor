@@ -49,7 +49,11 @@ from typing import Any, Dict, List, Optional
 import filelock
 
 from .config import DATA_DIR
-from .evidence import strip_failure_prefix
+from .evidence import (
+    has_error_line,
+    strip_failure_prefix,
+    strip_go_download_noise,
+)
 from .scripted_ops import normalize_repo_url
 from .target import is_native
 
@@ -60,7 +64,13 @@ logger = logging.getLogger(__name__)
 _BUNDLED_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EXAMPLES_DIR = Path(DATA_DIR) / "examples"
 RECIPE_CACHE_PATH = Path(DATA_DIR) / "recipe_cache.json"
+# Failed fixes per package and error (see save_failure_record).
+FAILURES_PATH = Path(DATA_DIR) / "failures.json"
 MAX_EXAMPLES_PER_AGENT = 100
+# Failed fixes kept per package, sandbox and error; the oldest go first.
+MAX_FAILURES_PER_ERROR = 5
+# The sandbox value of an example whose commands run on every distro.
+ANY_SANDBOX = "any"
 
 
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -188,43 +198,96 @@ def _distinct_words(text: str) -> set:
 def _error_matches(example: "AgentExample", error: str) -> bool:
     """Return True when ``example`` was learned from this kind of error.
 
-    Its ``error_pattern`` regex matches the error, or at least 60% (and
-    at least two) of the distinctive words of its error text occur in
-    the error.
+    An example with a valid regex of today's form decides by the regex
+    alone. Its stored line can share most words with another error
+    (meson's "C header 'zlib.h' not found" and the libcap example's
+    "C header 'sys/capability.h' not found"), so a word match brought
+    the wrong fix. An older auto example, whose pattern is the escaped
+    head of the whole message, matches when its error text (24
+    characters or more, with an error word) occurs in the error, or
+    when at least 60% (and at least two) of the distinctive words of
+    its stored error line do.
     """
     pattern = example.error_pattern or ""
     # The failed command is not part of the error: two packages that
-    # ran the same `cmake ..` failed for different reasons.
-    error_text = strip_failure_prefix(error)
+    # ran the same `cmake ..` failed for different reasons. Go's
+    # download lines are progress, never the error.
+    error_text = strip_go_download_noise(strip_failure_prefix(error))
     # An older auto example escaped the head of the whole message, so
     # its pattern starts with "Build command failed: <cmd> (exit N) - ".
     # The rest is the error itself; it matches the same error from any
     # command. A head cut inside the command holds no error text.
     old_style = pattern.startswith("Build\\ command\\ failed:")
+    if pattern and not old_style:
+        try:
+            return bool(re.search(pattern, error_text, re.IGNORECASE))
+        except re.error:
+            pass
     core = strip_failure_prefix(_unescape_pattern(pattern)).strip()
     if core.lower().startswith("build command failed:"):
         core = ""
-    if pattern and not old_style:
-        try:
-            if re.search(pattern, error_text, re.IGNORECASE):
-                return True
-        except re.error:
-            pass
     # The head cut can leave only a generic compiler phrase ("In file
     # included fr"), which every C error contains; 24 characters keep
-    # a real error text ("configure: error: NOT FOUND!").
-    if len(core) >= 24 and core.lower() in error_text.lower():
+    # a real error text ("configure: error: NOT FOUND!"). A text with no
+    # error word (a download line) is no key.
+    core = strip_go_download_noise(core).strip()
+    if (
+        len(core) >= 24
+        and has_error_line(core)
+        and core.lower() in error_text.lower()
+    ):
         return True
     # Word overlap uses the error text only: words of the failed command
     # (buildvcs, false) say nothing about the error.
     ctx = example.raw.get("error_context", {}) or {}
-    words = _distinct_words(
-        strip_failure_prefix(ctx.get("error_message") or "") or core
-    )
-    if len(words) < 2:
+    key_text = strip_failure_prefix(ctx.get("error_message") or "") or core
+    words = _distinct_words(key_text)
+    if len(words) < 2 or not has_error_line(key_text):
         return False
     found = _distinct_words(error_text)
     return len(words & found) / len(words) >= 0.6
+
+
+# A fix action that runs the Go tool or looks for Go files, and an error
+# that comes from Go. Such a fix helps only a Go build: a CMake run
+# whose `cd build` failed got the Go example that looks for go.mod.
+_GO_FIX_RE = re.compile(r"(?:^|&&|;|\s)go\s|go\.mod|\.go\b")
+_GO_ERROR_RE = re.compile(
+    r"\.go\b|go\.(?:mod|sum)\b|(?m:^go: )|"
+    r"\bgo (?:build|mod|get|install|run|generate|vet)\b"
+)
+
+
+def _go_only_fix(example: "AgentExample") -> bool:
+    """Return True when an example's fix runs Go or names Go files."""
+    actions = (example.fix or example.solution or {}).get("actions") or []
+    return any(
+        _GO_FIX_RE.search(str(a.get("command") or a.get("path") or ""))
+        for a in actions
+        if isinstance(a, dict)
+    )
+
+
+def _norm_main_path(path: Any) -> str:
+    """Return a Go main package path in one form ("cmd/x", ".")."""
+    text = str(path or "").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/") or "."
+
+
+def _main_path_shape(path: Any) -> str:
+    """Return "root", "cmd" (under cmd/) or "other" for a main package."""
+    text = _norm_main_path(path)
+    if text == ".":
+        return "root"
+    return "cmd" if text.startswith("cmd/") else "other"
+
+
+def _norm_dir(path: Any) -> str:
+    """Return a module or build-root directory in one form ("" = root)."""
+    text = _norm_main_path(path)
+    return "" if text == "." else text
 
 
 @dataclass
@@ -326,6 +389,11 @@ class AgentExample:
                 actions_text += f"\n  - create: {action.get('path', '')}"
             elif atype == "patch":
                 actions_text += f"\n  - patch: {action.get('file', 'repo')}"
+            elif atype == "plan_command":
+                actions_text += (
+                    f"\n  - plan: `{action.get('replaces', '')}` -> "
+                    f"`{action.get('command', '')}`"
+                )
 
         strategy = fix_data.get("strategy", fix_data.get("analysis", "N/A"))
         return (
@@ -508,9 +576,10 @@ class AgentMemory:
             ex_sandbox = (
                 ex.sandbox or ex.raw.get("sandbox", "") or "alpine-riscv64"
             )
-            return ex_sandbox == ctx_sandbox
+            return ex_sandbox in (ctx_sandbox, ANY_SANDBOX)
 
         candidates = [ex for ex in self.examples if _sandbox_ok(ex)]
+        in_sandbox = len(candidates)
         # Only examples that match the case: a fixer example for the
         # same kind of error, a scout plan for the same build system.
         # Without this, every candidate scored above zero and the first
@@ -526,9 +595,13 @@ class AgentMemory:
                 for ex in candidates
                 if (ex.fix or ex.solution or {}).get("actions")
             ]
+        build_system = context.get("build_system")
         if self.agent_type == "fixer" and error:
             candidates = [ex for ex in candidates if _error_matches(ex, error)]
-        build_system = context.get("build_system")
+            if build_system not in (None, "", "go", "unknown") and not (
+                _GO_ERROR_RE.search(error)
+            ):
+                candidates = [ex for ex in candidates if not _go_only_fix(ex)]
         if (
             self.agent_type == "scout"
             and build_system
@@ -541,27 +614,51 @@ class AgentMemory:
                 == build_system
             ]
         if not candidates:
-            # Nothing matches the active distro — better to inject zero
-            # examples (forces the LLM to follow Platform knowledge) than
-            # to bias it with wrong-distro commands. The first build on a
-            # new distro will be example-free; subsequent successful
-            # builds will populate the few-shot store.
+            # Nothing matches — better to inject zero examples (forces
+            # the LLM to follow Platform knowledge) than to bias it with
+            # wrong-distro commands or another error's fix.
+            reason = (
+                "match this case"
+                if in_sandbox
+                else f"exist for sandbox '{ctx_sandbox}'"
+            )
             logger.info(
-                f"No {self.agent_type} examples for sandbox '{ctx_sandbox}'; "
-                "returning empty (will rely on Platform knowledge in prompt)."
+                f"No {self.agent_type} examples {reason}; returning empty "
+                "(will rely on Platform knowledge in prompt)."
             )
             return []
 
+        # An example of the same package comes first, then the score,
+        # then the newest example; without the date, equal scores kept
+        # the file order and the first two examples won every time.
+        repo = str(context.get("repo_name") or "").lower()
         scored = [
-            (self._calculate_relevance(ex, context), ex) for ex in candidates
+            (
+                1 if repo and (ex.repo_name or "").lower() == repo else 0,
+                self._raw_relevance(ex, context),
+                ex.timestamp or "",
+                ex,
+            )
+            for ex in candidates
         ]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [ex for score, ex in scored[:max_examples] if score > 0]
+        scored.sort(key=lambda item: item[:3], reverse=True)
+        return [item[3] for item in scored[:max_examples] if item[1] > 0]
 
     def _calculate_relevance(
         self, example: AgentExample, context: Dict[str, Any]
     ) -> float:
         """Calculate relevance score. Supports keyword + regex matching."""
+        return min(self._raw_relevance(example, context), 1.0)
+
+    def _raw_relevance(
+        self, example: AgentExample, context: Dict[str, Any]
+    ) -> float:
+        """Return the uncapped relevance score that ranks the examples.
+
+        The layout terms count only when both the context and the
+        example name the fact: main package +0.3, module directory and
+        nested build root +0.2 each, cgo +0.1.
+        """
         score = 0.0
         ex_bs = example.build_system or example.context.get("build_system", "")
         ex_trigger = example.trigger or example.context or {}
@@ -596,16 +693,25 @@ class AgentMemory:
             if context["has_main"] == ex_has_main:
                 score += 0.1
 
-        ctx_md = context.get("module_dir", "")
-        ex_md = ex_trigger.get(
-            "module_dir", example.context.get("module_dir", "")
-        )
-        if ctx_md and ex_md and ctx_md == ex_md:
-            score += 0.15
-        elif ctx_md and ex_md:
-            score += 0.05
+        for key, weight, norm in (
+            ("main_path", 0.3, _norm_main_path),
+            ("module_dir", 0.2, _norm_dir),
+            ("nested_root", 0.2, _norm_dir),
+        ):
+            if key in context and key in ex_trigger:
+                if norm(context[key]) == norm(ex_trigger[key]):
+                    score += weight
+                elif key == "main_path" and _main_path_shape(
+                    context[key]
+                ) == _main_path_shape(ex_trigger[key]):
+                    # Another main package of the same shape: both at
+                    # the root, or both under cmd/.
+                    score += 0.15
 
-        if context.get("has_cgo") and "cgo" in ex_tags:
+        if "has_cgo" in context and "has_cgo" in ex_trigger:
+            if bool(context["has_cgo"]) == bool(ex_trigger["has_cgo"]):
+                score += 0.1
+        elif context.get("has_cgo") and "cgo" in ex_tags:
             score += 0.2
 
         # Sandbox / distro match (apk commands won't run on Debian and
@@ -626,13 +732,13 @@ class AgentMemory:
             or example.raw.get("sandbox", "")
             or "alpine-riscv64"
         )
-        if ctx_sandbox and ex_sandbox:
+        if ctx_sandbox and ex_sandbox and ex_sandbox != ANY_SANDBOX:
             if ctx_sandbox == ex_sandbox:
                 score += 0.25
             else:
                 score -= 0.35
 
-        return min(score, 1.0)
+        return score
 
     def format_examples_for_prompt(
         self, examples: List[AgentExample], max_chars: int = 3000
@@ -643,10 +749,17 @@ class AgentMemory:
         so earlier (higher-ranked) examples win. The cap counts the
         example text only, not the header line or the separators.
         """
+        return self._render_examples(examples, max_chars)[0]
+
+    def _render_examples(
+        self, examples: List[AgentExample], max_chars: int
+    ) -> tuple:
+        """Return the prompt section and the ids of the examples in it."""
         if not examples:
-            return ""
+            return "", ()
 
         sections = [f"# Few-Shot Examples ({self.agent_type})\n"]
+        shown = []
         total_chars = 0
 
         for example in examples:
@@ -654,9 +767,10 @@ class AgentMemory:
             if total_chars + len(text) > max_chars:
                 break
             sections.append(text)
+            shown.append(example.id)
             total_chars += len(text)
 
-        return "\n".join(sections)
+        return "\n".join(sections), tuple(shown)
 
     def save_learned_example(self, example_data: Dict[str, Any]) -> bool:
         """Save an auto-learned example to the agent's JSON file.
@@ -700,28 +814,39 @@ class AgentMemory:
                     example_data["sandbox"] = (
                         f"{get_active_profile().name}-riscv64"
                     )
-                if self._is_duplicate(example_data, examples=loaded):
+                stale = self._refresh_index(examples_list, example_data)
+                if stale is None and self._is_duplicate(
+                    example_data, examples=loaded
+                ):
                     logger.info(
                         "Skipping duplicate example: %s",
                         example_data.get("name"),
                     )
                     return False
 
-                # Use max existing suffix + 1, not count + 1: after pruning
-                # removes old auto examples, a count-based id would collide
-                # with a surviving one.
-                prefix = f"{self.agent_type}-auto-"
-                max_num = 0
-                for ex in loaded:
-                    if ex.id.startswith(prefix):
-                        try:
-                            max_num = max(max_num, int(ex.id[len(prefix) :]))
-                        except ValueError:
-                            continue
-                example_data["id"] = f"{prefix}{max_num + 1:03d}"
                 example_data["source"] = "auto"
                 example_data["timestamp"] = datetime.now().strftime("%Y-%m-%d")
-                examples_list.append(example_data)
+                if stale is not None:
+                    # A newer verified run of the same package: its plan
+                    # and layout replace the old ones under the old id.
+                    example_data["id"] = examples_list[stale].get("id")
+                    examples_list[stale] = example_data
+                else:
+                    # Use max existing suffix + 1, not count + 1: after
+                    # pruning removes old auto examples, a count-based id
+                    # would collide with a surviving one.
+                    prefix = f"{self.agent_type}-auto-"
+                    max_num = 0
+                    for ex in loaded:
+                        if ex.id.startswith(prefix):
+                            try:
+                                max_num = max(
+                                    max_num, int(ex.id[len(prefix) :])
+                                )
+                            except ValueError:
+                                continue
+                    example_data["id"] = f"{prefix}{max_num + 1:03d}"
+                    examples_list.append(example_data)
 
                 examples_list = self._prune_examples_list(examples_list)
                 data["examples"] = examples_list
@@ -736,6 +861,37 @@ class AgentMemory:
         except Exception as e:
             logger.error(f"Failed to save learned example: {e}")
             return False
+
+    def _refresh_index(
+        self, examples_list: List[Dict[str, Any]], new_data: Dict[str, Any]
+    ) -> Optional[int]:
+        """Return the index of an auto example that ``new_data`` replaces.
+
+        Scout and builder only: an auto example of the same package,
+        build system and sandbox whose commands or trigger differ from
+        the new ones. A new example without commands replaces nothing.
+        """
+        if self.agent_type not in ("scout", "builder"):
+            return None
+        new_cmds = self._extract_commands(new_data)
+        if not new_cmds:
+            return None
+        for index, item in enumerate(examples_list):
+            if not isinstance(item, dict) or item.get("source") != "auto":
+                continue
+            if (
+                item.get("repo_name") != new_data.get("repo_name")
+                or item.get("build_system") != new_data.get("build_system")
+                or (item.get("sandbox") or "alpine-riscv64")
+                != new_data.get("sandbox")
+            ):
+                continue
+            if self._extract_commands(item) != new_cmds or (
+                item.get("trigger") != new_data.get("trigger")
+            ):
+                return index
+            return None
+        return None
 
     def _is_duplicate(
         self,
@@ -767,11 +923,19 @@ class AgentMemory:
             )
 
             # Different sandbox → never a duplicate (apk vs apt differ).
-            if new_sandbox and ex_sandbox and new_sandbox != ex_sandbox:
+            if (
+                new_sandbox
+                and ex_sandbox
+                and new_sandbox != ex_sandbox
+                and ANY_SANDBOX not in (new_sandbox, ex_sandbox)
+            ):
                 continue
 
+            # One run can teach fixes for several errors, so the fixer
+            # store dedups on the error pattern alone (below).
             if (
-                ex_repo
+                self.agent_type != "fixer"
+                and ex_repo
                 and new_repo
                 and ex_repo == new_repo
                 and ex_bs == new_bs
@@ -926,6 +1090,21 @@ def _default_sandbox() -> str:
     return sandbox
 
 
+def recall_sandboxes() -> List[str]:
+    """Return the sandbox keys whose recipes a run can reuse, in order.
+
+    The active sandbox first, then the same distro on the other target
+    (QEMU or native): the commands are the same, only the machine
+    differs.
+    """
+    active = _default_sandbox()
+    suffix = "-native"
+    other = (
+        active[: -len(suffix)] if active.endswith(suffix) else active + suffix
+    )
+    return [active, other]
+
+
 def get_cached_recipe(
     repo_name: str,
     architecture: str = "riscv64",
@@ -989,6 +1168,8 @@ def save_to_recipe_cache(
     sandbox: Optional[str] = None,
     recipe_markdown: Optional[str] = None,
     verification: Optional[Dict[str, Any]] = None,
+    layout: Optional[Dict[str, Any]] = None,
+    machine: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Upsert a package recipe in the cache, scoped per sandbox.
 
@@ -1020,6 +1201,12 @@ def save_to_recipe_cache(
             and source commit are stored, so a cache hit can say
             whether riscv64 output was proven. Entries written before
             verification existed have no such record.
+        layout: The layout facts of the build (main package, module or
+            build root, cgo, build environment), as in the scout
+            trigger; a later run compares them before it reuses the
+            plan.
+        machine: The ``-march``/``-mcpu`` value the plan compiles for,
+            when it names one.
 
     Returns:
         True if the cache was written successfully, else False.
@@ -1070,6 +1257,10 @@ def save_to_recipe_cache(
                     "reason": verification.get("reason"),
                     "source_commit": verification.get("source_commit"),
                 }
+            if layout:
+                recipe["layout"] = layout
+            if machine:
+                recipe["machine"] = machine
 
             # Ensure nested layout (entry is a dict keyed by sandbox)
             pkg_entry = packages.get(repo_name)
@@ -1095,6 +1286,138 @@ def save_to_recipe_cache(
         return True
     except Exception as e:
         logger.error(f"Failed to save recipe cache for {repo_name}: {e}")
+        return False
+
+
+def _read_failures() -> Dict[str, Any]:
+    """Return the failure memory file, or an empty one."""
+    if not FAILURES_PATH.exists():
+        return {"version": "1.0", "packages": {}}
+    with open(FAILURES_PATH, "r") as f:
+        return json.load(f)
+
+
+def load_failure_records(
+    repo_name: str, sandbox: Optional[str] = None
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return the failed fixes recorded for a package, keyed by error.
+
+    Args:
+        repo_name: The repository name key.
+        sandbox: Sandbox key; defaults to the active platform.
+
+    Returns:
+        ``{error_key: [record, ...]}``; empty when nothing is recorded
+        or the file cannot be read.
+    """
+    if sandbox is None:
+        sandbox = _default_sandbox()
+    try:
+        entry = (
+            _read_failures().get("packages", {}).get(repo_name) or {}
+        ).get(sandbox) or {}
+    except Exception as e:
+        logger.error(f"Failed to load the failure memory: {e}")
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+def save_failure_record(
+    repo_name: str,
+    error_key: str,
+    record: Dict[str, Any],
+    sandbox: Optional[str] = None,
+) -> bool:
+    """Add a fix that did not change the error to the failure memory.
+
+    The memory is ``failures.json`` next to the recipe cache, keyed
+    ``packages[repo][sandbox][error_key]``. A later run of the package
+    shows these fixes to the fixer as tried before. A record with the
+    same strategy replaces the older one, and at most
+    MAX_FAILURES_PER_ERROR records stay per error. Same filelock and
+    atomic write as the recipe cache; never raises.
+
+    Args:
+        repo_name: The repository name key.
+        error_key: The normalized error line the fix addressed.
+        record: ``strategy``, ``commands``, ``error_after`` and ``date``.
+        sandbox: Sandbox key; defaults to the active platform.
+
+    Returns:
+        True if the file was written, else False.
+    """
+    if not repo_name or not error_key:
+        return False
+    if sandbox is None:
+        sandbox = _default_sandbox()
+    lock_path = _lock_path_for(FAILURES_PATH)
+    try:
+        lock = filelock.FileLock(lock_path, timeout=5)
+        with lock:
+            data = _read_failures()
+            data.setdefault("version", "1.0")
+            per_error = (
+                data.setdefault("packages", {})
+                .setdefault(repo_name, {})
+                .setdefault(sandbox, {})
+            )
+            records = [
+                item
+                for item in per_error.get(error_key, [])
+                if item.get("strategy") != record.get("strategy")
+            ]
+            records.append(record)
+            per_error[error_key] = records[-MAX_FAILURES_PER_ERROR:]
+            _atomic_write_json(FAILURES_PATH, data)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save the failure memory of {repo_name}: {e}")
+        return False
+
+
+def mark_recipe_verification(
+    repo_name: str,
+    status: str,
+    reason: str,
+    sandbox: Optional[str] = None,
+) -> bool:
+    """Change the verification verdict of a cached recipe.
+
+    The optimizer uses it when the verified build crashes on the
+    machine (libwebp: SIGILL in four runs, built for ``rv64gcv`` on a
+    board without V): the entry is no longer verified, so no later run
+    replays it as the plan. Same filelock and atomic write as
+    ``save_to_recipe_cache``; never raises.
+
+    Args:
+        repo_name: The repository name key.
+        status: The new verdict, for example ``crashes``.
+        reason: Why, in one line.
+        sandbox: Sandbox key; defaults to the active platform.
+
+    Returns:
+        True when an entry was changed.
+    """
+    if sandbox is None:
+        sandbox = _default_sandbox()
+    lock_path = _lock_path_for(RECIPE_CACHE_PATH)
+    try:
+        lock = filelock.FileLock(lock_path, timeout=5)
+        with lock:
+            cache = load_recipe_cache()
+            entry = (cache.get("packages", {}).get(repo_name) or {}).get(
+                sandbox
+            )
+            if not isinstance(entry, dict):
+                return False
+            verification = dict(entry.get("verification") or {})
+            verification.update(status=status, reason=reason[:300])
+            entry["verification"] = verification
+            _atomic_write_json(RECIPE_CACHE_PATH, cache)
+        logger.info(f"Recipe cache: {repo_name} [{sandbox}] is now {status}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark the recipe of {repo_name}: {e}")
         return False
 
 
@@ -1321,6 +1644,16 @@ def reload_agent_memory(agent_type: str) -> None:
         MEMORY_INSTANCES[agent_type] = AgentMemory(agent_type)
 
 
+class FewShotText(str):
+    """A few-shot prompt section; ``ids`` names the examples in it.
+
+    A plain ``str`` everywhere else, so callers and tests that treat
+    the section as text keep working; the audit log reads ``ids``.
+    """
+
+    ids: tuple = ()
+
+
 def format_few_shot_examples(
     agent_type: str,
     context: Dict[str, Any],
@@ -1338,11 +1671,15 @@ def format_few_shot_examples(
         max_chars: Maximum characters for the examples section.
 
     Returns:
-        A formatted string for prompt inclusion.
+        A formatted string for prompt inclusion: a ``FewShotText`` whose
+        ``ids`` names the examples it holds.
     """
     memory = get_agent_memory(agent_type)
     examples = memory.get_relevant_examples(context, max_examples)
-    return memory.format_examples_for_prompt(examples, max_chars)
+    text, ids = memory._render_examples(examples, max_chars)
+    section = FewShotText(text)
+    section.ids = ids
+    return section
 
 
 def save_learned_example(

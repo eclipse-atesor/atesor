@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -462,6 +463,50 @@ class TestPackagerEdgeCases(unittest.TestCase):
         self.assertEqual(skipped, 1)
         with zipfile.ZipFile(zip_path) as zf:
             self.assertNotIn("r/link/secret.txt", zf.namelist())
+
+    def test_links_inside_the_tree_stay_links(self) -> None:
+        """lz4: the stable names are links into cachedObjs/<hash>/."""
+        import stat
+        import subprocess
+
+        repo = os.path.join(self.root, "lz4")
+        cached = os.path.join(repo, "lib", "cachedObjs", "c325")
+        os.makedirs(cached)
+        with open(os.path.join(cached, "liblz4.so.1.10.0"), "wb") as f:
+            f.write(b"\x7fELF")
+        os.symlink(
+            "cachedObjs/c325/liblz4.so.1.10.0",
+            os.path.join(repo, "lib", "liblz4.so.1.10.0"),
+        )
+        os.symlink("liblz4.so.1.10.0", os.path.join(repo, "lib", "liblz4.so"))
+        os.symlink("lib/cachedObjs", os.path.join(repo, "objs"))
+        # Links that leave the tree, or whose text is absolute, stay out.
+        os.symlink("../../outside", os.path.join(repo, "lib", "up"))
+        os.symlink(cached, os.path.join(repo, "absolute"))
+        zip_path = os.path.join(self.root, "out.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            added, skipped = _add_repo_tree(zf, repo, "lz4")
+        self.assertEqual((added, skipped), (4, 2))
+        with zipfile.ZipFile(zip_path) as zf:
+            links = {
+                info.filename: zf.read(info).decode()
+                for info in zf.infolist()
+                if stat.S_ISLNK(info.external_attr >> 16)
+            }
+        self.assertEqual(
+            links,
+            {
+                "lz4/lib/liblz4.so.1.10.0": "cachedObjs/c325/liblz4.so.1.10.0",
+                "lz4/lib/liblz4.so": "liblz4.so.1.10.0",
+                "lz4/objs": "lib/cachedObjs",
+            },
+        )
+        unzip = shutil.which("unzip")
+        if unzip:
+            out = os.path.join(self.root, "unpacked")
+            subprocess.run([unzip, "-q", zip_path, "-d", out], check=True)
+            with open(os.path.join(out, "lz4", "lib", "liblz4.so"), "rb") as f:
+                self.assertEqual(f.read(), b"\x7fELF")
 
     def test_unreadable_file_is_skipped(self) -> None:
         repo = os.path.join(self.root, "repo")

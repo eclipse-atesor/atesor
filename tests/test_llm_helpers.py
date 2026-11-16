@@ -78,6 +78,120 @@ def _make_invoke(responses):
     return invoke_fn, calls
 
 
+class TestProviderFaults(unittest.TestCase):
+    """A guard verdict or an empty reply at the cap is no model answer."""
+
+    def _call(self, responses, llm=None, fallback_llms=None):
+        seen = []
+        invoke, calls = _make_invoke(responses)
+
+        def recording(llm, messages, timeout=120):
+            seen.append((llm.model_name, len(messages)))
+            return invoke(llm, messages, timeout)
+
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=recording,
+                llm=llm or SimpleNamespace(model_name="primary"),
+                fallback_llms=fallback_llms or [],
+                prompt="p",
+                validator=lambda d: ValidationResult.good(),
+                max_retries=0,
+            )
+        return out, seen
+
+    def test_a_guard_verdict_asks_the_same_model_once_more(self) -> None:
+        """35 'User Safety: safe' replies in the free-model logs."""
+        out, seen = self._call(
+            ["User Safety: safe", '{"x": 1}'],
+            fallback_llms=[SimpleNamespace(model_name="backup")],
+        )
+        self.assertEqual(out.data, {"x": 1})
+        # Same model, and no critique turn in the conversation.
+        self.assertEqual(seen, [("primary", 1), ("primary", 1)])
+
+    def test_a_second_fault_rotates(self) -> None:
+        out, seen = self._call(
+            ["User Safety: safe", "User Safety: safe", '{"x": 1}'],
+            fallback_llms=[SimpleNamespace(model_name="backup")],
+        )
+        self.assertEqual(out.data, {"x": 1})
+        self.assertEqual(
+            [m for m, _ in seen], ["primary", "primary", "backup"]
+        )
+
+    def test_an_empty_reply_at_the_cap_asks_once_more(self) -> None:
+        """81 empty replies used all 8192 output tokens."""
+        llm = SimpleNamespace(model_name="primary", max_tokens=8192)
+        empty = SimpleNamespace(
+            content="",
+            usage_metadata={"input_tokens": 900, "output_tokens": 8192},
+        )
+        responses = iter([empty, SimpleNamespace(content='{"x": 1}')])
+
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            out = llm_call_with_validation(
+                invoke_fn=lambda llm, messages, timeout=120: next(responses),
+                llm=llm,
+                prompt="p",
+                validator=lambda d: ValidationResult.good(),
+                max_retries=0,
+            )
+        self.assertEqual(out.data, {"x": 1})
+        self.assertEqual(out.attempts, 2)
+
+    def test_the_stop_reason_shows_the_cap(self) -> None:
+        from src.llm_helpers import _hit_output_cap
+
+        stopped = SimpleNamespace(
+            response_metadata={"finish_reason": "length"}
+        )
+        self.assertTrue(_hit_output_cap(stopped, SimpleNamespace(), 0))
+        self.assertFalse(
+            _hit_output_cap(SimpleNamespace(), SimpleNamespace(), 0)
+        )
+
+
+class TestDailyCapReset(unittest.TestCase):
+    """The reset time of the daily cap is kept for main.py."""
+
+    def _hit(self, message: str) -> None:
+        invoke, _ = _make_invoke([RuntimeError(message)])
+        with mock.patch("src.llm_helpers.log_llm_call"):
+            llm_call_with_validation(
+                invoke_fn=invoke,
+                llm=SimpleNamespace(model_name="primary"),
+                prompt="p",
+                validator=lambda d: ValidationResult.good(),
+            )
+
+    def test_the_header_gives_the_reset_time(self) -> None:
+        from src.llm_helpers import daily_cap_reset_at
+
+        self.assertIsNone(daily_cap_reset_at())
+        self._hit(
+            "Error code: 429 - {'error': {'message': 'Rate limit exceeded: "
+            "free-models-per-day. Add 10 credits', 'code': 429, "
+            "'metadata': {'headers': {'X-RateLimit-Limit': '50', "
+            "'X-RateLimit-Remaining': '0', "
+            "'X-RateLimit-Reset': '1790985600000'}}}}"
+        )
+        self.assertEqual(daily_cap_reset_at(), 1790985600.0)
+
+    def test_without_the_header_the_cap_resets_at_midnight_utc(self) -> None:
+        import datetime as dt
+
+        from src.llm_helpers import daily_cap_reset_at
+
+        self._hit("Rate limit exceeded: free-models-per-day")
+        reset = dt.datetime.fromtimestamp(
+            daily_cap_reset_at(), dt.timezone.utc
+        )
+        self.assertEqual((reset.hour, reset.minute, reset.second), (0, 0, 0))
+        now = dt.datetime.now(dt.timezone.utc)
+        self.assertLess(reset - now, dt.timedelta(days=1, seconds=1))
+
+
 class TestRateLimitHandling(unittest.TestCase):
     """Daily-cap fast-fail, Retry-After honoring, and timeout rotation."""
 

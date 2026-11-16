@@ -322,6 +322,17 @@ class TestOpenRouterFallbackIds(unittest.TestCase):
 
     @mock.patch.dict(
         os.environ,
+        {"OPENROUTER_FALLBACK_MODELS": "a/x:free, openrouter/auto"},
+        clear=False,
+    )
+    def test_auto_router_is_dropped_from_the_env_list(self) -> None:
+        """libwebp, brotli: 402 errors and $0.19 of optimizer calls."""
+        self.assertEqual(
+            _openrouter_fallback_ids(), ["a/x:free", OPENROUTER_FREE_ROUTER]
+        )
+
+    @mock.patch.dict(
+        os.environ,
         {"OPENROUTER_FALLBACK_MODELS": "a/x:free, b/y:free"},
         clear=False,
     )

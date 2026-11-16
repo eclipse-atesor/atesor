@@ -42,7 +42,11 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .tools import execute_command
+from .tools import (
+    ensure_build_container,
+    execute_command,
+    infrastructure_fault,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -657,13 +661,28 @@ def run_jobs(
     # validate=False: the runner is a fixed program. Every workload
     # command it runs was built by Atesor or passed
     # check_workload_command (an agent's program run).
+    argv = ["python3", "-c", _RUNNER_PROGRAM, json.dumps(spec)]
     result = execute_command(
-        ["python3", "-c", _RUNNER_PROGRAM, json.dumps(spec)],
-        timeout=timeout,
-        validate=False,
-        extra_env=extra_env,
+        argv, timeout=timeout, validate=False, extra_env=extra_env
     )
     payload = _parse_runner_output(result.stdout)
+    # A stopped container or a dropped ssh session (opus: the host slept
+    # 3 h 39 min during a measurement) gives no result. The runner only
+    # reads and times, so one more session is safe.
+    fault = "" if payload is not None else infrastructure_fault(result)
+    if fault:
+        logger.warning(
+            f"Measurement session hit an infrastructure fault ({fault}); "
+            f"the build container is {ensure_build_container()}; running "
+            "the session once more"
+        )
+        result = execute_command(
+            argv, timeout=timeout, validate=False, extra_env=extra_env
+        )
+        payload = _parse_runner_output(result.stdout)
+        fault = "" if payload is not None else infrastructure_fault(result)
+    if payload is None and fault:
+        return {"runs": [], "error": f"infrastructure fault: {fault}"}
     if payload is None:
         detail = (result.stderr or result.stdout or "").strip()[-300:]
         return {

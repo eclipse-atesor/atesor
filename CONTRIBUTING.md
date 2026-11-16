@@ -80,6 +80,11 @@ Comments: keep them minimal. Add one only when the *why* is non-obvious (a hidde
 
 Linters available (not enforced in CI yet): `black`, `flake8`. Both are listed in `requirements.txt`.
 
+```bash
+python3 -m flake8 src tests && python3 -m black --check src tests 
+python3 -m isort --check-only src tests
+```
+
 ---
 
 ## Architecture invariants

@@ -1577,6 +1577,33 @@ class TestRunAgent(_MainTestCase):
         ):
             self.assertEqual(1, main.run_agent(_REPO_URL))
 
+    def test_a_failed_run_after_the_daily_cap_is_labelled_quota(self) -> None:
+        """The batch reads the reset time and the label from the tail."""
+        from src import llm_helpers
+
+        def stream_factory(state):
+            state.build_status = BuildStatus.FAILED
+            yield {"Builder": state}
+
+        output = io.StringIO()
+        with (
+            self._patched_main_paths(),
+            self._patched_graph(_FakeApp(stream_factory)),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
+            mock.patch.object(main, "save_porting_outputs"),
+            mock.patch.object(llm_helpers, "_daily_cap_reset", 1790985600.0),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(1, main.run_agent(_REPO_URL))
+        lines = output.getvalue().strip().splitlines()
+        self.assertEqual(
+            lines[-2:],
+            ["ATESOR_QUOTA_RESET 1790985600", "ATESOR_OUTCOME QUOTA"],
+        )
+
     def test_run_agent_success_packages_artifacts(self) -> None:
         package_build = mock.MagicMock(return_value="pkg.zip")
 
@@ -1763,6 +1790,30 @@ class TestRunAgent(_MainTestCase):
             ),
         ):
             self.assertEqual(130, main.run_agent(_REPO_URL))
+
+    def test_an_interrupted_run_writes_its_record(self) -> None:
+        """The batch's SIGTERM ends a run as an interrupt (nushell)."""
+
+        def stream_factory(state):
+            state.build_count = 3
+            yield {"builder_node": state}
+            raise KeyboardInterrupt
+
+        record = mock.MagicMock()
+        fake_graph = SimpleNamespace(
+            app=_FakeApp(stream_factory), _log_data_effect=record
+        )
+        with (
+            mock.patch.dict(sys.modules, {"src.graph": fake_graph}),
+            mock.patch(
+                "src.platforms.get_active_profile",
+                return_value=self._profile(),
+            ),
+        ):
+            self.assertEqual(130, main.run_agent(_REPO_URL))
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0].build_count, 3)
+        self.assertEqual(record.call_args.kwargs, {"outcome": "interrupted"})
 
     def test_run_agent_unexpected_exception_returns_one(self) -> None:
         def stream_factory(_state):
@@ -2605,6 +2656,69 @@ class TestMainCli(_MainTestCase):
             package=True,
         )
 
+    def test_cli_replan_reaches_run_agent(self) -> None:
+        """--replan plans without the data of earlier runs."""
+        code, patches = self._call_cli(
+            [
+                "--repo",
+                _REPO_URL,
+                "--force",
+                "--replan",
+                "--max-attempts",
+                "7",
+            ],
+            cache={"build_system": "cmake"},
+        )
+
+        self.assertEqual(0, code)
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=7,
+            verbose=False,
+            package=False,
+            replan=True,
+        )
+
+    def test_cli_replan_skips_the_cached_recipe_exit(self) -> None:
+        """--replan without --force builds, also on a verified cache hit."""
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--replan"],
+            cache={
+                "build_system": "cmake",
+                "verification": {"status": "verified"},
+            },
+        )
+
+        self.assertEqual(0, code)
+        patches["materialize"].assert_not_called()
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            replan=True,
+        )
+
+    def test_optimize_with_replan_plans_again(self) -> None:
+        """--optimize --replan does not take the plan from the cache."""
+        code, patches = self._call_cli(
+            ["--repo", _REPO_URL, "--optimize", "--replan"],
+            cache={
+                "build_system": "cmake",
+                "verification": {"status": "verified"},
+            },
+        )
+
+        self.assertEqual(0, code)
+        patches["run_agent"].assert_called_once_with(
+            repo_url=_REPO_URL,
+            max_attempts=5,
+            verbose=False,
+            package=False,
+            optimize=True,
+            replan=True,
+        )
+
     def test_cli_key_failure_stops_before_setup(self) -> None:
         code, patches = self._call_cli(
             ["--repo", _REPO_URL],
@@ -3294,3 +3408,22 @@ class TestPerformanceMode(_MainTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSigtermStopsLikeCtrlC(unittest.TestCase):
+    """SIGTERM from the batch kill runs the interrupt cleanup."""
+
+    def test_the_handler_raises_and_is_put_back(self) -> None:
+        import signal
+
+        before = signal.getsignal(signal.SIGTERM)
+        previous = main._stop_on_sigterm()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                main._raise_interrupt(signal.SIGTERM, None)
+            self.assertIs(
+                signal.getsignal(signal.SIGTERM), main._raise_interrupt
+            )
+        finally:
+            main._restore_sigterm(previous)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
