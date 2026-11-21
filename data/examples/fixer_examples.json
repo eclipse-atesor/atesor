@@ -306,6 +306,98 @@
       "sandbox": "alpine-riscv64"
     },
     {
+      "id": "fixer-012",
+      "name": "CGO Compilation - Missing GCC (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "gcc"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "C compiler \"gcc\" not found|\\bgcc: (command )?not found",
+      "error_context": {
+        "error_message": "cgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH"
+      },
+      "fix": {
+        "analysis": "The package uses cgo and no C compiler is installed.",
+        "strategy": "Install build-essential (gcc, g++, make)",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends build-essential"
+          }
+        ]
+      },
+      "reasoning": "cgo needs a C compiler; build-essential provides gcc on Debian."
+    },
+    {
+      "id": "fixer-013",
+      "name": "SQLite CGO Dependency Missing (Debian)",
+      "tags": [
+        "go",
+        "cgo",
+        "sqlite"
+      ],
+      "build_system": "go",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "sqlite3\\.h: No such file or directory",
+      "error_context": {
+        "error_message": "fatal error: sqlite3.h: No such file or directory"
+      },
+      "fix": {
+        "analysis": "go-sqlite3 compiles SQLite through cgo and needs its headers.",
+        "strategy": "Install the SQLite development package",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends libsqlite3-dev"
+          }
+        ]
+      },
+      "reasoning": "Debian ships sqlite3.h in libsqlite3-dev."
+    },
+    {
+      "id": "fixer-014",
+      "name": "Missing CMake (Debian)",
+      "tags": [
+        "cmake",
+        "missing-tool"
+      ],
+      "build_system": "cmake",
+      "source": "manual",
+      "sandbox": "debian-riscv64",
+      "error_pattern": "\\bcmake:? (command )?not found",
+      "error_context": {
+        "error_message": "bash: line 1: cmake: command not found"
+      },
+      "fix": {
+        "analysis": "CMake is not installed.",
+        "strategy": "Install cmake",
+        "actions": [
+          {
+            "type": "command",
+            "command": "apt-get update"
+          },
+          {
+            "type": "command",
+            "command": "apt-get install -y --no-install-recommends cmake"
+          }
+        ]
+      },
+      "reasoning": "Debian's cmake package provides the cmake command."
+    },
+    {
       "name": "Auto: fping - Generate the missing configure script wi",
       "tags": [
         "autotools",
@@ -800,96 +892,94 @@
       }
     },
     {
-      "id": "fixer-012",
-      "name": "CGO Compilation - Missing GCC (Debian)",
+      "name": "Auto: eBPF-hide-PID - Install make and replace the build command with make",
       "tags": [
         "go",
-        "cgo",
-        "gcc"
+        "auto-fix"
       ],
       "build_system": "go",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "C compiler \"gcc\" not found|\\bgcc: (command )?not found",
+      "repo_name": "eBPF-hide-PID",
+      "error_pattern": "src/bpfmanager\\.go:\\d+(?::\\d+)?:\\ undefined:\\ getdents64objects",
       "error_context": {
-        "error_message": "cgo: C compiler \"gcc\" not found: exec: \"gcc\": executable file not found in $PATH"
+        "error_message": "src/bpfmanager.go:22:15: undefined: getdents64Objects"
       },
       "fix": {
-        "analysis": "The package uses cgo and no C compiler is installed.",
-        "strategy": "Install build-essential (gcc, g++, make)",
+        "strategy": "Install make and replace the build command with make",
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update"
+            "command": "apk add make"
           },
           {
-            "type": "command",
-            "command": "apt-get install -y --no-install-recommends build-essential"
+            "type": "plan_command",
+            "replaces": "go build -buildvcs=false -o ebpf-hide-pid ./src",
+            "command": "make"
           }
         ]
       },
-      "reasoning": "cgo needs a C compiler; build-essential provides gcc on Debian."
+      "reasoning": "Auto-learned fix from eBPF-hide-PID.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-21",
+      "id": "fixer-auto-029"
     },
     {
-      "id": "fixer-013",
-      "name": "SQLite CGO Dependency Missing (Debian)",
+      "name": "Auto: eBPF-hide-PID - Install the LLVM toolchain (provides llvm-strip) needed by…",
       "tags": [
         "go",
-        "cgo",
-        "sqlite"
+        "auto-fix"
       ],
       "build_system": "go",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "sqlite3\\.h: No such file or directory",
+      "repo_name": "eBPF-hide-PID",
+      "error_pattern": "error:\\ exec:\\ \"llvm\\-strip\":\\ executable\\ file\\ not\\ found\\ in\\ \\$path",
       "error_context": {
-        "error_message": "fatal error: sqlite3.h: No such file or directory"
+        "error_message": "Error: exec: \"llvm-strip\": executable file not found in $PATH"
       },
       "fix": {
-        "analysis": "go-sqlite3 compiles SQLite through cgo and needs its headers.",
-        "strategy": "Install the SQLite development package",
+        "strategy": "Install the LLVM toolchain (provides llvm-strip) needed by generate_bpf.sh, then re-run make",
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update"
+            "command": "apk update"
           },
           {
             "type": "command",
-            "command": "apt-get install -y --no-install-recommends libsqlite3-dev"
+            "command": "apk add clang llvm"
           }
         ]
       },
-      "reasoning": "Debian ships sqlite3.h in libsqlite3-dev."
+      "reasoning": "Auto-learned fix from eBPF-hide-PID.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-21",
+      "id": "fixer-auto-030"
     },
     {
-      "id": "fixer-014",
-      "name": "Missing CMake (Debian)",
+      "name": "Auto: eBPF-hide-PID - Install libbpf-dev to provide BPF C headers",
       "tags": [
-        "cmake",
-        "missing-tool"
+        "go",
+        "auto-fix"
       ],
-      "build_system": "cmake",
-      "source": "manual",
-      "sandbox": "debian-riscv64",
-      "error_pattern": "\\bcmake:? (command )?not found",
+      "build_system": "go",
+      "repo_name": "eBPF-hide-PID",
+      "error_pattern": "\\S+:\\d+(?::\\d+)?:\\ fatal\\ error:\\ 'bpf/bpf_helpers\\.h'\\ file\\ not\\ found",
       "error_context": {
-        "error_message": "bash: line 1: cmake: command not found"
+        "error_message": "/workspace/repos/eBPF-hide-PID/src/bpf/main.h:2:10: fatal error: 'bpf/bpf_helpers.h' file not found"
       },
       "fix": {
-        "analysis": "CMake is not installed.",
-        "strategy": "Install cmake",
+        "strategy": "Install libbpf-dev to provide BPF C headers",
         "actions": [
           {
             "type": "command",
-            "command": "apt-get update"
-          },
-          {
-            "type": "command",
-            "command": "apt-get install -y --no-install-recommends cmake"
+            "command": "apk add libbpf-dev"
           }
         ]
       },
-      "reasoning": "Debian's cmake package provides the cmake command."
+      "reasoning": "Auto-learned fix from eBPF-hide-PID.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-21",
+      "id": "fixer-auto-031"
     }
   ]
 }

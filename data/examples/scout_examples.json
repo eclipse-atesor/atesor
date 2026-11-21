@@ -2663,6 +2663,44 @@
       "id": "scout-auto-149",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: eBPF-hide-PID (go)",
+      "tags": [
+        "go",
+        "eBPF-hide-PID"
+      ],
+      "build_system": "go",
+      "repo_name": "eBPF-hide-PID",
+      "trigger": {
+        "build_system": "go",
+        "has_main": true,
+        "main_path": "src",
+        "module_dir": "",
+        "has_cgo": false
+      },
+      "plan": {
+        "build_system": "go",
+        "phases": [
+          {
+            "name": "setup",
+            "commands": [
+              "apk update && apk add git go"
+            ]
+          },
+          {
+            "name": "go_prepare_build",
+            "commands": [
+              "make"
+            ]
+          }
+        ]
+      },
+      "reasoning": "Auto-learned from successful eBPF-hide-PID build.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-21",
+      "id": "scout-auto-150"
     }
   ]
 }

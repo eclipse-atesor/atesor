@@ -59405,6 +59405,68 @@
           "source_commit": "79299dce87b0085db0f2f4ef3e9c52cccb49f514"
         }
       }
+    },
+    "eBPF-hide-PID": {
+      "alpine-riscv64": {
+        "repo_url": "https://github.com/Acceis/eBPF-hide-PID",
+        "build_system": "go",
+        "architecture": "riscv64",
+        "sandbox": "alpine-riscv64",
+        "last_built": "2026-11-21T02:09:28.401881",
+        "build_plan": {
+          "phases": [
+            {
+              "name": "setup",
+              "commands": [
+                "apk update && apk add git go"
+              ]
+            },
+            {
+              "name": "pre_go_prepare_build",
+              "commands": [
+                "apk add make",
+                "apk update",
+                "apk add clang llvm",
+                "apk add libbpf-dev"
+              ]
+            },
+            {
+              "name": "go_prepare_build",
+              "commands": [
+                "make"
+              ]
+            }
+          ]
+        },
+        "dependencies": [
+          "clang",
+          "libbpf-dev",
+          "llvm",
+          "make"
+        ],
+        "patches": [],
+        "artifacts": [
+          {
+            "type": "binary",
+            "path": "/workspace/repos/eBPF-hide-PID/bin/hide-pid",
+            "role": "primary"
+          }
+        ],
+        "build_duration_seconds": 400.9,
+        "recipe_file": "output/eBPF-hide-PID_recipe.md",
+        "recipe_markdown": "## Executive Summary\nStatus: **success**. The eBPF-hide-PID build for `riscv64` completed successfully, and the produced BPF binary was verified as a `riscv64` ELF; the portability verdict is successful, with no architecture issues found.\n\n## Prerequisites\nOn the target distro (Alpine Linux):\n```bash\napk update && apk add git go\n```\n```bash\napk add make llvm llvm-strip libbpf-dev\n```\n\n## Build Instructions\nSet up the build environment:\n```bash\napk update && apk add git go\n```\nInstall the BPF build dependencies:\n```bash\napk add make llvm llvm-strip libbpf-dev\n```\nBuild the project:\n```bash\nmake\n```\n\n## Architecture Notes\nNo architecture-specific source changes were required. The project needed the LLVM BPF toolchain and `libbpf-dev` headers to target the BPF/RISC-V architecture; no custom preprocessor macros, SIMD handling, or libc differences were required.\n\n## Verification\nConfirm the binary format:\n```bash\nfile /workspace/repos/eBPF-hide-PID/bin/hide-pid\n```\nConfirm the ELF header architecture:\n```bash\nreadelf -h /workspace/repos/eBPF-hide-PID/bin/hide-pid\n```\n\n## Known Issues & Recommendations\nNo architecture issues were found. Leftover concern: package tests were non-gating and artifact verification was header-based. Recommendation: add a RISC-V CI job and runtime smoke test. Upstream contribution idea: document the Alpine `make`, LLVM, and `libbpf-dev` prerequisites.",
+        "verification": {
+          "status": "verified",
+          "reason": "1 riscv64 ELF build output(s) verified by header",
+          "source_commit": "81755850f02c208c981f53438614c5253a2dcafc"
+        },
+        "layout": {
+          "has_main": true,
+          "main_path": "src",
+          "module_dir": "",
+          "has_cgo": false
+        }
+      }
     }
   }
 }

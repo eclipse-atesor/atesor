@@ -2115,6 +2115,35 @@
       "id": "builder-auto-152",
       "source": "auto",
       "timestamp": "2026-10-17"
+    },
+    {
+      "name": "Auto: eBPF-hide-PID build execution",
+      "tags": [
+        "go",
+        "eBPF-hide-PID"
+      ],
+      "build_system": "go",
+      "repo_name": "eBPF-hide-PID",
+      "phases": [
+        {
+          "name": "setup",
+          "commands": [
+            "apk update && apk add git go"
+          ]
+        },
+        {
+          "name": "go_prepare_build",
+          "commands": [
+            "make"
+          ]
+        }
+      ],
+      "timeout_recommendation": "120s",
+      "reasoning": "Auto-learned build execution from eBPF-hide-PID.",
+      "sandbox": "alpine-riscv64",
+      "source": "auto",
+      "timestamp": "2026-11-21",
+      "id": "builder-auto-153"
     }
   ]
 }
